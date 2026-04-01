@@ -62,6 +62,10 @@ impl InstrumentedDoc {
         Ok(())
     }
 
+    pub fn get_heads(&mut self) -> Vec<automerge::ChangeHash> {
+        self.inner.get_heads()
+    }
+
     pub fn save(&mut self) -> Vec<u8> {
         let start = Instant::now();
         let bytes = self.inner.save();

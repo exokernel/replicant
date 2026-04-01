@@ -48,5 +48,17 @@ fn main() -> Result<()> {
 
     sync_docs(&mut doc_a, &mut state_a, &mut doc_b, &mut state_b)?;
 
+    let heads_a = doc_a.get_heads();
+    let heads_b = doc_b.get_heads();
+
+    if heads_a == heads_b {
+        tracing::info!("convergence: verified");
+    } else {
+        tracing::error!(?heads_a, ?heads_b, "convergence: FAILED");
+    }
+
+    doc_a.save();
+    doc_b.save();
+
     Ok(())
 }
