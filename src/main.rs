@@ -1,8 +1,16 @@
+mod doc;
+
 use anyhow::Result;
-use automerge::{AutoCommit, ReadDoc, ROOT, transaction::Transactable};
+use automerge::ROOT;
+
+use crate::doc::InstrumentedDoc;
 
 fn main() -> Result<()> {
-    let mut doc = AutoCommit::new();
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
+
+    let mut doc = InstrumentedDoc::new();
 
     doc.put(&ROOT, "title", "replicant")?;
     doc.put(&ROOT, "version", 1_u64)?;
@@ -15,6 +23,8 @@ fn main() -> Result<()> {
     println!("title:   {title}");
     println!("version: {version}");
     println!("active:  {active}");
+
+    doc.save();
 
     Ok(())
 }
