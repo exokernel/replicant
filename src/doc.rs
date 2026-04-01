@@ -3,6 +3,7 @@ use std::time::Instant;
 use anyhow::Result;
 use automerge::{
     AutoCommit, AutomergeError, ObjId, Prop, ReadDoc, ScalarValue, Value,
+    sync::{self, SyncDoc},
     transaction::Transactable,
 };
 
@@ -36,6 +37,29 @@ impl InstrumentedDoc {
         prop: P,
     ) -> Result<Option<(Value<'_>, ObjId)>, AutomergeError> {
         self.inner.get(obj, prop)
+    }
+
+    pub fn generate_sync_message(
+        &mut self,
+        sync_state: &mut sync::State,
+    ) -> Option<sync::Message> {
+        let start = Instant::now();
+        let msg = self.inner.sync().generate_sync_message(sync_state);
+        let duration_us = start.elapsed().as_micros();
+        tracing::info!(duration_us, "generate_sync_message");
+        msg
+    }
+
+    pub fn receive_sync_message(
+        &mut self,
+        sync_state: &mut sync::State,
+        msg: sync::Message,
+    ) -> Result<()> {
+        let start = Instant::now();
+        self.inner.sync().receive_sync_message(sync_state, msg)?;
+        let duration_us = start.elapsed().as_micros();
+        tracing::info!(duration_us, "receive_sync_message");
+        Ok(())
     }
 
     pub fn save(&mut self) -> Vec<u8> {
