@@ -1,0 +1,96 @@
+syntax = "proto3";
+
+package replicant.v1;
+
+// ── Orchestrator → Replica ─────────────────────────────────────────────────
+
+service Replica {
+  rpc ApplyOp             (OpRequest)  returns (OpResponse);
+  rpc GetHeads            (Empty)      returns (HeadsResponse);
+  rpc GetStateFingerprint (Empty)      returns (FingerprintResponse);
+  rpc ConnectPeer         (PeerRef)    returns (Empty);
+  rpc Shutdown            (Empty)      returns (Empty);
+}
+
+// ── Replica ↔ Replica ──────────────────────────────────────────────────────
+
+service Sync {
+  // Bidirectional automerge sync stream. Each side sends encoded
+  // automerge::sync::Message bytes. The stream runs until both sides have
+  // nothing left to send.
+  rpc Stream (stream SyncMessage) returns (stream SyncMessage);
+}
+
+// ── Op model ───────────────────────────────────────────────────────────────
+
+message OpRequest {
+  oneof op {
+    MapPut     map_put     = 1;
+    MapDelete  map_delete  = 2;
+    ListInsert list_insert = 3;
+    ListDelete list_delete = 4;
+    ListSplice list_splice = 5;
+    TextSplice text_splice = 6;
+  }
+}
+
+message OpResponse {}
+
+// obj: name of a top-level object under ROOT.
+//      Empty string ("") means ROOT itself.
+//      List and text objects are created by the adapter on first access.
+
+message MapPut    { string obj = 1; string key = 2; ScalarValue value = 3; }
+message MapDelete { string obj = 1; string key = 2; }
+
+message ListInsert { string obj = 1; uint64 index = 2; ScalarValue value = 3; }
+message ListDelete { string obj = 1; uint64 index = 2; }
+
+// Matches automerge::Transactable::splice — insert/delete in one operation.
+// Maps to: splice(obj, pos, del_count, values)
+message ListSplice {
+  string obj              = 1;
+  uint64 pos              = 2;
+  uint32 del_count        = 3;
+  repeated ScalarValue values = 4;
+}
+
+// Matches automerge::Transactable::splice_text.
+// Maps to: splice_text(obj, pos, del_count, insert)
+message TextSplice {
+  string obj       = 1;
+  uint64 pos       = 2;
+  uint32 del_count = 3;
+  string insert    = 4;
+}
+
+message ScalarValue {
+  oneof value {
+    string str_val   = 1;
+    uint64 uint_val  = 2;
+    int64  int_val   = 3;
+    bool   bool_val  = 4;
+    bytes  bytes_val = 5;
+  }
+}
+
+// ── Control plane messages ─────────────────────────────────────────────────
+
+message Empty {}
+
+// Each entry is a 32-byte ChangeHash. Sorted; equal sets on two replicas
+// means they have converged (for Automerge — the adapter sorts before returning).
+message HeadsResponse { repeated bytes heads = 1; }
+
+// Opaque bytes. Equal values on two replicas means they have converged.
+// The adapter computes this however the library supports (e.g. sorted heads).
+message FingerprintResponse { bytes fingerprint = 1; }
+
+// Raw automerge::sync::Message bytes. The Sync service is a byte pipe;
+// encoding and decoding is the adapter's responsibility.
+message SyncMessage { bytes payload = 1; }
+
+message PeerRef {
+  string peer_id = 1;
+  string addr    = 2; // host:port of the peer's Sync service
+}
