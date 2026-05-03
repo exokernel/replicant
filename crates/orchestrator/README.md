@@ -26,7 +26,7 @@ cargo run --bin orchestrator
 |---|---|---|
 | `--trials N` | 1 | Times to run each scenario |
 | `--output csv\|json` | csv | Output format |
-| `--metrics-file PATH` | *(none)* | Write OTel metrics snapshot (sync counts, op latencies, doc sizes) as JSON Lines to this file after all scenarios complete |
+| `--metrics-file PATH` | *(none)* | Write OTel metrics snapshot (sync counts, op latencies, doc sizes) as JSON Lines to this file. Counters are cumulative across all scenarios in a single run — invoke once per scenario file for per-scenario data |
 
 ## Output format
 
