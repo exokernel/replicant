@@ -19,6 +19,30 @@ just ci       # full gate: fmt check → lint → test → smoke
 just docs     # build and open rustdoc
 ```
 
+## Analysis
+
+The Jupyter notebook at `analysis/convergence.ipynb` produces thesis-ready
+figures from benchmark data. Generate `results.csv` first:
+
+```sh
+# Run all scenarios, 10 trials each
+cargo run --bin orchestrator -- --trials 10 --output csv \
+  scenarios/full-mesh-n{2,3,5,10}.toml \
+  scenarios/partition-heal-n{4,6,8}.toml \
+  2>/dev/null > results.csv
+```
+
+Then open and run the notebook:
+
+```sh
+cd analysis && jupyter lab convergence.ipynb
+```
+
+The notebook caches parsed data as `results.parquet` and refreshes it
+automatically when `results.csv` is newer. See `crates/orchestrator/README.md`
+for the full set of orchestrator flags, including `--metrics-file` for OTel
+protocol metrics.
+
 ## Requirements
 
 - Rust (stable, edition 2024)
