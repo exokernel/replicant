@@ -3,5 +3,6 @@
 NEXT_SESSION.md
 *.csv
 *.parquet
+*.json
 analysis/figures/
 **/.ipynb_checkpoints/

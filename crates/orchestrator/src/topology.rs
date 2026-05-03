@@ -15,6 +15,7 @@ pub enum WritePattern {
 /// Note: only `FullMesh` guarantees convergence for all write patterns with
 /// the current sync implementation. Ring/star topologies require
 /// relay-on-receive in `recv_loop` (not yet implemented).
+/// TODO: why do we need relay-on-receive for non-full-mesh topologies?
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Connections {
