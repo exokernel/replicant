@@ -24,14 +24,11 @@ just docs     # build and open rustdoc
 The Jupyter notebook at `analysis/convergence.ipynb` produces figures from benchmark data. Generate `results.csv` first:
 
 ```sh
-# Run each scenario separately so OTel counters are per-scenario (not cumulative)
-for s in full-mesh-n2 full-mesh-n3 full-mesh-n5 full-mesh-n10 \
-          partition-heal-n4 partition-heal-n6 partition-heal-n8; do
-  cargo run --bin orchestrator -- --trials 10 --output csv \
-    --metrics-file "metrics-${s}.json" \
-    "scenarios/${s}.toml" \
-    2>/dev/null >> results.csv
-done
+cargo run --bin orchestrator -- --trials 10 --output csv \
+  --metrics-file metrics.json \
+  scenarios/full-mesh-n{2,3,5,10}.toml \
+  scenarios/partition-heal-n{4,6,8}.toml \
+  2>/dev/null > results.csv
 ```
 
 Then open and run the notebook:
@@ -41,9 +38,8 @@ cd analysis && jupyter lab convergence.ipynb
 ```
 
 The notebook caches parsed data as `results.parquet` and refreshes it
-automatically when `results.csv` is newer. To inspect OTel protocol metrics,
-update the `METRICS` variable near the top of the notebook to point at one of
-the generated files, e.g. `REPO / "metrics-full-mesh-n5.json"`.
+automatically when `results.csv` is newer. For per-scenario OTel metrics,
+see the loop in the notebook's OTel section and `crates/orchestrator/README.md`.
 
 ## Requirements
 
