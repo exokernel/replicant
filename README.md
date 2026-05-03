@@ -150,6 +150,8 @@ graph LR
     N0 --- N1
     N0 --- N2
     N1 --- N2
+    linkStyle 0,1,2 stroke:#e67e00,stroke-width:2px
+    linkStyle 3,4,5 stroke:#4a9eff,stroke-width:2px
 ```
 
 **`concentrated`** — all ops go to node 0:
@@ -161,4 +163,8 @@ graph LR
     N0 --- N1((Node 1))
     N0 --- N2((Node 2))
     N1 --- N2
+    linkStyle 0 stroke:#e67e00,stroke-width:2px
+    linkStyle 1,2,3 stroke:#4a9eff,stroke-width:2px
 ```
+
+> **Orange** = write op (orchestrator → node) &nbsp; **Blue** = Automerge sync connection (node ↔ node)
