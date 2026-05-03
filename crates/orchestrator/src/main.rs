@@ -1,28 +1,23 @@
-//! Orchestrator smoke test.
+//! Orchestrator — runs topology scenarios and reports convergence metrics.
 //!
-//! Starts two in-process Automerge replicas, connects them via the gRPC
-//! control plane, writes a key to each, and verifies both converge to the
-//! same state fingerprint — exercising the full `ApplyOp` → `flush_to_peers`
-//! → bidi sync stream path end-to-end.
+//! With no arguments, runs three built-in scenarios that serve as a
+//! regression suite (`just smoke` / `just ci`).
 //!
-//! Exit code 0 = PASSED.  Any error prints to stderr and exits non-zero.
+//! With file arguments, each TOML scenario file is loaded and run in order:
+//!
+//! ```text
+//! cargo run --bin orchestrator -- scenarios/partition-heal-n4.toml
+//! ```
 
-use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::path::PathBuf;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use opentelemetry_sdk::metrics::SdkMeterProvider;
-use tokio::net::TcpListener;
-use tokio_stream::wrappers::TcpListenerStream;
-use tonic::Request;
-use tonic::transport::{Channel, Server};
 
-use common::proto::{
-    Empty, MapPut, OpRequest, PeerRef, ScalarValue, op_request, replica_client::ReplicaClient,
-    replica_server::ReplicaServer, scalar_value, sync_server::SyncServer,
-};
-use replica::adapter::AutomergeAdapter;
-use replica::server::{ReplicaService, ReplicaState, SyncService};
+mod runner;
+mod topology;
+
+use topology::{Connections, Group, PartitionConfig, ScenarioFile, TopologyConfig, WritePattern};
 
 // ── Entry point ────────────────────────────────────────────────────────────
 
@@ -35,146 +30,112 @@ async fn main() -> Result<()> {
     let provider = init_metrics();
     opentelemetry::global::set_meter_provider(provider.clone());
 
-    let (addr_a, addr_b) = spawn_replicas().await?;
-    tracing::info!(%addr_a, %addr_b, "replicas started");
+    let args: Vec<PathBuf> = std::env::args().skip(1).map(PathBuf::from).collect();
 
-    let mut client_a = ReplicaClient::connect(format!("http://{addr_a}")).await?;
-    let mut client_b = ReplicaClient::connect(format!("http://{addr_b}")).await?;
+    if args.is_empty() {
+        run_builtin_scenarios().await?;
+    } else {
+        for path in &args {
+            let raw = std::fs::read_to_string(path)
+                .with_context(|| format!("reading {}", path.display()))?;
+            let scenario: ScenarioFile =
+                toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+            run_scenario(scenario).await?;
+        }
+    }
 
-    // Open a bidi sync stream from A to B.  Both replicas register each other
-    // in their peer_txs tables so subsequent flushes are bidirectional.
-    client_a
-        .connect_peer(Request::new(PeerRef {
-            peer_id: "b".to_owned(),
-            addr: addr_b.to_string(),
-        }))
-        .await?;
-
-    // Wait for the TCP + Automerge sync handshake to complete.
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    // ── Write to A, verify propagation to B ───────────────────────────────
-
-    tracing::info!("writing 'greeting' to replica A");
-    apply_map_put(&mut client_a, "greeting", "hello").await?;
-
-    wait_for_convergence(&mut client_a, &mut client_b, Duration::from_secs(5)).await?;
-
-    // ── Write to B, verify propagation back to A ──────────────────────────
-
-    tracing::info!("writing 'farewell' to replica B");
-    apply_map_put(&mut client_b, "farewell", "goodbye").await?;
-
-    wait_for_convergence(&mut client_a, &mut client_b, Duration::from_secs(5)).await?;
-
-    tracing::info!("smoke test PASSED");
-
-    // Force-flush metrics before exit so all observations appear in output.
     provider.shutdown()?;
-
     Ok(())
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────────
+// ── Scenario dispatch ──────────────────────────────────────────────────────
+
+/// Load and run a single scenario, logging name and result.
+async fn run_scenario(scenario: ScenarioFile) -> Result<()> {
+    match (&scenario.topology, &scenario.partition_heal) {
+        (Some(config), None) => {
+            tracing::info!(scenario = %scenario.name, "starting");
+            let r = runner::run(config).await?;
+            tracing::info!(
+                scenario = %scenario.name,
+                ops = r.total_ops,
+                convergence_ms = r.convergence_ms,
+                "PASSED"
+            );
+        }
+        (None, Some(config)) => {
+            tracing::info!(scenario = %scenario.name, "starting");
+            let r = runner::run_partition_heal(config).await?;
+            tracing::info!(
+                scenario = %scenario.name,
+                ops = r.total_ops,
+                heal_convergence_ms = r.convergence_ms,
+                "PASSED"
+            );
+        }
+        _ => bail!(
+            "scenario '{}': exactly one of [topology] or [partition_heal] must be present",
+            scenario.name
+        ),
+    }
+    Ok(())
+}
+
+/// Hard-coded scenarios run when no file arguments are given.
+///
+/// Covers 2-node full mesh (backward-compat smoke), 3-node full mesh,
+/// and a 4-node 2+2 partition-heal.
+async fn run_builtin_scenarios() -> Result<()> {
+    let scenarios = vec![
+        ScenarioFile {
+            name: "full-mesh-n2".to_owned(),
+            topology: Some(TopologyConfig {
+                node_count: 2,
+                connections: Connections::FullMesh,
+                write_pattern: WritePattern::RoundRobin,
+                op_count: 2,
+            }),
+            partition_heal: None,
+        },
+        ScenarioFile {
+            name: "full-mesh-n3".to_owned(),
+            topology: Some(TopologyConfig {
+                node_count: 3,
+                connections: Connections::FullMesh,
+                write_pattern: WritePattern::RoundRobin,
+                op_count: 6,
+            }),
+            partition_heal: None,
+        },
+        ScenarioFile {
+            name: "partition-heal-n4".to_owned(),
+            topology: None,
+            partition_heal: Some(PartitionConfig {
+                node_count: 4,
+                groups: vec![Group { nodes: vec![0, 1] }, Group { nodes: vec![2, 3] }],
+                ops_per_group: 4,
+                write_pattern: WritePattern::RoundRobin,
+            }),
+        },
+    ];
+
+    for scenario in scenarios {
+        run_scenario(scenario).await?;
+    }
+
+    tracing::info!("all scenarios PASSED");
+    Ok(())
+}
+
+// ── Metrics setup ──────────────────────────────────────────────────────────
 
 /// Build a stdout metrics provider.
 ///
-/// Exports on shutdown (and periodically while running). In production,
-/// replace with an OTLP exporter pointed at a collector.
+/// In production, replace with an OTLP exporter pointed at a collector.
 fn init_metrics() -> SdkMeterProvider {
     use opentelemetry_sdk::metrics::PeriodicReader;
     use opentelemetry_stdout::MetricExporter;
 
     let reader = PeriodicReader::builder(MetricExporter::default()).build();
     SdkMeterProvider::builder().with_reader(reader).build()
-}
-
-/// Bind two OS-assigned ports, start an in-process replica on each, and
-/// return their addresses.
-///
-/// Using `TcpListener::bind("127.0.0.1:0")` before spawning guarantees the
-/// port is known and reserved before any client tries to connect.
-async fn spawn_replicas() -> Result<(SocketAddr, SocketAddr)> {
-    let listener_a = TcpListener::bind("127.0.0.1:0").await?;
-    let listener_b = TcpListener::bind("127.0.0.1:0").await?;
-    let addr_a = listener_a.local_addr()?;
-    let addr_b = listener_b.local_addr()?;
-
-    start_replica("a", listener_a);
-    start_replica("b", listener_b);
-
-    Ok((addr_a, addr_b))
-}
-
-/// Start a named replica on the given listener in a background task.
-///
-/// Both the `Replica` (control-plane) and `Sync` (data-plane) services are
-/// multiplexed on the same port via tonic's service builder.
-fn start_replica(actor_id: &'static str, listener: TcpListener) {
-    let state = ReplicaState::new(actor_id.to_owned(), AutomergeAdapter::new());
-    tokio::spawn(
-        Server::builder()
-            .add_service(ReplicaServer::new(ReplicaService::new(state.clone())))
-            .add_service(SyncServer::new(SyncService::new(state)))
-            .serve_with_incoming(TcpListenerStream::new(listener)),
-    );
-}
-
-/// Apply a `MapPut` on ROOT with a string value to the given replica.
-async fn apply_map_put(client: &mut ReplicaClient<Channel>, key: &str, value: &str) -> Result<()> {
-    client
-        .apply_op(Request::new(OpRequest {
-            op: Some(op_request::Op::MapPut(MapPut {
-                obj: String::new(),
-                key: key.to_owned(),
-                value: Some(ScalarValue {
-                    value: Some(scalar_value::Value::StrVal(value.to_owned())),
-                }),
-            })),
-        }))
-        .await?;
-    Ok(())
-}
-
-/// Poll both replicas' fingerprints until they match, or `timeout` elapses.
-///
-/// Convergence is declared when both fingerprints are non-empty and equal —
-/// identical byte sequences mean both replicas have the same Automerge DAG
-/// frontier.
-async fn wait_for_convergence(
-    client_a: &mut ReplicaClient<Channel>,
-    client_b: &mut ReplicaClient<Channel>,
-    timeout: Duration,
-) -> Result<()> {
-    let start = Instant::now();
-
-    loop {
-        let fp_a = client_a
-            .get_state_fingerprint(Request::new(Empty {}))
-            .await?
-            .into_inner()
-            .fingerprint;
-        let fp_b = client_b
-            .get_state_fingerprint(Request::new(Empty {}))
-            .await?
-            .into_inner()
-            .fingerprint;
-
-        if !fp_a.is_empty() && fp_a == fp_b {
-            tracing::info!(
-                elapsed_ms = start.elapsed().as_millis(),
-                "replicas converged"
-            );
-            return Ok(());
-        }
-
-        if start.elapsed() >= timeout {
-            bail!(
-                "replicas did not converge within {}s (fp_a={fp_a:?}, fp_b={fp_b:?})",
-                timeout.as_secs()
-            );
-        }
-
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
 }

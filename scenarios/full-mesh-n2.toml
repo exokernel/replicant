@@ -1,0 +1,7 @@
+name = "full-mesh-n2"
+
+[topology]
+node_count = 2
+connections = "full_mesh"
+write_pattern = "round_robin"
+op_count = 2

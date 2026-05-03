@@ -26,6 +26,10 @@ smoke:
 docs:
     cargo doc --workspace --no-deps --open
 
+# Run a scenario file through the orchestrator
+bench scenario:
+    cargo run --bin orchestrator -- {{scenario}}
+
 # Full CI gate: format check → lint → test → smoke
 ci:
     cargo fmt --all --check
