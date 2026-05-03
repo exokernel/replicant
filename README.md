@@ -24,11 +24,14 @@ just docs     # build and open rustdoc
 The Jupyter notebook at `analysis/convergence.ipynb` produces figures from benchmark data. Generate `results.csv` first:
 
 ```sh
-# Run all scenarios, 10 trials each
-cargo run --bin orchestrator -- --trials 10 --output csv \
-  scenarios/full-mesh-n{2,3,5,10}.toml \
-  scenarios/partition-heal-n{4,6,8}.toml \
-  2>/dev/null > results.csv
+# Run each scenario separately so OTel counters are per-scenario (not cumulative)
+for s in full-mesh-n2 full-mesh-n3 full-mesh-n5 full-mesh-n10 \
+          partition-heal-n4 partition-heal-n6 partition-heal-n8; do
+  cargo run --bin orchestrator -- --trials 10 --output csv \
+    --metrics-file "metrics-${s}.json" \
+    "scenarios/${s}.toml" \
+    2>/dev/null >> results.csv
+done
 ```
 
 Then open and run the notebook:
