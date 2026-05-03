@@ -33,7 +33,10 @@ async fn spawn_node(actor_id: String) -> Result<(SocketAddr, ReplicaClient<Chann
     Ok((addr, client))
 }
 
-/// Call `ConnectPeer` for each edge and wait 50 ms for handshakes to settle.
+/// Call `ConnectPeer` for each edge and wait for all streams to be ready.
+///
+/// Each `ConnectPeer` RPC blocks until the TCP connection and gRPC stream are
+/// open and the peer is registered, so no post-connect sleep is needed.
 async fn connect_edges(
     clients: &mut [ReplicaClient<Channel>],
     addrs: &[SocketAddr],
@@ -47,9 +50,6 @@ async fn connect_edges(
             }))
             .await?;
     }
-    // Allow time for the TCP connection and Automerge sync handshake to
-    // complete before the caller begins writing ops.
-    tokio::time::sleep(Duration::from_millis(50)).await;
     Ok(())
 }
 

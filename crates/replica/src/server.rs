@@ -192,12 +192,19 @@ impl Replica for ReplicaService {
     ) -> Result<Response<proto::Empty>, Status> {
         let proto::PeerRef { peer_id, addr } = request.into_inner();
         let state = self.0.clone();
-        // Spawn so the RPC returns immediately; connection is established async.
+        // `ready_rx` resolves once the TCP connection and gRPC stream are open
+        // and the peer is registered in `peer_txs`. Awaiting it here means the
+        // orchestrator's `ConnectPeer` call only returns after the stream is
+        // actually usable, removing the need for any post-connect sleep.
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            if let Err(e) = connect_to_peer(state, peer_id, addr).await {
+            if let Err(e) = connect_to_peer(state, peer_id, addr, ready_tx).await {
                 tracing::error!("connect_to_peer failed: {e:#}");
             }
         });
+        ready_rx.await.map_err(|_| {
+            Status::internal("connect_to_peer task dropped before signalling ready")
+        })?;
         Ok(Response::new(proto::Empty {}))
     }
 
@@ -302,11 +309,15 @@ async fn recv_loop(
 
 /// Open an outbound bidi sync stream to `peer_id` at `addr` and drive it.
 ///
-/// Spawned by `ConnectPeer`; runs for the lifetime of the connection.
+/// Spawned by `ConnectPeer`. Signals `ready_tx` once the stream is open and
+/// the peer is registered in `peer_txs`, then enters the long-running
+/// [`recv_loop`]. This allows the `ConnectPeer` RPC to block until the
+/// connection is genuinely usable rather than relying on a fixed sleep.
 async fn connect_to_peer(
     state: Arc<ReplicaState>,
     peer_id: String,
     addr: String,
+    ready_tx: tokio::sync::oneshot::Sender<()>,
 ) -> anyhow::Result<()> {
     let endpoint = Channel::from_shared(format!("http://{addr}"))
         .map_err(|e| anyhow::anyhow!("invalid peer address '{addr}': {e}"))?;
@@ -340,10 +351,14 @@ async fn connect_to_peer(
     state.register_peer(peer_id.clone(), raw_tx.clone()).await;
     tracing::info!(peer = %peer_id, %addr, "sync stream established");
 
-    // Kick off the protocol from our side.
+    // Kick off the protocol from our side before signalling ready, so the
+    // Automerge handshake is already in flight when the caller proceeds.
     if let Some(msg) = state.sync_generate(&peer_id) {
         raw_tx.send(msg).await?;
     }
+
+    // Unblock the ConnectPeer RPC — stream is open and initial message sent.
+    let _ = ready_tx.send(());
 
     recv_loop(state, peer_id, inbound, raw_tx).await;
     Ok(())
