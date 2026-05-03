@@ -40,22 +40,16 @@ sequenceDiagram
     participant B as Node 1
     participant C as Node 2
 
-    rect rgb(220, 245, 220)
-        note over O,C: spawn
-        O->>A: spawn (in-process)
-        O->>B: spawn (in-process)
-        O->>C: spawn (in-process)
-    end
+    O->>A: spawn (in-process)
+    O->>B: spawn (in-process)
+    O->>C: spawn (in-process)
 
-    rect rgb(220, 230, 250)
-        note over O,C: wire topology
-        O->>A: ConnectPeer(B)
-        A-->>B: open bidi sync stream
-        O->>A: ConnectPeer(C)
-        A-->>C: open bidi sync stream
-        O->>B: ConnectPeer(C)
-        B-->>C: open bidi sync stream
-    end
+    O->>A: ConnectPeer(B)
+    A-->>B: open bidi sync stream
+    O->>A: ConnectPeer(C)
+    A-->>C: open bidi sync stream
+    O->>B: ConnectPeer(C)
+    B-->>C: open bidi sync stream
 
     loop round-robin writes
         O->>A: ApplyOp
