@@ -132,3 +132,29 @@ graph LR
     A2 --- B4
     A2 --- B5
 ```
+
+### Write patterns
+
+Two write distributions are supported via the `write_pattern` field in scenario
+TOML files. All bundled scenarios currently use `round_robin`; `concentrated`
+variants can be added by copying any scenario file and changing the field.
+
+**`round_robin`** — ops cycle through all nodes in scope:
+
+```mermaid
+graph LR
+    O[Orchestrator]
+    O -->|"op 0, 3, 6…"| N0((Node 0))
+    O -->|"op 1, 4, 7…"| N1((Node 1))
+    O -->|"op 2, 5, 8…"| N2((Node 2))
+```
+
+**`concentrated`** — all ops go to node 0:
+
+```mermaid
+graph LR
+    O[Orchestrator]
+    O -->|"all ops"| N0((Node 0))
+    N1((Node 1))
+    N2((Node 2))
+```
