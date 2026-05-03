@@ -110,6 +110,9 @@ impl CrdtAdapter for AutomergeAdapter {
                     .splice_text(id, *pos, *del_count as isize, insert)?;
             }
         }
+        // Commit the open transaction so op_duration_ms captures the full
+        // apply+commit cost, and sync_generate sees exactly this change.
+        self.doc.commit();
         Ok(())
     }
 
