@@ -14,7 +14,7 @@ A CRDT benchmarking framework built on [Automerge](https://automerge.org/) and g
 
 ```sh
 just          # list all available recipes
-just smoke    # end-to-end smoke test (orchestrator → two replicas)
+just smoke    # run the three built-in regression scenarios (2, 3, and 4 nodes)
 just ci       # full gate: fmt check → lint → test → smoke
 just docs     # build and open rustdoc
 ```
