@@ -41,9 +41,9 @@ cd analysis && jupyter lab convergence.ipynb
 ```
 
 The notebook caches parsed data as `results.parquet` and refreshes it
-automatically when `results.csv` is newer. See `crates/orchestrator/README.md`
-for the full set of orchestrator flags, including `--metrics-file` for OTel
-protocol metrics.
+automatically when `results.csv` is newer. To inspect OTel protocol metrics,
+update the `METRICS` variable near the top of the notebook to point at one of
+the generated files, e.g. `REPO / "metrics-full-mesh-n5.json"`.
 
 ## Requirements
 
