@@ -1,6 +1,18 @@
 use anyhow::{Result, bail};
 use serde::Deserialize;
 
+/// Top-level scenario file — TOML format; exactly one of `[topology]` or
+/// `[partition_heal]` must be present.
+#[derive(Debug, Deserialize)]
+pub struct ScenarioFile {
+    /// Human-readable name used in log output and result reporting.
+    pub name: String,
+    /// Present for a topology run.
+    pub topology: Option<TopologyConfig>,
+    /// Present for a partition-heal run.
+    pub partition_heal: Option<PartitionConfig>,
+}
+
 /// Write distribution for ops in a scenario run.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -97,6 +109,42 @@ impl PartitionConfig {
     }
 }
 
+/// Built-in scenarios used as a regression suite when no TOML files are given.
+pub fn builtin_scenarios() -> Vec<ScenarioFile> {
+    vec![
+        ScenarioFile {
+            name: "full-mesh-n2".to_owned(),
+            topology: Some(TopologyConfig {
+                node_count: 2,
+                connections: Connections::FullMesh,
+                write_pattern: WritePattern::RoundRobin,
+                op_count: 2,
+            }),
+            partition_heal: None,
+        },
+        ScenarioFile {
+            name: "full-mesh-n3".to_owned(),
+            topology: Some(TopologyConfig {
+                node_count: 3,
+                connections: Connections::FullMesh,
+                write_pattern: WritePattern::RoundRobin,
+                op_count: 6,
+            }),
+            partition_heal: None,
+        },
+        ScenarioFile {
+            name: "partition-heal-n4".to_owned(),
+            topology: None,
+            partition_heal: Some(PartitionConfig {
+                node_count: 4,
+                groups: vec![Group { nodes: vec![0, 1] }, Group { nodes: vec![2, 3] }],
+                ops_per_group: 4,
+                write_pattern: WritePattern::RoundRobin,
+            }),
+        },
+    ]
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -162,16 +210,4 @@ mod tests {
             );
         }
     }
-}
-
-/// Top-level scenario file — TOML format; exactly one of `[topology]` or
-/// `[partition_heal]` must be present.
-#[derive(Debug, Deserialize)]
-pub struct ScenarioFile {
-    /// Human-readable name used in log output and result reporting.
-    pub name: String,
-    /// Present for a topology run.
-    pub topology: Option<TopologyConfig>,
-    /// Present for a partition-heal run.
-    pub partition_heal: Option<PartitionConfig>,
 }

@@ -25,7 +25,7 @@ use crate::metrics::Metrics;
 pub struct ReplicaState {
     /// Stable actor identifier used in metric labels and as the `x-peer-id`
     /// gRPC metadata value when opening outbound sync streams.
-    pub actor_id: String,
+    actor_id: String,
     /// `std::sync::Mutex` is intentional: the lock is never held across an
     /// `.await` point, so there is no risk of blocking the async executor.
     adapter: Mutex<Box<dyn CrdtAdapter>>,
@@ -74,6 +74,10 @@ impl ReplicaState {
 
     fn sync_receive(&self, peer: &str, msg: Vec<u8>) -> anyhow::Result<()> {
         self.adapter.lock().unwrap().sync_receive(peer, msg)
+    }
+
+    pub fn actor_id(&self) -> &str {
+        &self.actor_id
     }
 
     async fn register_peer(&self, peer_id: String, tx: mpsc::Sender<Vec<u8>>) {

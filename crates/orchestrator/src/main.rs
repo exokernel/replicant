@@ -24,9 +24,7 @@ use opentelemetry_sdk::metrics::{SdkMeterProvider, Temporality};
 mod runner;
 mod topology;
 
-use topology::{
-    Connections, Group, PartitionConfig, RunResult, ScenarioFile, TopologyConfig, WritePattern,
-};
+use topology::{RunResult, ScenarioFile, builtin_scenarios};
 
 // ── CLI ─────────────────────────────────────────────────────────────────────
 
@@ -169,42 +167,6 @@ fn scenario_node_count(s: &ScenarioFile) -> usize {
         .map(|t| t.node_count)
         .or_else(|| s.partition_heal.as_ref().map(|p| p.node_count))
         .expect("scenario must have topology or partition_heal — caller validated this")
-}
-
-/// Built-in scenarios run when no file arguments are given (regression suite).
-fn builtin_scenarios() -> Vec<ScenarioFile> {
-    vec![
-        ScenarioFile {
-            name: "full-mesh-n2".to_owned(),
-            topology: Some(TopologyConfig {
-                node_count: 2,
-                connections: Connections::FullMesh,
-                write_pattern: WritePattern::RoundRobin,
-                op_count: 2,
-            }),
-            partition_heal: None,
-        },
-        ScenarioFile {
-            name: "full-mesh-n3".to_owned(),
-            topology: Some(TopologyConfig {
-                node_count: 3,
-                connections: Connections::FullMesh,
-                write_pattern: WritePattern::RoundRobin,
-                op_count: 6,
-            }),
-            partition_heal: None,
-        },
-        ScenarioFile {
-            name: "partition-heal-n4".to_owned(),
-            topology: None,
-            partition_heal: Some(PartitionConfig {
-                node_count: 4,
-                groups: vec![Group { nodes: vec![0, 1] }, Group { nodes: vec![2, 3] }],
-                ops_per_group: 4,
-                write_pattern: WritePattern::RoundRobin,
-            }),
-        },
-    ]
 }
 
 // ── Output emission ──────────────────────────────────────────────────────────
@@ -473,7 +435,7 @@ fn kv_to_map<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use topology::{Group, PartitionConfig, TopologyConfig};
+    use topology::{Connections, Group, PartitionConfig, TopologyConfig, WritePattern};
 
     // ── stats / percentile ─────────────────────────────────────────────────
 
