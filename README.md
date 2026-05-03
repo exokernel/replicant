@@ -108,7 +108,7 @@ graph LR
     end
 ```
 
-**After heal (cross-group edges added):**
+**After heal (full mesh — all cross-group edges added):**
 
 ```mermaid
 graph LR
@@ -123,6 +123,12 @@ graph LR
         B4 --- B5
     end
     A0 --- B3
+    A0 --- B4
+    A0 --- B5
+    A1 --- B3
     A1 --- B4
+    A1 --- B5
+    A2 --- B3
+    A2 --- B4
     A2 --- B5
 ```
