@@ -21,8 +21,7 @@ just docs     # build and open rustdoc
 
 ## Analysis
 
-The Jupyter notebook at `analysis/convergence.ipynb` produces thesis-ready
-figures from benchmark data. Generate `results.csv` first:
+The Jupyter notebook at `analysis/convergence.ipynb` produces figures from benchmark data. Generate `results.csv` first:
 
 ```sh
 # Run all scenarios, 10 trials each
