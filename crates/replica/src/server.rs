@@ -306,6 +306,12 @@ async fn recv_loop(
                 {
                     break;
                 }
+                // TODO: call flush_to_peers() here to relay newly received
+                // state to all other connected peers. Required for ring/star
+                // topologies to converge; safe to add for full-mesh (the
+                // protocol quiesces naturally when peers are already
+                // up-to-date). Deferred to keep full-mesh sync message counts
+                // clean for the current analysis.
             }
             Err(status) => {
                 tracing::warn!(peer = %peer_id, "stream error: {status}");
