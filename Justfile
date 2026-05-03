@@ -22,6 +22,10 @@ test:
 smoke:
     cargo run --bin orchestrator
 
+# Build rustdoc for all crates and open in browser
+docs:
+    cargo doc --workspace --no-deps --open
+
 # Full CI gate: format check → lint → test → smoke
 ci:
     cargo fmt --all --check
