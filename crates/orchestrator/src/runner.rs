@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use tokio::net::TcpListener;
+use tokio::task::JoinSet;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::Request;
 use tonic::transport::{Channel, Server};
@@ -19,18 +20,43 @@ use crate::topology::{Connections, PartitionConfig, RunResult, TopologyConfig, W
 // ── Private helpers ────────────────────────────────────────────────────────
 
 /// Bind a port, start a replica server, and return its address and gRPC client.
-async fn spawn_node(actor_id: String) -> Result<(SocketAddr, ReplicaClient<Channel>)> {
+///
+/// The server task is added to `tasks` so the caller can detect panics; the
+/// `JoinSet` must outlive all client usage or the server will be dropped.
+async fn spawn_node(
+    actor_id: String,
+    tasks: &mut JoinSet<()>,
+) -> Result<(SocketAddr, ReplicaClient<Channel>)> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
     let state = ReplicaState::new(actor_id, AutomergeAdapter::new());
-    tokio::spawn(
-        Server::builder()
+    tasks.spawn(async move {
+        if let Err(e) = Server::builder()
             .add_service(ReplicaServer::new(ReplicaService::new(state.clone())))
             .add_service(SyncServer::new(SyncService::new(state)))
-            .serve_with_incoming(TcpListenerStream::new(listener)),
-    );
+            .serve_with_incoming(TcpListenerStream::new(listener))
+            .await
+        {
+            tracing::error!("replica server exited with error: {e:#}");
+        }
+    });
     let client = ReplicaClient::connect(format!("http://{addr}")).await?;
     Ok((addr, client))
+}
+
+/// Spawn `n` nodes and return their addresses and clients.
+async fn spawn_nodes(
+    n: usize,
+    tasks: &mut JoinSet<()>,
+) -> Result<(Vec<SocketAddr>, Vec<ReplicaClient<Channel>>)> {
+    let mut addrs = Vec::with_capacity(n);
+    let mut clients = Vec::with_capacity(n);
+    for i in 0..n {
+        let (addr, client) = spawn_node(format!("node-{i}"), tasks).await?;
+        addrs.push(addr);
+        clients.push(client);
+    }
+    Ok((addrs, clients))
 }
 
 /// Call `ConnectPeer` for each edge and wait for all streams to be ready.
@@ -109,32 +135,56 @@ async fn wait_for_nodes(
     }
 }
 
+/// Check whether any server tasks have exited and bail if so.
+///
+/// Servers are expected to run for the duration of a scenario. Any exit —
+/// clean shutdown or panic — means something went wrong. Calling this after
+/// each major phase surfaces failures promptly rather than letting them appear
+/// as confusing "connection refused" RPC errors.
+fn check_tasks(tasks: &mut JoinSet<()>) -> Result<()> {
+    if let Some(result) = tasks.try_join_next() {
+        match result {
+            Err(e) => bail!("server task panicked: {e}"),
+            Ok(()) => bail!("server task exited unexpectedly during scenario"),
+        }
+    }
+    Ok(())
+}
+
+/// Return the full-mesh intra-group edges for a slice of node indices.
+fn intra_group_edges(nodes: &[usize]) -> Vec<(usize, usize)> {
+    nodes
+        .iter()
+        .flat_map(|&i| nodes.iter().filter(move |&&j| j > i).map(move |&j| (i, j)))
+        .collect()
+}
+
 // ── Public API ─────────────────────────────────────────────────────────────
 
 /// Spawn nodes, wire the topology, apply writes, and wait for convergence.
 pub async fn run(config: &TopologyConfig) -> Result<RunResult> {
     let n = config.node_count;
-    let mut addrs = Vec::with_capacity(n);
-    let mut clients = Vec::with_capacity(n);
-    for i in 0..n {
-        let (addr, client) = spawn_node(format!("node-{i}")).await?;
-        addrs.push(addr);
-        clients.push(client);
-    }
+    let mut tasks = JoinSet::new();
+    let (addrs, mut clients) = spawn_nodes(n, &mut tasks).await?;
 
     let edges = config.connections.edges(n);
     connect_edges(&mut clients, &addrs, &edges).await?;
+    check_tasks(&mut tasks)?;
 
-    for i in 0..config.op_count {
+    for (i, target) in (0..config.op_count).map(|i| {
         let target = match &config.write_pattern {
             WritePattern::Concentrated => 0,
             WritePattern::RoundRobin => i % n,
         };
+        (i, target)
+    }) {
         map_put(&mut clients[target], &format!("k{i}"), &format!("v{i}")).await?;
     }
+    check_tasks(&mut tasks)?;
 
     let all: Vec<usize> = (0..n).collect();
     let convergence_ms = wait_for_nodes(&mut clients, &all, Duration::from_secs(5)).await?;
+    check_tasks(&mut tasks)?;
 
     Ok(RunResult {
         convergence_ms,
@@ -148,44 +198,42 @@ pub async fn run(config: &TopologyConfig) -> Result<RunResult> {
 /// Phase 2 (heal): remaining cross-group edges are added; time from heal
 /// trigger to global convergence is returned.
 pub async fn run_partition_heal(config: &PartitionConfig) -> Result<RunResult> {
-    let n = config.node_count;
-    let mut addrs = Vec::with_capacity(n);
-    let mut clients = Vec::with_capacity(n);
-    for i in 0..n {
-        let (addr, client) = spawn_node(format!("node-{i}")).await?;
-        addrs.push(addr);
-        clients.push(client);
-    }
+    config.validate()?;
 
-    // Wire each group internally.
-    for group in &config.groups {
-        let nodes = &group.nodes;
-        let edges: Vec<(usize, usize)> = nodes
-            .iter()
-            .flat_map(|&i| nodes.iter().filter(move |&&j| j > i).map(move |&j| (i, j)))
-            .collect();
-        connect_edges(&mut clients, &addrs, &edges).await?;
-    }
+    let n = config.node_count;
+    let mut tasks = JoinSet::new();
+    let (addrs, mut clients) = spawn_nodes(n, &mut tasks).await?;
+
+    // Wire each group internally and collect those edges for later subtraction.
+    let intra: Vec<(usize, usize)> = config
+        .groups
+        .iter()
+        .flat_map(|g| intra_group_edges(&g.nodes))
+        .collect();
+    connect_edges(&mut clients, &addrs, &intra).await?;
+    check_tasks(&mut tasks)?;
 
     // Apply ops to each group; keys are globally unique across groups.
-    let mut op_idx = 0usize;
-    for group in &config.groups {
-        let nodes = &group.nodes;
-        let m = nodes.len();
-        for i in 0..config.ops_per_group {
-            let target = nodes[match &config.write_pattern {
-                WritePattern::Concentrated => 0,
-                WritePattern::RoundRobin => i % m,
-            }];
-            map_put(
-                &mut clients[target],
-                &format!("k{op_idx}"),
-                &format!("v{op_idx}"),
-            )
-            .await?;
-            op_idx += 1;
-        }
+    for (op_idx, (group, i)) in config
+        .groups
+        .iter()
+        .flat_map(|g| (0..config.ops_per_group).map(move |i| (g, i)))
+        .enumerate()
+    {
+        let m = group.nodes.len();
+        let target = group.nodes[match &config.write_pattern {
+            WritePattern::Concentrated => 0,
+            WritePattern::RoundRobin => i % m,
+        }];
+        map_put(
+            &mut clients[target],
+            &format!("k{op_idx}"),
+            &format!("v{op_idx}"),
+        )
+        .await?;
     }
+
+    check_tasks(&mut tasks)?;
 
     // Wait for each group to reach internal consistency before healing.
     for group in &config.groups {
@@ -193,26 +241,16 @@ pub async fn run_partition_heal(config: &PartitionConfig) -> Result<RunResult> {
             wait_for_nodes(&mut clients, &group.nodes, Duration::from_secs(5)).await?;
         }
     }
+    check_tasks(&mut tasks)?;
 
     // Heal: add the edges that cross group boundaries. `intra` is the set of
     // edges already wired during the partition phase; subtracting them from
     // the full mesh gives exactly the cross-group connections needed.
-    let intra: Vec<(usize, usize)> = config
-        .groups
-        .iter()
-        .flat_map(|g| {
-            g.nodes.iter().flat_map(|&i| {
-                g.nodes
-                    .iter()
-                    .filter(move |&&j| j > i)
-                    .map(move |&j| (i, j))
-            })
-        })
-        .collect();
+    let intra_set: std::collections::HashSet<(usize, usize)> = intra.into_iter().collect();
     let heal_edges: Vec<(usize, usize)> = Connections::FullMesh
         .edges(n)
         .into_iter()
-        .filter(|e| !intra.contains(e))
+        .filter(|e| !intra_set.contains(e))
         .collect();
 
     let heal_start = Instant::now();
@@ -221,9 +259,77 @@ pub async fn run_partition_heal(config: &PartitionConfig) -> Result<RunResult> {
     let all: Vec<usize> = (0..n).collect();
     wait_for_nodes(&mut clients, &all, Duration::from_secs(10)).await?;
     let convergence_ms = heal_start.elapsed().as_millis();
+    check_tasks(&mut tasks)?;
 
     Ok(RunResult {
         convergence_ms,
         total_ops: config.groups.len() * config.ops_per_group,
     })
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── check_tasks ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn check_tasks_ok_when_all_running() {
+        let mut tasks: JoinSet<()> = JoinSet::new();
+        tasks.spawn(std::future::pending());
+        assert!(check_tasks(&mut tasks).is_ok());
+        tasks.abort_all();
+    }
+
+    #[tokio::test]
+    async fn check_tasks_errors_on_panic() {
+        let mut tasks: JoinSet<()> = JoinSet::new();
+        tasks.spawn(async { panic!("boom") });
+        // Sleep so tokio schedules the task; the panic is caught as a JoinError
+        // and stored in the JoinSet. We must not call join_next here — that
+        // would consume the result before check_tasks can see it.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let err = check_tasks(&mut tasks).unwrap_err();
+        assert!(err.to_string().contains("panicked"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn check_tasks_errors_on_unexpected_exit() {
+        let mut tasks: JoinSet<()> = JoinSet::new();
+        tasks.spawn(std::future::ready(()));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let err = check_tasks(&mut tasks).unwrap_err();
+        assert!(err.to_string().contains("unexpectedly"), "{err}");
+    }
+
+    // ── intra_group_edges ──────────────────────────────────────────────────
+
+    #[test]
+    fn intra_group_edges_two_nodes() {
+        assert_eq!(intra_group_edges(&[0, 1]), vec![(0, 1)]);
+    }
+
+    #[test]
+    fn intra_group_edges_three_nodes() {
+        let mut edges = intra_group_edges(&[0, 1, 2]);
+        edges.sort_unstable();
+        assert_eq!(edges, vec![(0, 1), (0, 2), (1, 2)]);
+    }
+
+    #[test]
+    fn intra_group_edges_single_node_is_empty() {
+        assert!(intra_group_edges(&[3]).is_empty());
+    }
+
+    #[test]
+    fn intra_group_edges_no_symmetric_duplicates() {
+        let edges = intra_group_edges(&[0, 1, 2, 3]);
+        // Every pair should appear exactly once, in (smaller, larger) order.
+        let n = edges.len();
+        let deduped: std::collections::HashSet<_> = edges.iter().copied().collect();
+        assert_eq!(n, deduped.len());
+        assert!(edges.iter().all(|(i, j)| i < j));
+    }
 }

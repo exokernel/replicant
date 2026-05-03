@@ -89,22 +89,27 @@ impl ReplicaState {
     /// Called immediately after every local op so peers hear about changes
     /// without waiting for the next inbound message.
     async fn flush_to_peers(&self) {
-        let peer_ids: Vec<String> = self.peer_txs.lock().await.keys().cloned().collect();
-        for peer_id in &peer_ids {
-            if let Some(msg) = self.sync_generate(peer_id) {
-                // Clone sender before awaiting so we don't hold the lock.
-                let tx = self.peer_txs.lock().await.get(peer_id).cloned();
-                if let Some(tx) = tx
-                    && tx.send(msg).await.is_ok()
-                {
-                    self.metrics.sync_tx.add(
-                        1,
-                        &[
-                            KeyValue::new("actor", self.actor_id.clone()),
-                            KeyValue::new("peer", peer_id.clone()),
-                        ],
-                    );
-                }
+        // Collect (peer_id, sender) in one lock acquisition; no lock is held
+        // across the subsequent async sends.
+        let peers: Vec<(String, mpsc::Sender<Vec<u8>>)> = self
+            .peer_txs
+            .lock()
+            .await
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        for (peer_id, tx) in &peers {
+            if let Some(msg) = self.sync_generate(peer_id)
+                && tx.send(msg).await.is_ok()
+            {
+                self.metrics.sync_tx.add(
+                    1,
+                    &[
+                        KeyValue::new("actor", self.actor_id.clone()),
+                        KeyValue::new("peer", peer_id.clone()),
+                    ],
+                );
             }
         }
     }
@@ -197,14 +202,20 @@ impl Replica for ReplicaService {
         // orchestrator's `ConnectPeer` call only returns after the stream is
         // actually usable, removing the need for any post-connect sleep.
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            if let Err(e) = connect_to_peer(state, peer_id, addr, ready_tx).await {
-                tracing::error!("connect_to_peer failed: {e:#}");
-            }
-        });
+        let handle = tokio::spawn(connect_to_peer(state, peer_id.clone(), addr, ready_tx));
         ready_rx.await.map_err(|_| {
             Status::internal("connect_to_peer task dropped before signalling ready")
         })?;
+        // Await the handle in a watcher task so errors and panics that occur
+        // after the stream signals ready are logged rather than silently lost
+        // when the handle would otherwise be dropped here.
+        tokio::spawn(async move {
+            match handle.await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::error!(peer = %peer_id, "sync stream error: {e:#}"),
+                Err(e) => tracing::error!(peer = %peer_id, "sync stream task panicked: {e}"),
+            }
+        });
         Ok(Response::new(proto::Empty {}))
     }
 

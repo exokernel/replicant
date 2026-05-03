@@ -70,7 +70,7 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
-    let (provider, file_exporter) = init_metrics(args.metrics_file.as_deref());
+    let (provider, file_exporter) = init_metrics(args.metrics_file.as_deref())?;
     opentelemetry::global::set_meter_provider(provider.clone());
     if args.trials == 0 {
         bail!("--trials must be at least 1");
@@ -168,7 +168,7 @@ fn scenario_node_count(s: &ScenarioFile) -> usize {
         .as_ref()
         .map(|t| t.node_count)
         .or_else(|| s.partition_heal.as_ref().map(|p| p.node_count))
-        .unwrap_or(0)
+        .expect("scenario must have topology or partition_heal — caller validated this")
 }
 
 /// Built-in scenarios run when no file arguments are given (regression suite).
@@ -310,21 +310,21 @@ fn percentile(sorted: &[u128], p: f64) -> f64 {
 /// the stdout exporter (whose output is suppressed by never calling `shutdown`).
 fn init_metrics(
     metrics_file: Option<&std::path::Path>,
-) -> (SdkMeterProvider, Option<FileMetricExporter>) {
+) -> Result<(SdkMeterProvider, Option<FileMetricExporter>)> {
     use opentelemetry_sdk::metrics::PeriodicReader;
 
     if let Some(path) = metrics_file {
         let file = std::fs::File::create(path)
-            .unwrap_or_else(|e| panic!("cannot create metrics file {}: {e}", path.display()));
+            .with_context(|| format!("cannot create metrics file {}", path.display()))?;
         let exporter = FileMetricExporter::new(file);
         let reader = PeriodicReader::builder(exporter.clone()).build();
         let provider = SdkMeterProvider::builder().with_reader(reader).build();
-        (provider, Some(exporter))
+        Ok((provider, Some(exporter)))
     } else {
         use opentelemetry_stdout::MetricExporter;
         let reader = PeriodicReader::builder(MetricExporter::default()).build();
         let provider = SdkMeterProvider::builder().with_reader(reader).build();
-        (provider, None)
+        Ok((provider, None))
     }
 }
 
@@ -398,20 +398,19 @@ fn serialize_metrics(rm: &ResourceMetrics) -> String {
         .scope_metrics()
         .flat_map(|sm| sm.metrics())
         .map(|m| {
-            let kind;
-            let data_points: Vec<serde_json::Value> = match m.data() {
-                AggregatedMetrics::U64(MetricData::Sum(sum)) => {
-                    kind = "sum";
+            let (kind, data_points): (&str, Vec<serde_json::Value>) = match m.data() {
+                AggregatedMetrics::U64(MetricData::Sum(sum)) => (
+                    "sum",
                     sum.data_points()
                         .map(|dp| {
                             let mut obj = kv_to_map(dp.attributes());
                             obj.insert("value".into(), dp.value().into());
                             serde_json::Value::Object(obj)
                         })
-                        .collect()
-                }
-                AggregatedMetrics::U64(MetricData::Gauge(gauge)) => {
-                    kind = "gauge";
+                        .collect(),
+                ),
+                AggregatedMetrics::U64(MetricData::Gauge(gauge)) => (
+                    "gauge",
                     gauge
                         .data_points()
                         .map(|dp| {
@@ -419,10 +418,10 @@ fn serialize_metrics(rm: &ResourceMetrics) -> String {
                             obj.insert("value".into(), dp.value().into());
                             serde_json::Value::Object(obj)
                         })
-                        .collect()
-                }
-                AggregatedMetrics::F64(MetricData::Histogram(hist)) => {
-                    kind = "histogram";
+                        .collect(),
+                ),
+                AggregatedMetrics::F64(MetricData::Histogram(hist)) => (
+                    "histogram",
                     hist.data_points()
                         .map(|dp| {
                             let mut obj = kv_to_map(dp.attributes());
@@ -436,12 +435,9 @@ fn serialize_metrics(rm: &ResourceMetrics) -> String {
                             }
                             serde_json::Value::Object(obj)
                         })
-                        .collect()
-                }
-                _ => {
-                    kind = "unknown";
-                    vec![]
-                }
+                        .collect(),
+                ),
+                _ => ("unknown", vec![]),
             };
             serde_json::json!({
                 "name": m.name(),
@@ -453,8 +449,9 @@ fn serialize_metrics(rm: &ResourceMetrics) -> String {
         })
         .collect();
 
+    // serde_json::Value serialization is infallible (no non-string map keys).
     serde_json::to_string(&serde_json::json!({ "metrics": metrics_arr }))
-        .unwrap_or_else(|_| "{}".to_owned())
+        .expect("serde_json::Value serialization is infallible")
 }
 
 /// Convert an attribute iterator to a `serde_json::Map` keyed by attribute name.
@@ -469,4 +466,76 @@ fn kv_to_map<'a>(
             )
         })
         .collect()
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use topology::{Group, PartitionConfig, TopologyConfig};
+
+    // ── stats / percentile ─────────────────────────────────────────────────
+
+    #[test]
+    fn stats_single_value() {
+        let s = stats(&[42]);
+        assert_eq!(s.mean, 42.0);
+        assert_eq!(s.p50, 42.0);
+        assert_eq!(s.p95, 42.0);
+    }
+
+    #[test]
+    fn stats_mean_and_percentiles() {
+        // [10, 20, 30, 40, 50] — mean=30, p50=30, p95=50
+        let s = stats(&[50, 10, 40, 30, 20]);
+        assert_eq!(s.mean, 30.0);
+        assert_eq!(s.p50, 30.0);
+        assert_eq!(s.p95, 50.0);
+    }
+
+    #[test]
+    fn percentile_p100_is_max() {
+        let sorted = vec![1u128, 2, 3, 4, 5];
+        assert_eq!(percentile(&sorted, 100.0), 5.0);
+    }
+
+    #[test]
+    fn percentile_p0_is_min() {
+        let sorted = vec![1u128, 2, 3, 4, 5];
+        // ceil(0/100 * 5) = 0, saturating_sub(1) = 0 → first element
+        assert_eq!(percentile(&sorted, 0.0), 1.0);
+    }
+
+    // ── scenario_node_count ────────────────────────────────────────────────
+
+    #[test]
+    fn scenario_node_count_topology() {
+        let s = ScenarioFile {
+            name: "t".into(),
+            topology: Some(TopologyConfig {
+                node_count: 5,
+                connections: Connections::FullMesh,
+                write_pattern: WritePattern::RoundRobin,
+                op_count: 1,
+            }),
+            partition_heal: None,
+        };
+        assert_eq!(scenario_node_count(&s), 5);
+    }
+
+    #[test]
+    fn scenario_node_count_partition_heal() {
+        let s = ScenarioFile {
+            name: "p".into(),
+            topology: None,
+            partition_heal: Some(PartitionConfig {
+                node_count: 4,
+                groups: vec![Group { nodes: vec![0, 1] }, Group { nodes: vec![2, 3] }],
+                ops_per_group: 2,
+                write_pattern: WritePattern::RoundRobin,
+            }),
+        };
+        assert_eq!(scenario_node_count(&s), 4);
+    }
 }

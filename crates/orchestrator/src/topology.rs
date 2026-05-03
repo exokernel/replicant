@@ -1,3 +1,4 @@
+use anyhow::{Result, bail};
 use serde::Deserialize;
 
 /// Write distribution for ops in a scenario run.
@@ -80,6 +81,88 @@ pub struct RunResult {
     pub convergence_ms: u128,
     /// Total ops applied across all nodes.
     pub total_ops: usize,
+}
+
+impl PartitionConfig {
+    /// Check that `node_count` equals the total number of nodes across all groups.
+    pub fn validate(&self) -> Result<()> {
+        let total: usize = self.groups.iter().map(|g| g.nodes.len()).sum();
+        if total != self.node_count {
+            bail!(
+                "PartitionConfig: node_count={} but groups cover {} nodes",
+                self.node_count,
+                total
+            );
+        }
+        Ok(())
+    }
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_config(node_count: usize, groups: Vec<Vec<usize>>) -> PartitionConfig {
+        PartitionConfig {
+            node_count,
+            groups: groups.into_iter().map(|nodes| Group { nodes }).collect(),
+            ops_per_group: 1,
+            write_pattern: WritePattern::RoundRobin,
+        }
+    }
+
+    #[test]
+    fn validate_ok_when_counts_match() {
+        assert!(
+            make_config(4, vec![vec![0, 1], vec![2, 3]])
+                .validate()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_err_when_node_count_too_high() {
+        let err = make_config(5, vec![vec![0, 1], vec![2, 3]])
+            .validate()
+            .unwrap_err();
+        assert!(err.to_string().contains("node_count=5"), "{err}");
+        assert!(err.to_string().contains("cover 4 nodes"), "{err}");
+    }
+
+    #[test]
+    fn validate_err_when_node_count_too_low() {
+        let err = make_config(2, vec![vec![0, 1, 2]]).validate().unwrap_err();
+        assert!(err.to_string().contains("node_count=2"), "{err}");
+        assert!(err.to_string().contains("cover 3 nodes"), "{err}");
+    }
+
+    #[test]
+    fn validate_ok_single_group() {
+        assert!(make_config(3, vec![vec![0, 1, 2]]).validate().is_ok());
+    }
+
+    #[test]
+    fn connections_full_mesh_edges_n2() {
+        assert_eq!(Connections::FullMesh.edges(2), vec![(0, 1)]);
+    }
+
+    #[test]
+    fn connections_full_mesh_edges_n3() {
+        assert_eq!(Connections::FullMesh.edges(3), vec![(0, 1), (0, 2), (1, 2)]);
+    }
+
+    #[test]
+    fn connections_full_mesh_edges_count() {
+        // n*(n-1)/2 pairs for full mesh
+        for n in 0..=6 {
+            assert_eq!(
+                Connections::FullMesh.edges(n).len(),
+                n * n.saturating_sub(1) / 2
+            );
+        }
+    }
 }
 
 /// Top-level scenario file — TOML format; exactly one of `[topology]` or
