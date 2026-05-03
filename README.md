@@ -147,6 +147,9 @@ graph LR
     O -->|"op 0, 3, 6…"| N0((Node 0))
     O -->|"op 1, 4, 7…"| N1((Node 1))
     O -->|"op 2, 5, 8…"| N2((Node 2))
+    N0 --- N1
+    N0 --- N2
+    N1 --- N2
 ```
 
 **`concentrated`** — all ops go to node 0:
@@ -155,6 +158,7 @@ graph LR
 graph LR
     O[Orchestrator]
     O -->|"all ops"| N0((Node 0))
-    N1((Node 1))
-    N2((Node 2))
+    N0 --- N1((Node 1))
+    N0 --- N2((Node 2))
+    N1 --- N2
 ```
