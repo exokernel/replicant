@@ -1,0 +1,19 @@
+[package]
+name    = "replica"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+common               = { path = "../common" }
+clap                 = { version = "4", features = ["derive"] }
+automerge            = "0.8"
+anyhow               = { workspace = true }
+tokio                = { workspace = true }
+tokio-stream         = { workspace = true }
+tonic                = { workspace = true }
+prost                = { workspace = true }
+tracing              = { workspace = true }
+tracing-subscriber   = { workspace = true }
+opentelemetry        = { workspace = true }
+opentelemetry_sdk    = { workspace = true }
+opentelemetry-stdout = { workspace = true }

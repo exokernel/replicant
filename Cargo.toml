@@ -1,10 +1,19 @@
-[package]
-name = "replicant"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+members = [
+    "crates/common",
+    "crates/replica",
+    "crates/orchestrator",
+]
+resolver = "2"
 
-[dependencies]
-automerge = "0.8"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-anyhow = "1"
+[workspace.dependencies]
+anyhow               = "1"
+prost                = "0.13"
+tokio                = { version = "1", features = ["full"] }
+tokio-stream         = "0.1"
+tonic                = { version = "0.12", features = ["transport"] }
+tracing              = "0.1"
+tracing-subscriber   = { version = "0.3", features = ["env-filter"] }
+opentelemetry        = "0.31"
+opentelemetry_sdk    = { version = "0.31", features = ["metrics"] }
+opentelemetry-stdout = { version = "0.31", features = ["metrics"] }
