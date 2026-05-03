@@ -131,6 +131,9 @@ impl CrdtAdapter for AutomergeAdapter {
     }
 
     fn doc_size_bytes(&mut self) -> usize {
+        // save() produces the full binary encoding — there is no cheaper
+        // size query in Automerge. Acceptable here because this is called
+        // once per op for the benchmark size gauge.
         self.doc.save().len()
     }
 

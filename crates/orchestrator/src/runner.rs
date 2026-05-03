@@ -47,6 +47,8 @@ async fn connect_edges(
             }))
             .await?;
     }
+    // Allow time for the TCP connection and Automerge sync handshake to
+    // complete before the caller begins writing ops.
     tokio::time::sleep(Duration::from_millis(50)).await;
     Ok(())
 }
@@ -88,6 +90,8 @@ async fn wait_for_nodes(
             );
         }
 
+        // Empty fingerprint means the node has received no ops yet; treat as
+        // not converged to avoid a spurious match before any writes land.
         let converged = fps.iter().all(|fp| !fp.is_empty()) && fps.windows(2).all(|w| w[0] == w[1]);
         if converged {
             return Ok(start.elapsed().as_millis());
@@ -190,7 +194,9 @@ pub async fn run_partition_heal(config: &PartitionConfig) -> Result<RunResult> {
         }
     }
 
-    // Heal: connect remaining cross-group edges to complete a full mesh.
+    // Heal: add the edges that cross group boundaries. `intra` is the set of
+    // edges already wired during the partition phase; subtracting them from
+    // the full mesh gives exactly the cross-group connections needed.
     let intra: Vec<(usize, usize)> = config
         .groups
         .iter()

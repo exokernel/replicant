@@ -1,3 +1,4 @@
+/// Generated protobuf types for the `replicant.v1` package.
 pub mod proto {
     tonic::include_proto!("replicant.v1");
 }

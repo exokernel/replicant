@@ -1,0 +1,12 @@
+name = "partition-heal-n8"
+
+[partition_heal]
+node_count = 8
+write_pattern = "round_robin"
+ops_per_group = 8
+
+[[partition_heal.groups]]
+nodes = [0, 1, 2, 3]
+
+[[partition_heal.groups]]
+nodes = [4, 5, 6, 7]

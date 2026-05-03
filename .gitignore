@@ -1,3 +1,5 @@
 /target
 .obsidian/
 NEXT_SESSION.md
+*.csv
+*.parquet

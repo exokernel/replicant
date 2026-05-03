@@ -26,8 +26,13 @@ pub struct ReplicaState {
     /// Stable actor identifier used in metric labels and as the `x-peer-id`
     /// gRPC metadata value when opening outbound sync streams.
     pub actor_id: String,
+    /// `std::sync::Mutex` is intentional: the lock is never held across an
+    /// `.await` point, so there is no risk of blocking the async executor.
     adapter: Mutex<Box<dyn CrdtAdapter>>,
-    /// Outbound raw-bytes channel per connected peer.
+    /// Outbound raw-bytes sender per connected peer.
+    ///
+    /// Uses `tokio::sync::Mutex` because `flush_to_peers` holds this lock
+    /// across `.await` points while sending on each channel.
     peer_txs: tokio::sync::Mutex<HashMap<String, mpsc::Sender<Vec<u8>>>>,
     metrics: Metrics,
 }
@@ -197,7 +202,9 @@ impl Replica for ReplicaService {
     }
 
     async fn shutdown(&self, _: Request<proto::Empty>) -> Result<Response<proto::Empty>, Status> {
-        // TODO: graceful shutdown — signal the server to stop
+        // Graceful per-replica shutdown is not yet implemented. In the current
+        // in-process model the orchestrator tears everything down by dropping
+        // the process, which triggers provider.shutdown() and flushes OTel.
         Ok(Response::new(proto::Empty {}))
     }
 }

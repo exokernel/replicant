@@ -1,0 +1,7 @@
+name = "full-mesh-n5"
+
+[topology]
+node_count = 5
+connections = "full_mesh"
+write_pattern = "round_robin"
+op_count = 10
