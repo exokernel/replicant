@@ -105,7 +105,7 @@ impl ReplicaState {
 
         for (peer_id, tx) in &peers {
             if let Some(msg) = self.sync_generate(peer_id)
-                && tx.send(msg).await.is_ok()
+                && tx.try_send(msg).is_ok()
             {
                 self.metrics.sync_tx.add(
                     1,

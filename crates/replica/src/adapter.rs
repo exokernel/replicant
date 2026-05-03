@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::Context;
 use automerge::{
-    AutoCommit, ObjId, ObjType, ROOT, ScalarValue as AmScalarValue,
+    AutoCommit, ObjId, ObjType, ROOT, ReadDoc, ScalarValue as AmScalarValue,
     sync::{self, SyncDoc},
     transaction::Transactable,
 };
@@ -52,11 +52,26 @@ impl AutomergeAdapter {
     ///
     /// Empty `obj` resolves to ROOT. `obj_type` is only consulted on first
     /// access; subsequent calls return the cached id regardless of type.
+    ///
+    /// # Invariant
+    /// Callers must use the same `obj_type` for a given `obj` name across all
+    /// calls. Passing a different type for an already-cached name returns the
+    /// cached id silently, which will cause Automerge operations to fail or
+    /// corrupt state if the types are incompatible.
     fn resolve_obj(&mut self, obj: &str, obj_type: ObjType) -> anyhow::Result<ObjId> {
         if obj.is_empty() {
             return Ok(ROOT);
         }
         if let Some(id) = self.objects.get(obj) {
+            debug_assert!(
+                // Verify the cached object still has the expected type. This
+                // catches callers that reuse a name with a different ObjType.
+                self.doc
+                    .object_type(id)
+                    .map(|t| t == obj_type)
+                    .unwrap_or(false),
+                "resolve_obj: '{obj}' was cached as a different type than {obj_type:?}"
+            );
             return Ok(id.clone());
         }
         let id = self
