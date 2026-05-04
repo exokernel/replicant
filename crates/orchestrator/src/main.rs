@@ -268,7 +268,7 @@ fn percentile(sorted: &[u128], p: f64) -> f64 {
 /// Build the metrics provider.
 ///
 /// If `metrics_file` is `Some`, attaches a [`FileMetricExporter`] that writes a
-/// JSON snapshot to the given path on [`force_flush`].  Otherwise falls back to
+/// JSON snapshot to the given path on `force_flush`.  Otherwise falls back to
 /// the stdout exporter (whose output is suppressed by never calling `shutdown`).
 fn init_metrics(
     metrics_file: Option<&std::path::Path>,
@@ -295,7 +295,7 @@ fn init_metrics(
 /// A [`PushMetricExporter`] that serialises each export call to a JSON line in a file.
 ///
 /// The struct is cheaply `Clone`able; all clones share the same underlying file
-/// handle via an `Arc<Mutex<…>>` so that the instance given to [`PeriodicReader`]
+/// handle via an `Arc<Mutex<…>>` so that the instance given to `PeriodicReader`
 /// and the one kept by the caller both write to the same file.
 #[derive(Clone)]
 struct FileMetricExporter {
