@@ -253,6 +253,10 @@ impl Sync for SyncService {
             .ok_or_else(|| Status::invalid_argument("missing x-peer-id metadata"))?
             .to_owned();
 
+        // Two-stage outbound pipeline: internal code writes raw Vec<u8> onto
+        // raw_tx; the adapter task below re-wraps each payload as a typed gRPC
+        // message and forwards it to grpc_tx, whose receiver end is returned to
+        // tonic as the wire stream back to the caller.
         let (raw_tx, mut raw_rx) = mpsc::channel::<Vec<u8>>(64);
         let (grpc_tx, grpc_rx) = mpsc::channel::<Result<proto::SyncMessage, Status>>(64);
 
@@ -269,12 +273,16 @@ impl Sync for SyncService {
             }
         });
 
+        // Register raw_tx so both recv_loop (protocol replies) and
+        // flush_to_peers (proactive post-op push) can write to this peer.
         self.0.register_peer(peer_id.clone(), raw_tx.clone()).await;
 
         let state = self.0.clone();
         let inbound = request.into_inner();
         tokio::spawn(recv_loop(state, peer_id, inbound, raw_tx));
 
+        // grpc_rx is the outbound wire stream; tonic drains it and sends each
+        // message back to the calling peer over the open HTTP/2 connection.
         Ok(Response::new(ReceiverStream::new(grpc_rx)))
     }
 }
