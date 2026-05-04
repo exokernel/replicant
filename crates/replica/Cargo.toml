@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 common               = { path = "../common" }
 clap                 = { version = "4", features = ["derive"] }
-automerge            = "0.8"
+automerge            = "0.9"
 anyhow               = { workspace = true }
 tokio                = { workspace = true }
 tokio-stream         = { workspace = true }
