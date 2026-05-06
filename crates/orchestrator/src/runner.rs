@@ -97,13 +97,13 @@ async fn map_put(client: &mut ReplicaClient<Channel>, key: &str, val: &str) -> R
 
 /// Poll nodes at `indices` until all have equal, non-empty fingerprints.
 ///
-/// Returns elapsed ms from call time to convergence.
+/// Returns fractional ms from `start` to convergence.
 async fn wait_for_nodes(
     clients: &mut [ReplicaClient<Channel>],
     indices: &[usize],
+    start: Instant,
     timeout: Duration,
-) -> Result<u128> {
-    let start = Instant::now();
+) -> Result<f64> {
     loop {
         let mut fps: Vec<Vec<u8>> = Vec::with_capacity(indices.len());
         for &i in indices {
@@ -120,7 +120,7 @@ async fn wait_for_nodes(
         // not converged to avoid a spurious match before any writes land.
         let converged = fps.iter().all(|fp| !fp.is_empty()) && fps.windows(2).all(|w| w[0] == w[1]);
         if converged {
-            return Ok(start.elapsed().as_millis());
+            return Ok(start.elapsed().as_secs_f64() * 1000.0);
         }
 
         if start.elapsed() >= timeout {
@@ -171,6 +171,10 @@ pub async fn run(config: &TopologyConfig) -> Result<RunResult> {
     connect_edges(&mut clients, &addrs, &edges).await?;
     check_tasks(&mut tasks)?;
 
+    // Start timing before the first write so the measurement includes write
+    // propagation time; on loopback sync completes before wait_for_nodes
+    // returns its first poll, so a post-write timer would always read 0.
+    let measure_start = Instant::now();
     for (i, target) in (0..config.op_count).map(|i| {
         let target = match &config.write_pattern {
             WritePattern::Concentrated => 0,
@@ -183,7 +187,7 @@ pub async fn run(config: &TopologyConfig) -> Result<RunResult> {
     check_tasks(&mut tasks)?;
 
     let all: Vec<usize> = (0..n).collect();
-    let convergence_ms = wait_for_nodes(&mut clients, &all, Duration::from_secs(5)).await?;
+    let convergence_ms = wait_for_nodes(&mut clients, &all, measure_start, Duration::from_secs(5)).await?;
     check_tasks(&mut tasks)?;
 
     Ok(RunResult {
@@ -236,9 +240,10 @@ pub async fn run_partition_heal(config: &PartitionConfig) -> Result<RunResult> {
     check_tasks(&mut tasks)?;
 
     // Wait for each group to reach internal consistency before healing.
+    // The start instant is throwaway — this is a gate, not a measurement.
     for group in &config.groups {
         if group.nodes.len() > 1 {
-            wait_for_nodes(&mut clients, &group.nodes, Duration::from_secs(5)).await?;
+            wait_for_nodes(&mut clients, &group.nodes, Instant::now(), Duration::from_secs(5)).await?;
         }
     }
     check_tasks(&mut tasks)?;
@@ -257,8 +262,7 @@ pub async fn run_partition_heal(config: &PartitionConfig) -> Result<RunResult> {
     connect_edges(&mut clients, &addrs, &heal_edges).await?;
 
     let all: Vec<usize> = (0..n).collect();
-    wait_for_nodes(&mut clients, &all, Duration::from_secs(10)).await?;
-    let convergence_ms = heal_start.elapsed().as_millis();
+    let convergence_ms = wait_for_nodes(&mut clients, &all, heal_start, Duration::from_secs(10)).await?;
     check_tasks(&mut tasks)?;
 
     Ok(RunResult {

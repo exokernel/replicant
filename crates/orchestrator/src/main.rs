@@ -95,7 +95,7 @@ async fn main() -> Result<()> {
 
     for scenario in &scenarios {
         let node_count = scenario_node_count(scenario);
-        let mut trial_ms: Vec<u128> = Vec::with_capacity(args.trials);
+        let mut trial_ms: Vec<f64> = Vec::with_capacity(args.trials);
         let mut last_op_count = 0usize;
 
         for t in 1..=args.trials {
@@ -177,12 +177,12 @@ fn emit_trial(
     trial: usize,
     node_count: usize,
     op_count: usize,
-    ms: u128,
+    ms: f64,
 ) {
     match fmt {
         OutputFormat::Csv => {
             // Empty trailing fields are the summary-only columns (mean_ms, p50_ms, p95_ms).
-            println!("trial,{scenario},{trial},{node_count},{op_count},{ms},,,");
+            println!("trial,{scenario},{trial},{node_count},{op_count},{ms:.3},,,");
         }
         OutputFormat::Json => {
             println!(
@@ -244,23 +244,23 @@ struct TrialStats {
 }
 
 /// Compute mean, p50, and p95 over a non-empty slice of millisecond durations.
-fn stats(values: &[u128]) -> TrialStats {
+fn stats(values: &[f64]) -> TrialStats {
     debug_assert!(!values.is_empty());
     let mut sorted = values.to_vec();
-    sorted.sort_unstable();
+    sorted.sort_by(f64::total_cmp);
     TrialStats {
-        mean: sorted.iter().sum::<u128>() as f64 / sorted.len() as f64,
+        mean: sorted.iter().sum::<f64>() / sorted.len() as f64,
         p50: percentile(&sorted, 50.0),
         p95: percentile(&sorted, 95.0),
     }
 }
 
 /// Nearest-rank percentile on a pre-sorted slice.
-fn percentile(sorted: &[u128], p: f64) -> f64 {
+fn percentile(sorted: &[f64], p: f64) -> f64 {
     let idx = ((p / 100.0 * sorted.len() as f64).ceil() as usize)
         .saturating_sub(1)
         .min(sorted.len() - 1);
-    sorted[idx] as f64
+    sorted[idx]
 }
 
 // ── Metrics setup ─────────────────────────────────────────────────────────────
@@ -441,7 +441,7 @@ mod tests {
 
     #[test]
     fn stats_single_value() {
-        let s = stats(&[42]);
+        let s = stats(&[42.0]);
         assert_eq!(s.mean, 42.0);
         assert_eq!(s.p50, 42.0);
         assert_eq!(s.p95, 42.0);
@@ -450,7 +450,7 @@ mod tests {
     #[test]
     fn stats_mean_and_percentiles() {
         // [10, 20, 30, 40, 50] — mean=30, p50=30, p95=50
-        let s = stats(&[50, 10, 40, 30, 20]);
+        let s = stats(&[50.0, 10.0, 40.0, 30.0, 20.0]);
         assert_eq!(s.mean, 30.0);
         assert_eq!(s.p50, 30.0);
         assert_eq!(s.p95, 50.0);
@@ -458,13 +458,13 @@ mod tests {
 
     #[test]
     fn percentile_p100_is_max() {
-        let sorted = vec![1u128, 2, 3, 4, 5];
+        let sorted = vec![1.0f64, 2.0, 3.0, 4.0, 5.0];
         assert_eq!(percentile(&sorted, 100.0), 5.0);
     }
 
     #[test]
     fn percentile_p0_is_min() {
-        let sorted = vec![1u128, 2, 3, 4, 5];
+        let sorted = vec![1.0f64, 2.0, 3.0, 4.0, 5.0];
         // ceil(0/100 * 5) = 0, saturating_sub(1) = 0 → first element
         assert_eq!(percentile(&sorted, 0.0), 1.0);
     }

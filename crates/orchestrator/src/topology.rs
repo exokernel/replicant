@@ -85,11 +85,9 @@ pub struct PartitionConfig {
 
 /// Result of a completed scenario run.
 pub struct RunResult {
-    /// Milliseconds from convergence-wait start until all fingerprints match.
-    ///
-    /// For [`crate::runner::run`]: measured after all ops are applied.
-    /// For [`crate::runner::run_partition_heal`]: measured from heal start.
-    pub convergence_ms: u128,
+    /// Fractional milliseconds from write-start (full-mesh) or heal-start
+    /// (partition-heal) until all node fingerprints agree.
+    pub convergence_ms: f64,
     /// Total ops applied across all nodes.
     pub total_ops: usize,
 }
