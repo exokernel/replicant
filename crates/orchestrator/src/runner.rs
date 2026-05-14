@@ -187,7 +187,8 @@ pub async fn run(config: &TopologyConfig) -> Result<RunResult> {
     check_tasks(&mut tasks)?;
 
     let all: Vec<usize> = (0..n).collect();
-    let convergence_ms = wait_for_nodes(&mut clients, &all, measure_start, Duration::from_secs(5)).await?;
+    let convergence_ms =
+        wait_for_nodes(&mut clients, &all, measure_start, Duration::from_secs(5)).await?;
     check_tasks(&mut tasks)?;
 
     Ok(RunResult {
@@ -243,7 +244,13 @@ pub async fn run_partition_heal(config: &PartitionConfig) -> Result<RunResult> {
     // The start instant is throwaway — this is a gate, not a measurement.
     for group in &config.groups {
         if group.nodes.len() > 1 {
-            wait_for_nodes(&mut clients, &group.nodes, Instant::now(), Duration::from_secs(5)).await?;
+            wait_for_nodes(
+                &mut clients,
+                &group.nodes,
+                Instant::now(),
+                Duration::from_secs(5),
+            )
+            .await?;
         }
     }
     check_tasks(&mut tasks)?;
@@ -262,7 +269,8 @@ pub async fn run_partition_heal(config: &PartitionConfig) -> Result<RunResult> {
     connect_edges(&mut clients, &addrs, &heal_edges).await?;
 
     let all: Vec<usize> = (0..n).collect();
-    let convergence_ms = wait_for_nodes(&mut clients, &all, heal_start, Duration::from_secs(10)).await?;
+    let convergence_ms =
+        wait_for_nodes(&mut clients, &all, heal_start, Duration::from_secs(10)).await?;
     check_tasks(&mut tasks)?;
 
     Ok(RunResult {
