@@ -344,4 +344,38 @@ mod tests {
         assert_eq!(n, deduped.len());
         assert!(edges.iter().all(|(i, j)| i < j));
     }
+
+    // ── relay across non-mesh topologies ───────────────────────────────────
+
+    /// Convergence across a 4-node line (0↔1↔2↔3) with all writes at node 0
+    /// only succeeds if `recv_loop` relays received state onward — nodes 2
+    /// and 3 are not directly connected to the writer, so the only way for
+    /// them to learn about its changes is through node 1 forwarding.
+    #[tokio::test]
+    async fn line_topology_n4_converges_with_relay() {
+        let mut tasks = JoinSet::new();
+        let (addrs, mut clients) = spawn_nodes(4, &mut tasks).await.unwrap();
+
+        let edges = vec![(0, 1), (1, 2), (2, 3)];
+        connect_edges(&mut clients, &addrs, &edges).await.unwrap();
+        check_tasks(&mut tasks).unwrap();
+
+        let measure_start = Instant::now();
+        for i in 0..4 {
+            map_put(&mut clients[0], &format!("k{i}"), &format!("v{i}"))
+                .await
+                .unwrap();
+        }
+        check_tasks(&mut tasks).unwrap();
+
+        wait_for_nodes(
+            &mut clients,
+            &[0, 1, 2, 3],
+            measure_start,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        check_tasks(&mut tasks).unwrap();
+    }
 }
