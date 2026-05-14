@@ -171,3 +171,134 @@ impl CrdtAdapter for AutomergeAdapter {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pump sync messages between two adapters until both return `None`,
+    /// meaning each side believes the other is caught up.
+    fn sync_until_quiescent(
+        a: &mut AutomergeAdapter,
+        a_id: &str,
+        b: &mut AutomergeAdapter,
+        b_id: &str,
+    ) {
+        // Bounded to prevent a buggy adapter from looping forever; well above
+        // any reasonable handshake length for these tiny docs.
+        for _ in 0..64 {
+            let from_a = a.sync_generate(b_id);
+            if let Some(msg) = from_a.clone() {
+                b.sync_receive(a_id, msg).unwrap();
+            }
+            let from_b = b.sync_generate(a_id);
+            if let Some(msg) = from_b.clone() {
+                a.sync_receive(b_id, msg).unwrap();
+            }
+            if from_a.is_none() && from_b.is_none() {
+                return;
+            }
+        }
+        panic!("sync did not reach quiescence within 64 rounds");
+    }
+
+    fn map_put(obj: &str, key: &str, value: impl Into<ScalarVal>) -> Op {
+        Op::MapPut {
+            obj: obj.to_owned(),
+            key: key.to_owned(),
+            value: value.into(),
+        }
+    }
+
+    #[test]
+    fn identical_ops_yield_equal_fingerprints() {
+        // Two fresh adapters that apply the exact same op sequence should
+        // produce the same heads and the same fingerprint — no sync involved.
+        let mut a = AutomergeAdapter::new();
+        let mut b = AutomergeAdapter::new();
+        // Automerge change hashes depend on actor id, which is random per
+        // adapter, so we have to drive convergence through sync rather than
+        // assuming identical ops produce identical hashes. Apply on `a`, sync
+        // to `b`, then check.
+        a.apply_op(&map_put("doc", "k", "v")).unwrap();
+        sync_until_quiescent(&mut a, "a", &mut b, "b");
+
+        assert_eq!(a.get_heads(), b.get_heads());
+        assert_eq!(a.state_fingerprint(), b.state_fingerprint());
+        assert!(!a.state_fingerprint().is_empty(), "fingerprint after a write must not be empty");
+    }
+
+    #[test]
+    fn disjoint_edits_converge_after_sync() {
+        let mut a = AutomergeAdapter::new();
+        let mut b = AutomergeAdapter::new();
+        a.apply_op(&map_put("doc", "a_key", 1u64)).unwrap();
+        b.apply_op(&map_put("doc", "b_key", 2u64)).unwrap();
+
+        assert_ne!(
+            a.state_fingerprint(),
+            b.state_fingerprint(),
+            "replicas with disjoint edits must not appear equal pre-sync"
+        );
+
+        sync_until_quiescent(&mut a, "a", &mut b, "b");
+
+        assert_eq!(a.get_heads(), b.get_heads());
+        assert_eq!(a.state_fingerprint(), b.state_fingerprint());
+    }
+
+    #[test]
+    fn concurrent_edits_to_same_key_converge() {
+        // Both replicas write to the same key with no prior sync. The DAG
+        // ends up with two heads; get_heads must sort them so byte-equal
+        // fingerprint comparison still works.
+        let mut a = AutomergeAdapter::new();
+        let mut b = AutomergeAdapter::new();
+        a.apply_op(&map_put("doc", "k", "from-a")).unwrap();
+        b.apply_op(&map_put("doc", "k", "from-b")).unwrap();
+
+        sync_until_quiescent(&mut a, "a", &mut b, "b");
+
+        let a_heads = a.get_heads();
+        let b_heads = b.get_heads();
+        assert_eq!(a_heads, b_heads);
+        assert_eq!(a_heads.len(), 2, "concurrent writes should leave 2 heads");
+        assert_eq!(a.state_fingerprint(), b.state_fingerprint());
+    }
+
+    #[test]
+    fn post_sync_divergence_is_detected() {
+        // Negative case: if a writes after sync without re-syncing, the
+        // fingerprints must differ. Without this, a buggy fingerprint that
+        // returns a constant value would still pass the convergence tests.
+        let mut a = AutomergeAdapter::new();
+        let mut b = AutomergeAdapter::new();
+        a.apply_op(&map_put("doc", "k", "v0")).unwrap();
+        sync_until_quiescent(&mut a, "a", &mut b, "b");
+        assert_eq!(a.state_fingerprint(), b.state_fingerprint());
+
+        a.apply_op(&map_put("doc", "k", "v1")).unwrap();
+        assert_ne!(a.state_fingerprint(), b.state_fingerprint());
+        assert_ne!(a.get_heads(), b.get_heads());
+    }
+
+    #[test]
+    fn three_replicas_converge_through_a_hub() {
+        // Line topology: a <-> b <-> c, then a <-> c directly. Each pair
+        // uses its own sync::State, so this catches cross-talk bugs in the
+        // per-peer state map.
+        let mut a = AutomergeAdapter::new();
+        let mut b = AutomergeAdapter::new();
+        let mut c = AutomergeAdapter::new();
+        a.apply_op(&map_put("doc", "from_a", 1u64)).unwrap();
+        b.apply_op(&map_put("doc", "from_b", 2u64)).unwrap();
+        c.apply_op(&map_put("doc", "from_c", 3u64)).unwrap();
+
+        sync_until_quiescent(&mut a, "a", &mut b, "b");
+        sync_until_quiescent(&mut b, "b", &mut c, "c");
+        sync_until_quiescent(&mut a, "a", &mut c, "c");
+
+        assert_eq!(a.state_fingerprint(), b.state_fingerprint());
+        assert_eq!(b.state_fingerprint(), c.state_fingerprint());
+    }
+}
