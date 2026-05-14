@@ -38,13 +38,15 @@ impl AutomergeAdapter {
     }
 
     /// Convert a [`ScalarVal`] to the Automerge scalar type.
-    fn to_am_scalar(v: ScalarVal) -> AmScalarValue {
+    ///
+    /// Primitives are copied; `Str` and `Bytes` clone their backing buffer.
+    fn to_am_scalar(v: &ScalarVal) -> AmScalarValue {
         match v {
-            ScalarVal::Str(s) => AmScalarValue::Str(s.into()),
-            ScalarVal::Uint(n) => AmScalarValue::Uint(n),
-            ScalarVal::Int(n) => AmScalarValue::Int(n),
-            ScalarVal::Bool(b) => AmScalarValue::Boolean(b),
-            ScalarVal::Bytes(b) => AmScalarValue::Bytes(b),
+            ScalarVal::Str(s) => AmScalarValue::Str(s.as_str().into()),
+            ScalarVal::Uint(n) => AmScalarValue::Uint(*n),
+            ScalarVal::Int(n) => AmScalarValue::Int(*n),
+            ScalarVal::Bool(b) => AmScalarValue::Boolean(*b),
+            ScalarVal::Bytes(b) => AmScalarValue::Bytes(b.clone()),
         }
     }
 
@@ -88,8 +90,7 @@ impl CrdtAdapter for AutomergeAdapter {
         match op {
             Op::MapPut { obj, key, value } => {
                 let id = self.resolve_obj(obj, ObjType::Map)?;
-                self.doc
-                    .put(id, key.as_str(), Self::to_am_scalar(value.clone()))?;
+                self.doc.put(id, key.as_str(), Self::to_am_scalar(value))?;
             }
             Op::MapDelete { obj, key } => {
                 let id = self.resolve_obj(obj, ObjType::Map)?;
@@ -97,8 +98,7 @@ impl CrdtAdapter for AutomergeAdapter {
             }
             Op::ListInsert { obj, index, value } => {
                 let id = self.resolve_obj(obj, ObjType::List)?;
-                self.doc
-                    .insert(id, *index, Self::to_am_scalar(value.clone()))?;
+                self.doc.insert(id, *index, Self::to_am_scalar(value))?;
             }
             Op::ListDelete { obj, index } => {
                 let id = self.resolve_obj(obj, ObjType::List)?;
@@ -111,7 +111,7 @@ impl CrdtAdapter for AutomergeAdapter {
                 values,
             } => {
                 let id = self.resolve_obj(obj, ObjType::List)?;
-                let scalars = values.iter().cloned().map(Self::to_am_scalar);
+                let scalars = values.iter().map(Self::to_am_scalar);
                 self.doc.splice(id, *pos, *del_count as isize, scalars)?;
             }
             Op::TextSplice {

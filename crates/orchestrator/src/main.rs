@@ -49,11 +49,14 @@ struct Args {
 }
 
 /// Output format for per-trial and summary records.
+///
+/// Both formats interleave per-trial rows with the per-scenario summary row,
+/// distinguished by a `row_type` column/field (`trial` or `summary`).
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
 enum OutputFormat {
     /// CSV rows; header is emitted once before the first record.
     Csv,
-    /// Newline-delimited JSON (JSON Lines); one object per record.
+    /// JSON Lines (one self-describing object per line, no surrounding array).
     Json,
 }
 
@@ -68,11 +71,11 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
-    let (provider, file_exporter) = init_metrics(args.metrics_file.as_deref())?;
-    opentelemetry::global::set_meter_provider(provider.clone());
     if args.trials == 0 {
         bail!("--trials must be at least 1");
     }
+    let (provider, file_exporter) = init_metrics(args.metrics_file.as_deref())?;
+    opentelemetry::global::set_meter_provider(provider.clone());
 
     let scenarios: Vec<ScenarioFile> = if args.scenarios.is_empty() {
         builtin_scenarios()
@@ -94,20 +97,24 @@ async fn main() -> Result<()> {
     }
 
     for scenario in &scenarios {
-        let node_count = scenario_node_count(scenario);
+        let node_count = scenario.node_count();
+        let op_count = scenario.op_count();
         let mut trial_ms: Vec<f64> = Vec::with_capacity(args.trials);
-        let mut last_op_count = 0usize;
 
         for t in 1..=args.trials {
             let result = run_scenario_once(scenario).await?;
-            last_op_count = result.total_ops;
+            debug_assert_eq!(
+                result.total_ops, op_count,
+                "scenario '{}' trial {t}: runner reported {} ops, expected {}",
+                scenario.name, result.total_ops, op_count,
+            );
             trial_ms.push(result.convergence_ms);
             emit_trial(
                 args.output,
                 &scenario.name,
                 t,
                 node_count,
-                result.total_ops,
+                op_count,
                 result.convergence_ms,
             );
         }
@@ -118,7 +125,7 @@ async fn main() -> Result<()> {
             &scenario.name,
             args.trials,
             node_count,
-            last_op_count,
+            op_count,
             &s,
         );
     }
@@ -130,9 +137,10 @@ async fn main() -> Result<()> {
             .map_err(|e| anyhow::anyhow!("metrics flush failed: {e:?}"))?;
         tracing::info!(path = ?args.metrics_file, "OTel metrics written");
     }
-    // Drop provider without calling shutdown to avoid the stdout MetricExporter
-    // (used when no metrics file is specified) writing JSON blobs to stdout.
-    let _ = provider;
+    // Drop without calling provider.shutdown(): the stdout MetricExporter
+    // (used when no metrics file is specified) writes a JSON blob on shutdown,
+    // which would pollute the structured stdout output.
+    drop(provider);
     Ok(())
 }
 
@@ -140,33 +148,21 @@ async fn main() -> Result<()> {
 
 /// Run a single scenario once and return its result.
 async fn run_scenario_once(scenario: &ScenarioFile) -> Result<RunResult> {
-    match (&scenario.topology, &scenario.partition_heal) {
-        (Some(config), None) => {
-            tracing::info!(scenario = %scenario.name, "starting");
-            let r = runner::run(config).await?;
-            tracing::info!(scenario = %scenario.name, convergence_ms = r.convergence_ms, "PASSED");
-            Ok(r)
-        }
-        (None, Some(config)) => {
-            tracing::info!(scenario = %scenario.name, "starting");
-            let r = runner::run_partition_heal(config).await?;
-            tracing::info!(scenario = %scenario.name, heal_convergence_ms = r.convergence_ms, "PASSED");
-            Ok(r)
-        }
+    tracing::info!(scenario = %scenario.name, "starting");
+    let result = match (&scenario.topology, &scenario.partition_heal) {
+        (Some(config), None) => runner::run(config).await?,
+        (None, Some(config)) => runner::run_partition_heal(config).await?,
         _ => bail!(
             "scenario '{}': exactly one of [topology] or [partition_heal] must be present",
             scenario.name
         ),
-    }
-}
-
-/// Return the node count for any scenario variant.
-fn scenario_node_count(s: &ScenarioFile) -> usize {
-    s.topology
-        .as_ref()
-        .map(|t| t.node_count)
-        .or_else(|| s.partition_heal.as_ref().map(|p| p.node_count))
-        .expect("scenario must have topology or partition_heal — caller validated this")
+    };
+    tracing::info!(
+        scenario = %scenario.name,
+        convergence_ms = result.convergence_ms,
+        "PASSED",
+    );
+    Ok(result)
 }
 
 // ── Output emission ──────────────────────────────────────────────────────────
@@ -237,6 +233,7 @@ fn emit_summary(
 // ── Statistics ───────────────────────────────────────────────────────────────
 
 /// Aggregated convergence statistics for a scenario's trial set.
+/// All values are in milliseconds, matching the input to [`stats`].
 struct TrialStats {
     mean: f64,
     p50: f64,
@@ -299,13 +296,13 @@ fn init_metrics(
 /// and the one kept by the caller both write to the same file.
 #[derive(Clone)]
 struct FileMetricExporter {
-    sink: Arc<Mutex<Option<std::fs::File>>>,
+    sink: Arc<Mutex<std::fs::File>>,
 }
 
 impl FileMetricExporter {
     fn new(file: std::fs::File) -> Self {
         Self {
-            sink: Arc::new(Mutex::new(Some(file))),
+            sink: Arc::new(Mutex::new(file)),
         }
     }
 }
@@ -320,12 +317,9 @@ impl PushMetricExporter for FileMetricExporter {
     async fn export(&self, metrics: &ResourceMetrics) -> opentelemetry_sdk::error::OTelSdkResult {
         use std::io::Write;
         let line = serialize_metrics(metrics);
-        if let Ok(mut guard) = self.sink.lock()
-            && let Some(file) = guard.as_mut()
-        {
-            // Ignore individual write errors; metrics are best-effort.
-            let _ = writeln!(file, "{line}");
-        }
+        let mut file = self.sink.lock().expect("metrics file mutex poisoned");
+        // Ignore individual write errors; metrics are best-effort.
+        let _ = writeln!(file, "{line}");
         Ok(())
     }
 
@@ -334,10 +328,8 @@ impl PushMetricExporter for FileMetricExporter {
     }
 
     fn shutdown_with_timeout(&self, _timeout: Duration) -> opentelemetry_sdk::error::OTelSdkResult {
-        // Close the file on shutdown so the OS flushes any buffered data.
-        if let Ok(mut guard) = self.sink.lock() {
-            *guard = None;
-        }
+        // File is unbuffered, so its `Drop` closes the handle and the OS
+        // commits any pending writes — no explicit flush needed here.
         Ok(())
     }
 
@@ -360,14 +352,14 @@ fn serialize_metrics(rm: &ResourceMetrics) -> String {
         .scope_metrics()
         .flat_map(|sm| sm.metrics())
         .map(|m| {
-            let (kind, data_points): (&str, Vec<serde_json::Value>) = match m.data() {
+            let (kind, data_points) = match m.data() {
                 AggregatedMetrics::U64(MetricData::Sum(sum)) => (
                     "sum",
                     sum.data_points()
                         .map(|dp| {
-                            let mut obj = kv_to_map(dp.attributes());
-                            obj.insert("value".into(), dp.value().into());
-                            serde_json::Value::Object(obj)
+                            data_point(dp.attributes(), |o| {
+                                o.insert("value".into(), dp.value().into());
+                            })
                         })
                         .collect(),
                 ),
@@ -376,9 +368,9 @@ fn serialize_metrics(rm: &ResourceMetrics) -> String {
                     gauge
                         .data_points()
                         .map(|dp| {
-                            let mut obj = kv_to_map(dp.attributes());
-                            obj.insert("value".into(), dp.value().into());
-                            serde_json::Value::Object(obj)
+                            data_point(dp.attributes(), |o| {
+                                o.insert("value".into(), dp.value().into());
+                            })
                         })
                         .collect(),
                 ),
@@ -386,20 +378,23 @@ fn serialize_metrics(rm: &ResourceMetrics) -> String {
                     "histogram",
                     hist.data_points()
                         .map(|dp| {
-                            let mut obj = kv_to_map(dp.attributes());
-                            obj.insert("count".into(), dp.count().into());
-                            obj.insert("sum".into(), dp.sum().into());
-                            if let Some(v) = dp.min() {
-                                obj.insert("min".into(), v.into());
-                            }
-                            if let Some(v) = dp.max() {
-                                obj.insert("max".into(), v.into());
-                            }
-                            serde_json::Value::Object(obj)
+                            data_point(dp.attributes(), |o| {
+                                o.insert("count".into(), dp.count().into());
+                                o.insert("sum".into(), dp.sum().into());
+                                if let Some(v) = dp.min() {
+                                    o.insert("min".into(), v.into());
+                                }
+                                if let Some(v) = dp.max() {
+                                    o.insert("max".into(), v.into());
+                                }
+                            })
                         })
                         .collect(),
                 ),
-                _ => ("unknown", vec![]),
+                _ => {
+                    tracing::warn!(metric = m.name(), "unhandled aggregation kind");
+                    ("unknown", Vec::new())
+                }
             };
             serde_json::json!({
                 "name": m.name(),
@@ -414,6 +409,20 @@ fn serialize_metrics(rm: &ResourceMetrics) -> String {
     // serde_json::Value serialization is infallible (no non-string map keys).
     serde_json::to_string(&serde_json::json!({ "metrics": metrics_arr }))
         .expect("serde_json::Value serialization is infallible")
+}
+
+/// Build one JSON data-point object: attributes as top-level keys, plus
+/// whatever numeric fields `fill` inserts (e.g. `value`, or `count`/`sum`).
+fn data_point<'a, F>(
+    attrs: impl Iterator<Item = &'a opentelemetry::KeyValue>,
+    fill: F,
+) -> serde_json::Value
+where
+    F: FnOnce(&mut serde_json::Map<String, serde_json::Value>),
+{
+    let mut obj = kv_to_map(attrs);
+    fill(&mut obj);
+    serde_json::Value::Object(obj)
 }
 
 /// Convert an attribute iterator to a `serde_json::Map` keyed by attribute name.
@@ -435,7 +444,6 @@ fn kv_to_map<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use topology::{Connections, Group, PartitionConfig, TopologyConfig, WritePattern};
 
     // ── stats / percentile ─────────────────────────────────────────────────
 
@@ -467,37 +475,5 @@ mod tests {
         let sorted = vec![1.0f64, 2.0, 3.0, 4.0, 5.0];
         // ceil(0/100 * 5) = 0, saturating_sub(1) = 0 → first element
         assert_eq!(percentile(&sorted, 0.0), 1.0);
-    }
-
-    // ── scenario_node_count ────────────────────────────────────────────────
-
-    #[test]
-    fn scenario_node_count_topology() {
-        let s = ScenarioFile {
-            name: "t".into(),
-            topology: Some(TopologyConfig {
-                node_count: 5,
-                connections: Connections::FullMesh,
-                write_pattern: WritePattern::RoundRobin,
-                op_count: 1,
-            }),
-            partition_heal: None,
-        };
-        assert_eq!(scenario_node_count(&s), 5);
-    }
-
-    #[test]
-    fn scenario_node_count_partition_heal() {
-        let s = ScenarioFile {
-            name: "p".into(),
-            topology: None,
-            partition_heal: Some(PartitionConfig {
-                node_count: 4,
-                groups: vec![Group { nodes: vec![0, 1] }, Group { nodes: vec![2, 3] }],
-                ops_per_group: 2,
-                write_pattern: WritePattern::RoundRobin,
-            }),
-        };
-        assert_eq!(scenario_node_count(&s), 4);
     }
 }

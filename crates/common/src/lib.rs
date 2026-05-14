@@ -1,3 +1,13 @@
+//! Shared types for the replicant project.
+//!
+//! - [`proto`] — generated tonic/prost code for the `replicant.v1` gRPC API.
+//! - [`ScalarVal`] / [`Op`] — library-agnostic value and operation models,
+//!   with `TryFrom` impls from their proto counterparts.
+//! - [`CrdtAdapter`] — the trait every CRDT backend (currently just Automerge)
+//!   implements, called by the replica scaffolding.
+
+use anyhow::Context as _;
+
 /// Generated protobuf types for the `replicant.v1` package.
 pub mod proto {
     tonic::include_proto!("replicant.v1");
@@ -51,10 +61,7 @@ impl TryFrom<proto::ScalarValue> for ScalarVal {
 
     fn try_from(v: proto::ScalarValue) -> anyhow::Result<Self> {
         use proto::scalar_value::Value;
-        match v
-            .value
-            .ok_or_else(|| anyhow::anyhow!("ScalarValue missing value field"))?
-        {
+        match v.value.context("ScalarValue missing value field")? {
             Value::StrVal(s) => Ok(Self::Str(s)),
             Value::UintVal(n) => Ok(Self::Uint(n)),
             Value::IntVal(n) => Ok(Self::Int(n)),
@@ -130,17 +137,11 @@ impl TryFrom<proto::OpRequest> for Op {
     fn try_from(req: proto::OpRequest) -> anyhow::Result<Self> {
         use proto::op_request::Op as P;
 
-        match req
-            .op
-            .ok_or_else(|| anyhow::anyhow!("OpRequest missing op field"))?
-        {
+        match req.op.context("OpRequest missing op field")? {
             P::MapPut(p) => Ok(Op::MapPut {
                 obj: p.obj,
                 key: p.key,
-                value: p
-                    .value
-                    .ok_or_else(|| anyhow::anyhow!("MapPut missing value"))?
-                    .try_into()?,
+                value: p.value.context("MapPut missing value")?.try_into()?,
             }),
             P::MapDelete(p) => Ok(Op::MapDelete {
                 obj: p.obj,
@@ -149,10 +150,7 @@ impl TryFrom<proto::OpRequest> for Op {
             P::ListInsert(p) => Ok(Op::ListInsert {
                 obj: p.obj,
                 index: p.index as usize,
-                value: p
-                    .value
-                    .ok_or_else(|| anyhow::anyhow!("ListInsert missing value"))?
-                    .try_into()?,
+                value: p.value.context("ListInsert missing value")?.try_into()?,
             }),
             P::ListDelete(p) => Ok(Op::ListDelete {
                 obj: p.obj,

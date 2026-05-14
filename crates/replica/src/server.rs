@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use anyhow::Context as _;
 use opentelemetry::KeyValue;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt as _;
@@ -42,7 +43,18 @@ impl ReplicaState {
     ///
     /// Instruments are obtained from the global OTel meter provider, so the
     /// provider must be initialized before calling this.
+    ///
+    /// Panics if `actor_id` is not a valid HTTP-header value — it is sent as
+    /// the `x-peer-id` metadata header on every outbound sync stream, and
+    /// failing here makes the misconfiguration obvious at startup rather than
+    /// on first peer connect.
     pub fn new(actor_id: String, adapter: impl CrdtAdapter) -> Arc<Self> {
+        assert!(
+            actor_id
+                .parse::<tonic::metadata::AsciiMetadataValue>()
+                .is_ok(),
+            "actor_id must be a valid HTTP-header value: {actor_id:?}",
+        );
         let meter = opentelemetry::global::meter("replicant");
         Arc::new(Self {
             actor_id,
@@ -53,27 +65,36 @@ impl ReplicaState {
     }
 
     fn apply_op(&self, op: &Op) -> anyhow::Result<()> {
-        self.adapter.lock().unwrap().apply_op(op)
+        self.with_adapter(|a| a.apply_op(op))
     }
 
     fn get_heads(&self) -> Vec<Vec<u8>> {
-        self.adapter.lock().unwrap().get_heads()
+        self.with_adapter(|a| a.get_heads())
     }
 
     fn state_fingerprint(&self) -> Vec<u8> {
-        self.adapter.lock().unwrap().state_fingerprint()
+        self.with_adapter(|a| a.state_fingerprint())
     }
 
     fn doc_size_bytes(&self) -> usize {
-        self.adapter.lock().unwrap().doc_size_bytes()
+        self.with_adapter(|a| a.doc_size_bytes())
     }
 
     fn sync_generate(&self, peer: &str) -> Option<Vec<u8>> {
-        self.adapter.lock().unwrap().sync_generate(peer)
+        self.with_adapter(|a| a.sync_generate(peer))
     }
 
     fn sync_receive(&self, peer: &str, msg: Vec<u8>) -> anyhow::Result<()> {
-        self.adapter.lock().unwrap().sync_receive(peer, msg)
+        self.with_adapter(|a| a.sync_receive(peer, msg))
+    }
+
+    /// Run `f` with exclusive access to the adapter.
+    ///
+    /// Panics if the mutex is poisoned (another thread panicked while holding
+    /// the adapter lock — the document state is no longer trustworthy).
+    fn with_adapter<R>(&self, f: impl FnOnce(&mut dyn CrdtAdapter) -> R) -> R {
+        let mut guard = self.adapter.lock().expect("adapter mutex poisoned");
+        f(&mut **guard)
     }
 
     pub fn actor_id(&self) -> &str {
@@ -124,21 +145,25 @@ impl ReplicaState {
 /// gRPC [`Replica`] service — handles control-plane RPCs from the orchestrator
 /// (apply ops, inspect state, connect peers, shutdown).
 #[derive(Clone)]
-pub struct ReplicaService(Arc<ReplicaState>);
+pub struct ReplicaService {
+    state: Arc<ReplicaState>,
+}
 
 /// gRPC [`Sync`] service — accepts inbound bidi sync streams from peer replicas.
 #[derive(Clone)]
-pub struct SyncService(Arc<ReplicaState>);
+pub struct SyncService {
+    state: Arc<ReplicaState>,
+}
 
 impl ReplicaService {
     pub fn new(state: Arc<ReplicaState>) -> Self {
-        Self(state)
+        Self { state }
     }
 }
 
 impl SyncService {
     pub fn new(state: Arc<ReplicaState>) -> Self {
-        Self(state)
+        Self { state }
     }
 }
 
@@ -154,25 +179,25 @@ impl Replica for ReplicaService {
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
         let t0 = Instant::now();
-        self.0
+        self.state
             .apply_op(&op)
             .map_err(|e| Status::internal(e.to_string()))?;
         let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
-        let actor = self.0.actor_id.clone();
-        self.0.metrics.op_duration_ms.record(
+        let actor = self.state.actor_id.clone();
+        self.state.metrics.op_duration_ms.record(
             elapsed_ms,
             &[
                 KeyValue::new("actor", actor.clone()),
                 KeyValue::new("op", op.name()),
             ],
         );
-        self.0.metrics.doc_size_bytes.record(
-            self.0.doc_size_bytes() as u64,
+        self.state.metrics.doc_size_bytes.record(
+            self.state.doc_size_bytes() as u64,
             &[KeyValue::new("actor", actor)],
         );
 
-        self.0.flush_to_peers().await;
+        self.state.flush_to_peers().await;
 
         Ok(Response::new(proto::OpResponse {}))
     }
@@ -182,7 +207,7 @@ impl Replica for ReplicaService {
         _: Request<proto::Empty>,
     ) -> Result<Response<proto::HeadsResponse>, Status> {
         Ok(Response::new(proto::HeadsResponse {
-            heads: self.0.get_heads(),
+            heads: self.state.get_heads(),
         }))
     }
 
@@ -191,7 +216,7 @@ impl Replica for ReplicaService {
         _: Request<proto::Empty>,
     ) -> Result<Response<proto::FingerprintResponse>, Status> {
         Ok(Response::new(proto::FingerprintResponse {
-            fingerprint: self.0.state_fingerprint(),
+            fingerprint: self.state.state_fingerprint(),
         }))
     }
 
@@ -200,7 +225,7 @@ impl Replica for ReplicaService {
         request: Request<proto::PeerRef>,
     ) -> Result<Response<proto::Empty>, Status> {
         let proto::PeerRef { peer_id, addr } = request.into_inner();
-        let state = self.0.clone();
+        let state = self.state.clone();
         // `ready_rx` resolves once the TCP connection and gRPC stream are open
         // and the peer is registered in `peer_txs`. Awaiting it here means the
         // orchestrator's `ConnectPeer` call only returns after the stream is
@@ -227,6 +252,8 @@ impl Replica for ReplicaService {
         // Graceful per-replica shutdown is not yet implemented. In the current
         // in-process model the orchestrator tears everything down by dropping
         // the process, which triggers provider.shutdown() and flushes OTel.
+        // Warn so a future caller relying on this RPC sees that it is a no-op.
+        tracing::warn!(actor = %self.state.actor_id, "shutdown RPC is a no-op");
         Ok(Response::new(proto::Empty {}))
     }
 }
@@ -257,27 +284,17 @@ impl Sync for SyncService {
         // raw_tx; the adapter task below re-wraps each payload as a typed gRPC
         // message and forwards it to grpc_tx, whose receiver end is returned to
         // tonic as the wire stream back to the caller.
-        let (raw_tx, mut raw_rx) = mpsc::channel::<Vec<u8>>(64);
+        let (raw_tx, raw_rx) = mpsc::channel::<Vec<u8>>(64);
         let (grpc_tx, grpc_rx) = mpsc::channel::<Result<proto::SyncMessage, Status>>(64);
-
-        // Adaptor: raw bytes → typed outbound stream items.
-        tokio::spawn(async move {
-            while let Some(payload) = raw_rx.recv().await {
-                if grpc_tx
-                    .send(Ok(proto::SyncMessage { payload }))
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
+        spawn_payload_forwarder(raw_rx, grpc_tx, Ok);
 
         // Register raw_tx so both recv_loop (protocol replies) and
         // flush_to_peers (proactive post-op push) can write to this peer.
-        self.0.register_peer(peer_id.clone(), raw_tx.clone()).await;
+        self.state
+            .register_peer(peer_id.clone(), raw_tx.clone())
+            .await;
 
-        let state = self.0.clone();
+        let state = self.state.clone();
         let inbound = request.into_inner();
         tokio::spawn(recv_loop(state, peer_id, inbound, raw_tx));
 
@@ -348,21 +365,13 @@ async fn connect_to_peer(
     ready_tx: tokio::sync::oneshot::Sender<()>,
 ) -> anyhow::Result<()> {
     let endpoint = Channel::from_shared(format!("http://{addr}"))
-        .map_err(|e| anyhow::anyhow!("invalid peer address '{addr}': {e}"))?;
+        .with_context(|| format!("invalid peer address '{addr}'"))?;
     let channel = endpoint.connect().await?;
     let mut client = proto::sync_client::SyncClient::new(channel);
 
-    let (raw_tx, mut raw_rx) = mpsc::channel::<Vec<u8>>(64);
+    let (raw_tx, raw_rx) = mpsc::channel::<Vec<u8>>(64);
     let (grpc_tx, grpc_rx) = mpsc::channel::<proto::SyncMessage>(64);
-
-    // Adaptor: raw bytes → client outbound stream items.
-    tokio::spawn(async move {
-        while let Some(payload) = raw_rx.recv().await {
-            if grpc_tx.send(proto::SyncMessage { payload }).await.is_err() {
-                break;
-            }
-        }
-    });
+    spawn_payload_forwarder(raw_rx, grpc_tx, std::convert::identity);
 
     let mut request = Request::new(ReceiverStream::new(grpc_rx));
     request.metadata_mut().insert(
@@ -370,7 +379,7 @@ async fn connect_to_peer(
         state
             .actor_id
             .parse()
-            .expect("actor_id must be a valid ASCII header value"),
+            .expect("actor_id is validated as a header value in ReplicaState::new"),
     );
 
     let response = client.stream(request).await?;
@@ -390,4 +399,32 @@ async fn connect_to_peer(
 
     recv_loop(state, peer_id, inbound, raw_tx).await;
     Ok(())
+}
+
+/// Spawn a task that wraps each raw payload into a typed message and forwards it.
+///
+/// The two sync streams (server-side and client-side) use slightly different
+/// outbound wire types — `Result<SyncMessage, Status>` versus `SyncMessage` —
+/// so `wrap` lifts a built `SyncMessage` into whatever the caller's channel
+/// expects (e.g. `Ok` for the fallible variant, `identity` for the bare one).
+/// The task exits once the receiver closes or the outbound sender is dropped.
+fn spawn_payload_forwarder<T, F>(
+    mut raw_rx: mpsc::Receiver<Vec<u8>>,
+    grpc_tx: mpsc::Sender<T>,
+    wrap: F,
+) where
+    T: Send + 'static,
+    F: Fn(proto::SyncMessage) -> T + Send + 'static,
+{
+    tokio::spawn(async move {
+        while let Some(payload) = raw_rx.recv().await {
+            if grpc_tx
+                .send(wrap(proto::SyncMessage { payload }))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
 }

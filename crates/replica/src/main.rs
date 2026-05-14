@@ -1,3 +1,10 @@
+//! `replicant-replica` — one gRPC replica process.
+//!
+//! Spins up an [`AutomergeAdapter`] behind [`ReplicaService`] (control RPCs)
+//! and [`SyncService`] (peer sync streams) on the configured port, with a
+//! stdout OTel metrics exporter for development visibility.
+
+use clap::Parser as _;
 use common::proto::{replica_server::ReplicaServer, sync_server::SyncServer};
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use replica::adapter::AutomergeAdapter;
@@ -18,8 +25,6 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    use clap::Parser as _;
-
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();

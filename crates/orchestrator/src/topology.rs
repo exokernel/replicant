@@ -25,11 +25,11 @@ pub enum WritePattern {
 
 /// Connection topology for a scenario run.
 ///
-/// Note: only `FullMesh` guarantees convergence for all write patterns with
-/// the current sync implementation. Ring/star topologies require
-/// relay-on-receive in `recv_loop` (not yet implemented).
+/// More variants (ring, line, star) are planned; for now only `FullMesh` is
+/// implemented. `#[non_exhaustive]` keeps `match` arms forwards-compatible.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Connections {
     /// Connect every pair — n*(n-1)/2 bidi sync streams.
     FullMesh,
@@ -90,6 +90,37 @@ pub struct RunResult {
     pub convergence_ms: f64,
     /// Total ops applied across all nodes.
     pub total_ops: usize,
+}
+
+impl ScenarioFile {
+    /// Number of replica nodes this scenario will spawn.
+    ///
+    /// Returns the count from whichever variant is present. Panics if neither
+    /// `topology` nor `partition_heal` is set — `run_scenario_once` rejects
+    /// such files before this is reached.
+    pub fn node_count(&self) -> usize {
+        self.topology
+            .as_ref()
+            .map(|t| t.node_count)
+            .or_else(|| self.partition_heal.as_ref().map(|p| p.node_count))
+            .expect("scenario must have topology or partition_heal — caller validated this")
+    }
+
+    /// Total ops applied across all nodes in one trial of this scenario.
+    ///
+    /// Deterministic from the config, so every trial of the same scenario
+    /// reports the same value.
+    pub fn op_count(&self) -> usize {
+        self.topology
+            .as_ref()
+            .map(|t| t.op_count)
+            .or_else(|| {
+                self.partition_heal
+                    .as_ref()
+                    .map(|p| p.groups.len() * p.ops_per_group)
+            })
+            .expect("scenario must have topology or partition_heal — caller validated this")
+    }
 }
 
 impl PartitionConfig {
@@ -186,6 +217,38 @@ mod tests {
     #[test]
     fn validate_ok_single_group() {
         assert!(make_config(3, vec![vec![0, 1, 2]]).validate().is_ok());
+    }
+
+    // ── ScenarioFile::node_count ───────────────────────────────────────────
+
+    #[test]
+    fn node_count_topology_variant() {
+        let s = ScenarioFile {
+            name: "t".into(),
+            topology: Some(TopologyConfig {
+                node_count: 5,
+                connections: Connections::FullMesh,
+                write_pattern: WritePattern::RoundRobin,
+                op_count: 1,
+            }),
+            partition_heal: None,
+        };
+        assert_eq!(s.node_count(), 5);
+    }
+
+    #[test]
+    fn node_count_partition_heal_variant() {
+        let s = ScenarioFile {
+            name: "p".into(),
+            topology: None,
+            partition_heal: Some(PartitionConfig {
+                node_count: 4,
+                groups: vec![Group { nodes: vec![0, 1] }, Group { nodes: vec![2, 3] }],
+                ops_per_group: 2,
+                write_pattern: WritePattern::RoundRobin,
+            }),
+        };
+        assert_eq!(s.node_count(), 4);
     }
 
     #[test]

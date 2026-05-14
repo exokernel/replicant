@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -159,6 +160,17 @@ fn intra_group_edges(nodes: &[usize]) -> Vec<(usize, usize)> {
         .collect()
 }
 
+/// Select the target-node index for op `i` given a write pattern.
+///
+/// `nodes` is the in-scope slice — `0..n` for a topology run, or a group's
+/// `nodes` for one phase of a partition-heal run.
+fn target_node(pattern: &WritePattern, i: usize, nodes: &[usize]) -> usize {
+    match pattern {
+        WritePattern::Concentrated => nodes[0],
+        WritePattern::RoundRobin => nodes[i % nodes.len()],
+    }
+}
+
 // ── Public API ─────────────────────────────────────────────────────────────
 
 /// Spawn nodes, wire the topology, apply writes, and wait for convergence.
@@ -174,21 +186,21 @@ pub async fn run(config: &TopologyConfig) -> Result<RunResult> {
     // Start timing before the first write so the measurement includes write
     // propagation time; on loopback sync completes before wait_for_nodes
     // returns its first poll, so a post-write timer would always read 0.
+    let all_nodes: Vec<usize> = (0..n).collect();
     let measure_start = Instant::now();
-    for (i, target) in (0..config.op_count).map(|i| {
-        let target = match &config.write_pattern {
-            WritePattern::Concentrated => 0,
-            WritePattern::RoundRobin => i % n,
-        };
-        (i, target)
-    }) {
+    for i in 0..config.op_count {
+        let target = target_node(&config.write_pattern, i, &all_nodes);
         map_put(&mut clients[target], &format!("k{i}"), &format!("v{i}")).await?;
     }
     check_tasks(&mut tasks)?;
 
-    let all: Vec<usize> = (0..n).collect();
-    let convergence_ms =
-        wait_for_nodes(&mut clients, &all, measure_start, Duration::from_secs(5)).await?;
+    let convergence_ms = wait_for_nodes(
+        &mut clients,
+        &all_nodes,
+        measure_start,
+        Duration::from_secs(5),
+    )
+    .await?;
     check_tasks(&mut tasks)?;
 
     Ok(RunResult {
@@ -219,23 +231,18 @@ pub async fn run_partition_heal(config: &PartitionConfig) -> Result<RunResult> {
     check_tasks(&mut tasks)?;
 
     // Apply ops to each group; keys are globally unique across groups.
-    for (op_idx, (group, i)) in config
-        .groups
-        .iter()
-        .flat_map(|g| (0..config.ops_per_group).map(move |i| (g, i)))
-        .enumerate()
-    {
-        let m = group.nodes.len();
-        let target = group.nodes[match &config.write_pattern {
-            WritePattern::Concentrated => 0,
-            WritePattern::RoundRobin => i % m,
-        }];
-        map_put(
-            &mut clients[target],
-            &format!("k{op_idx}"),
-            &format!("v{op_idx}"),
-        )
-        .await?;
+    let mut op_idx = 0;
+    for group in &config.groups {
+        for i in 0..config.ops_per_group {
+            let target = target_node(&config.write_pattern, i, &group.nodes);
+            map_put(
+                &mut clients[target],
+                &format!("k{op_idx}"),
+                &format!("v{op_idx}"),
+            )
+            .await?;
+            op_idx += 1;
+        }
     }
 
     check_tasks(&mut tasks)?;
@@ -258,7 +265,7 @@ pub async fn run_partition_heal(config: &PartitionConfig) -> Result<RunResult> {
     // Heal: add the edges that cross group boundaries. `intra` is the set of
     // edges already wired during the partition phase; subtracting them from
     // the full mesh gives exactly the cross-group connections needed.
-    let intra_set: std::collections::HashSet<(usize, usize)> = intra.into_iter().collect();
+    let intra_set: HashSet<(usize, usize)> = intra.into_iter().collect();
     let heal_edges: Vec<(usize, usize)> = Connections::FullMesh
         .edges(n)
         .into_iter()
@@ -268,9 +275,14 @@ pub async fn run_partition_heal(config: &PartitionConfig) -> Result<RunResult> {
     let heal_start = Instant::now();
     connect_edges(&mut clients, &addrs, &heal_edges).await?;
 
-    let all: Vec<usize> = (0..n).collect();
-    let convergence_ms =
-        wait_for_nodes(&mut clients, &all, heal_start, Duration::from_secs(10)).await?;
+    let all_nodes: Vec<usize> = (0..n).collect();
+    let convergence_ms = wait_for_nodes(
+        &mut clients,
+        &all_nodes,
+        heal_start,
+        Duration::from_secs(10),
+    )
+    .await?;
     check_tasks(&mut tasks)?;
 
     Ok(RunResult {
