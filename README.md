@@ -12,6 +12,8 @@ A CRDT benchmarking framework built on [Automerge](https://automerge.org/) and g
 
 ## Quick start
 
+In-process (no Docker needed; the fastest path for local development):
+
 ```sh
 just          # list all available recipes
 just smoke    # run the three built-in regression scenarios (2, 3, and 4 nodes)
@@ -19,9 +21,34 @@ just ci       # full gate: fmt check → lint → test → smoke
 just docs     # build and open rustdoc
 ```
 
+## Containerized run (single-host)
+
+The orchestrator can drive a stack of dockerized replicas wired to a real OTel collector and Prometheus. `just smoke-docker` is the one-liner end-to-end check:
+
+```sh
+just smoke-docker    # builds the replica image, brings up 5 replicas +
+                     # otel-collector + prometheus, runs full-mesh-n5
+                     # against them, tears the stack down
+```
+
+For longer interactive sessions, drive the stack manually:
+
+```sh
+docker compose -f deploy/docker/compose.yaml up -d --build
+# Prom UI: http://localhost:9090
+cargo run --release --bin orchestrator -- \
+  --replicas localhost:50051=replica-0:50051,localhost:50052=replica-1:50051,localhost:50053=replica-2:50051,localhost:50054=replica-3:50051,localhost:50055=replica-4:50051 \
+  scenarios/full-mesh-n5.toml
+docker compose -f deploy/docker/compose.yaml down
+```
+
+`--replicas` accepts comma-separated `client_addr[=peer_addr]` entries — the first is what the orchestrator dials, the second (defaults to the first when omitted) is what each replica passes to its peers in `ConnectPeer`. Diverges in compose: the orchestrator on the host reaches replicas via published ports (`localhost:5005N`) while containers resolve each other via service DNS (`replica-N:50051`). When `--replicas` is set, the orchestrator accepts only one scenario and one trial per invocation since replica state persists between runs — bounce the stack to reset.
+
 ## Analysis
 
-The Jupyter notebook at `analysis/convergence.ipynb` produces figures from benchmark data. Generate `results.csv` first:
+The Jupyter notebook at `analysis/convergence.ipynb` produces figures from benchmark data.
+
+**Offline path** (file-based metrics, no docker daemon): generate `results.csv` and per-scenario metric files, then open the notebook:
 
 ```sh
 cargo run --bin orchestrator -- --trials 10 --output csv \
@@ -29,31 +56,30 @@ cargo run --bin orchestrator -- --trials 10 --output csv \
   scenarios/full-mesh-n{2,3,5,10}.toml \
   scenarios/partition-heal-n{4,6,8}.toml \
   2>/dev/null > results.csv
-```
 
-Then open and run the notebook:
-
-```sh
 cd analysis && jupyter lab convergence.ipynb
 ```
 
-The notebook caches parsed data as `results.parquet` and refreshes it
-automatically when `results.csv` is newer. For per-scenario OTel metrics,
-see the loop in the notebook's OTel section and `crates/orchestrator/README.md`.
+The notebook caches parsed data as `results.parquet` and refreshes when `results.csv` is newer.
+
+**Live path** (Prometheus-backed): bring up the containerized stack (`just smoke-docker` or the manual flow above), then run the notebook's "Prometheus-backed metrics (live stack)" section. It queries the running Prom directly via PromQL — useful for ad-hoc inspection and to assert the structural invariant that all replicas converge to the same `doc_size_bytes`.
 
 ## Requirements
 
 - Rust (stable, edition 2024)
 - [`just`](https://github.com/casey/just)
 - `protoc` (Protocol Buffers compiler)
+- Docker + Compose v2 (optional, only for the containerized run)
 
 ## Scenarios
 
 ### Orchestration flow
 
-The orchestrator runs all replicas as in-process Tokio tasks (no subprocesses).
-Each node exposes two gRPC services: `Replica` for control-plane RPCs and `Sync`
-for peer-to-peer Automerge sync streams.
+By default the orchestrator runs all replicas as in-process Tokio tasks (no
+subprocesses); with `--replicas` it instead connects to externally-managed
+replicas (e.g. the docker-compose stack above). Either way each node exposes
+two gRPC services: `Replica` for control-plane RPCs and `Sync` for
+peer-to-peer Automerge sync streams.
 
 ```mermaid
 sequenceDiagram
@@ -89,24 +115,40 @@ sequenceDiagram
     Note over O: all fingerprints match → record convergence_ms
 ```
 
-### Full-mesh topology
+### Topology variants
 
-All nodes are connected to every other node before writes begin.
-`flush_to_peers` after each local op delivers changes in one hop.
+Scenario TOML files set `connections = "full_mesh" | "ring" | "line" | "star"` for the named topologies, or `connections = { edges = [[0,1], ...] }` for arbitrary custom graphs. `recv_loop` relays inbound state to all other connected peers after each merge, so non-mesh topologies converge through intermediate hops.
 
 ```mermaid
 graph LR
-    N0((Node 0)) --- N1((Node 1))
-    N0 --- N2((Node 2))
-    N0 --- N3((Node 3))
-    N0 --- N4((Node 4))
-    N1 --- N2
-    N1 --- N3
-    N1 --- N4
-    N2 --- N3
-    N2 --- N4
-    N3 --- N4
+    subgraph "full_mesh (diameter 1, n·(n-1)/2 edges)"
+        F0((0)) --- F1((1))
+        F0 --- F2((2))
+        F0 --- F3((3))
+        F1 --- F2
+        F1 --- F3
+        F2 --- F3
+    end
+    subgraph "ring (diameter ⌊n/2⌋, n edges)"
+        R0((0)) --- R1((1))
+        R1 --- R2((2))
+        R2 --- R3((3))
+        R3 --- R0
+    end
+    subgraph "line (diameter n-1, n-1 edges)"
+        L0((0)) --- L1((1))
+        L1 --- L2((2))
+        L2 --- L3((3))
+    end
+    subgraph "star (diameter 2, n-1 edges)"
+        S0((0))
+        S0 --- S1((1))
+        S0 --- S2((2))
+        S0 --- S3((3))
+    end
 ```
+
+> **Headline finding** (Phase D, release build, 10 trials): diameter alone does **not** predict convergence. Full-mesh-n10 (diameter 1, 45 edges) is the *slowest* at ~42 ms/op; line-n10 (diameter 9, 9 edges) is the *fastest* at ~9 ms/op. Convergence ≈ f(edge_count, max_degree, write_pattern) ≫ f(diameter). See the notebook's "Convergence vs diameter" and "Sync traffic per write op" sections.
 
 ### Partition-heal topology
 

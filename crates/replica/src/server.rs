@@ -329,6 +329,15 @@ async fn recv_loop(
                         KeyValue::new("peer", peer_id.clone()),
                     ],
                 );
+                // Also re-sample doc size here: the apply_op path only updates
+                // the gauge when a *local* write lands, so without this a
+                // replica that only receives sync messages would report the
+                // pre-merge size forever. Recording on receive lets
+                // post-convergence equality checks (max() by (actor)) hold.
+                state.metrics.doc_size_bytes.record(
+                    state.doc_size_bytes() as u64,
+                    &[KeyValue::new("actor", state.actor_id.clone())],
+                );
                 // Immediately reply if the protocol has something to send back.
                 if let Some(response) = state.sync_generate(&peer_id)
                     && tx.send(response).await.is_err()
