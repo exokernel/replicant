@@ -1,8 +1,7 @@
 use std::collections::HashSet;
-use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -18,16 +17,54 @@ use replica::server::{ReplicaService, ReplicaState, SyncService};
 
 use crate::topology::{Connections, PartitionConfig, RunResult, TopologyConfig, WritePattern};
 
+// ── Replica endpoints ──────────────────────────────────────────────────────
+
+/// Network addresses for a single replica.
+///
+/// Two addresses are kept because the orchestrator and the replicas may sit
+/// in different name spaces. On host, they coincide (`127.0.0.1:<port>`).
+/// In docker-compose, `client_addr` is `localhost:<host-port>` (orchestrator
+/// reaches the replica via the published port) and `peer_addr` is
+/// `replica-N:50051` (containers resolve each other via service DNS).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplicaEndpoint {
+    /// `host:port` the orchestrator uses to dial this replica.
+    pub client_addr: String,
+    /// `host:port` other replicas use to dial this replica (passed in
+    /// `PeerRef.addr` during `ConnectPeer`).
+    pub peer_addr: String,
+}
+
+impl ReplicaEndpoint {
+    /// Endpoint where the orchestrator and peers reach the replica at the
+    /// same address — the in-process case.
+    pub fn loopback(addr: impl Into<String>) -> Self {
+        let s = addr.into();
+        Self {
+            client_addr: s.clone(),
+            peer_addr: s,
+        }
+    }
+}
+
+/// Where the scenario gets its replicas from.
+pub enum NodeSource {
+    /// Spawn `n` replicas inside this process on ephemeral ports.
+    InProcess,
+    /// Connect to replicas already running at these endpoints.
+    External(Vec<ReplicaEndpoint>),
+}
+
 // ── Private helpers ────────────────────────────────────────────────────────
 
-/// Bind a port, start a replica server, and return its address and gRPC client.
+/// Bind a port, start a replica server, and return its endpoint and gRPC client.
 ///
 /// The server task is added to `tasks` so the caller can detect panics; the
 /// `JoinSet` must outlive all client usage or the server will be dropped.
 async fn spawn_node(
     actor_id: String,
     tasks: &mut JoinSet<()>,
-) -> Result<(SocketAddr, ReplicaClient<Channel>)> {
+) -> Result<(ReplicaEndpoint, ReplicaClient<Channel>)> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
     let state = ReplicaState::new(actor_id, AutomergeAdapter::new());
@@ -42,38 +79,87 @@ async fn spawn_node(
         }
     });
     let client = ReplicaClient::connect(format!("http://{addr}")).await?;
-    Ok((addr, client))
+    Ok((ReplicaEndpoint::loopback(addr.to_string()), client))
 }
 
-/// Spawn `n` nodes and return their addresses and clients.
+/// Spawn `n` nodes and return their endpoints and clients.
 async fn spawn_nodes(
     n: usize,
     tasks: &mut JoinSet<()>,
-) -> Result<(Vec<SocketAddr>, Vec<ReplicaClient<Channel>>)> {
-    let mut addrs = Vec::with_capacity(n);
+) -> Result<(Vec<ReplicaEndpoint>, Vec<ReplicaClient<Channel>>)> {
+    let mut endpoints = Vec::with_capacity(n);
     let mut clients = Vec::with_capacity(n);
     for i in 0..n {
-        let (addr, client) = spawn_node(format!("node-{i}"), tasks).await?;
-        addrs.push(addr);
+        let (ep, client) = spawn_node(format!("node-{i}"), tasks).await?;
+        endpoints.push(ep);
         clients.push(client);
     }
-    Ok((addrs, clients))
+    Ok((endpoints, clients))
+}
+
+/// Connect to externally-managed replicas at the supplied endpoints.
+///
+/// Each endpoint is dialled via `client_addr`; before returning, every replica
+/// must answer a `GetStateFingerprint` RPC so we fail fast if the container
+/// hasn't started yet (rather than during the first `ConnectPeer`).
+async fn connect_external(endpoints: &[ReplicaEndpoint]) -> Result<Vec<ReplicaClient<Channel>>> {
+    let mut clients = Vec::with_capacity(endpoints.len());
+    for ep in endpoints {
+        let mut client = ReplicaClient::connect(format!("http://{}", ep.client_addr))
+            .await
+            .with_context(|| format!("connecting to external replica at {}", ep.client_addr))?;
+        client
+            .get_state_fingerprint(Request::new(Empty {}))
+            .await
+            .with_context(|| format!("smoke fingerprint RPC failed for {}", ep.client_addr))?;
+        clients.push(client);
+    }
+    Ok(clients)
+}
+
+/// Acquire replicas from the configured source.
+///
+/// For `InProcess`, spawns `n` replicas on ephemeral ports; for `External`,
+/// validates that the endpoint count matches `n` and connects to each. The
+/// returned `JoinSet` is non-empty only for the in-process case — `External`
+/// runs leave it empty, so subsequent `check_tasks` calls degrade to no-ops.
+async fn acquire_nodes(
+    source: NodeSource,
+    n: usize,
+    tasks: &mut JoinSet<()>,
+) -> Result<(Vec<ReplicaEndpoint>, Vec<ReplicaClient<Channel>>)> {
+    match source {
+        NodeSource::InProcess => spawn_nodes(n, tasks).await,
+        NodeSource::External(endpoints) => {
+            if endpoints.len() != n {
+                bail!(
+                    "scenario needs {n} replicas but --replicas supplied {}",
+                    endpoints.len()
+                );
+            }
+            let clients = connect_external(&endpoints).await?;
+            Ok((endpoints, clients))
+        }
+    }
 }
 
 /// Call `ConnectPeer` for each edge and wait for all streams to be ready.
 ///
 /// Each `ConnectPeer` RPC blocks until the TCP connection and gRPC stream are
-/// open and the peer is registered, so no post-connect sleep is needed.
+/// open and the peer is registered, so no post-connect sleep is needed. The
+/// address passed in `PeerRef.addr` is `peer_addr`, which is what the *target*
+/// replica `i` will dial to reach replica `j` (may differ from the
+/// orchestrator's `client_addr` for the same replica — see [`ReplicaEndpoint`]).
 async fn connect_edges(
     clients: &mut [ReplicaClient<Channel>],
-    addrs: &[SocketAddr],
+    endpoints: &[ReplicaEndpoint],
     edges: &[(usize, usize)],
 ) -> Result<()> {
     for &(i, j) in edges {
         clients[i]
             .connect_peer(Request::new(PeerRef {
                 peer_id: format!("node-{j}"),
-                addr: addrs[j].to_string(),
+                addr: endpoints[j].peer_addr.clone(),
             }))
             .await?;
     }
@@ -174,18 +260,18 @@ fn target_node(pattern: &WritePattern, i: usize, nodes: &[usize]) -> usize {
 // ── Public API ─────────────────────────────────────────────────────────────
 
 /// Spawn nodes, wire the topology, apply writes, and wait for convergence.
-pub async fn run(config: &TopologyConfig) -> Result<RunResult> {
+pub async fn run(config: &TopologyConfig, source: NodeSource) -> Result<RunResult> {
     config.validate()?;
 
     let n = config.node_count;
     let mut tasks = JoinSet::new();
-    let (addrs, mut clients) = spawn_nodes(n, &mut tasks).await?;
+    let (endpoints, mut clients) = acquire_nodes(source, n, &mut tasks).await?;
 
     let edges = config.connections.edges(n);
     let edge_count = edges.len();
     let topology_kind = config.connections.kind();
     let diameter = config.connections.diameter(n);
-    connect_edges(&mut clients, &addrs, &edges).await?;
+    connect_edges(&mut clients, &endpoints, &edges).await?;
     check_tasks(&mut tasks)?;
 
     // Start timing before the first write so the measurement includes write
@@ -222,12 +308,12 @@ pub async fn run(config: &TopologyConfig) -> Result<RunResult> {
 /// Phase 1: each group connects internally and writes independently.
 /// Phase 2 (heal): remaining cross-group edges are added; time from heal
 /// trigger to global convergence is returned.
-pub async fn run_partition_heal(config: &PartitionConfig) -> Result<RunResult> {
+pub async fn run_partition_heal(config: &PartitionConfig, source: NodeSource) -> Result<RunResult> {
     config.validate()?;
 
     let n = config.node_count;
     let mut tasks = JoinSet::new();
-    let (addrs, mut clients) = spawn_nodes(n, &mut tasks).await?;
+    let (endpoints, mut clients) = acquire_nodes(source, n, &mut tasks).await?;
 
     // Wire each group internally and collect those edges for later subtraction.
     let intra: Vec<(usize, usize)> = config
@@ -235,7 +321,7 @@ pub async fn run_partition_heal(config: &PartitionConfig) -> Result<RunResult> {
         .iter()
         .flat_map(|g| intra_group_edges(&g.nodes))
         .collect();
-    connect_edges(&mut clients, &addrs, &intra).await?;
+    connect_edges(&mut clients, &endpoints, &intra).await?;
     check_tasks(&mut tasks)?;
 
     // Apply ops to each group; keys are globally unique across groups.
@@ -281,7 +367,7 @@ pub async fn run_partition_heal(config: &PartitionConfig) -> Result<RunResult> {
         .collect();
 
     let heal_start = Instant::now();
-    connect_edges(&mut clients, &addrs, &heal_edges).await?;
+    connect_edges(&mut clients, &endpoints, &heal_edges).await?;
 
     let all_nodes: Vec<usize> = (0..n).collect();
     let convergence_ms = wait_for_nodes(
@@ -380,10 +466,12 @@ mod tests {
     #[tokio::test]
     async fn line_topology_n4_converges_with_relay() {
         let mut tasks = JoinSet::new();
-        let (addrs, mut clients) = spawn_nodes(4, &mut tasks).await.unwrap();
+        let (endpoints, mut clients) = spawn_nodes(4, &mut tasks).await.unwrap();
 
         let edges = vec![(0, 1), (1, 2), (2, 3)];
-        connect_edges(&mut clients, &addrs, &edges).await.unwrap();
+        connect_edges(&mut clients, &endpoints, &edges)
+            .await
+            .unwrap();
         check_tasks(&mut tasks).unwrap();
 
         let measure_start = Instant::now();

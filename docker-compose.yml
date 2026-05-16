@@ -1,0 +1,60 @@
+# Five replicas on a shared bridge network for single-host benchmark runs.
+#
+# Internal: each replica listens on 50051 inside its container; peers dial
+# each other via service DNS (replica-N:50051).
+# External: published as host ports 50051..50055 so the orchestrator on the
+# host can reach each replica via localhost:5005N.
+#
+# Run with `just smoke-docker` (see Justfile) or:
+#   docker compose up -d
+#   cargo run --release --bin orchestrator -- \
+#     --replicas localhost:50051=replica-0:50051,\
+# localhost:50052=replica-1:50051,localhost:50053=replica-2:50051,\
+# localhost:50054=replica-3:50051,localhost:50055=replica-4:50051 \
+#     scenarios/full-mesh-n5.toml
+#   docker compose down
+
+x-replica: &replica
+  build: .
+  networks: [replicant]
+  restart: "no"
+
+services:
+  replica-0:
+    <<: *replica
+    container_name: replica-0
+    hostname: replica-0
+    command: ["--actor", "node-0", "--port", "50051"]
+    ports: ["50051:50051"]
+
+  replica-1:
+    <<: *replica
+    container_name: replica-1
+    hostname: replica-1
+    command: ["--actor", "node-1", "--port", "50051"]
+    ports: ["50052:50051"]
+
+  replica-2:
+    <<: *replica
+    container_name: replica-2
+    hostname: replica-2
+    command: ["--actor", "node-2", "--port", "50051"]
+    ports: ["50053:50051"]
+
+  replica-3:
+    <<: *replica
+    container_name: replica-3
+    hostname: replica-3
+    command: ["--actor", "node-3", "--port", "50051"]
+    ports: ["50054:50051"]
+
+  replica-4:
+    <<: *replica
+    container_name: replica-4
+    hostname: replica-4
+    command: ["--actor", "node-4", "--port", "50051"]
+    ports: ["50055:50051"]
+
+networks:
+  replicant:
+    driver: bridge

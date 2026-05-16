@@ -24,6 +24,7 @@ use opentelemetry_sdk::metrics::{SdkMeterProvider, Temporality};
 mod runner;
 mod topology;
 
+use runner::{NodeSource, ReplicaEndpoint};
 use topology::{RunResult, ScenarioFile, builtin_scenarios};
 
 // ── CLI ─────────────────────────────────────────────────────────────────────
@@ -44,8 +45,48 @@ struct Args {
     #[arg(long)]
     metrics_file: Option<PathBuf>,
 
+    /// Connect to externally-managed replicas instead of spawning in-process.
+    ///
+    /// Comma-separated `client_addr[=peer_addr]` entries. `client_addr` is what
+    /// the orchestrator dials; `peer_addr` (defaults to `client_addr` if
+    /// omitted) is what each replica passes to its peers in `ConnectPeer`. The
+    /// two diverge when replicas live in a different network namespace from
+    /// the orchestrator — e.g. docker-compose, where the orchestrator reaches
+    /// replicas via published ports but containers reach each other via
+    /// service DNS:
+    ///
+    /// ```text
+    /// --replicas localhost:50051=replica-0:50051,localhost:50052=replica-1:50051
+    /// ```
+    ///
+    /// Each external replica must be launched with actor ID `node-N` (matching
+    /// the orchestrator's wiring scheme) and the scenario's `node_count` must
+    /// equal the number of entries. Replica state persists across orchestrator
+    /// runs, so this flag is currently restricted to one scenario and one trial
+    /// per invocation; bounce the replicas between runs to reset state.
+    #[arg(long, value_delimiter = ',', value_parser = parse_replica_endpoint)]
+    replicas: Vec<ReplicaEndpoint>,
+
     /// TOML scenario files to run. Omit to run the built-in regression scenarios.
     scenarios: Vec<PathBuf>,
+}
+
+/// Parse a single `client_addr[=peer_addr]` entry from the `--replicas` flag.
+fn parse_replica_endpoint(s: &str) -> Result<ReplicaEndpoint, String> {
+    let (client, peer) = match s.split_once('=') {
+        Some((client, peer)) => (client.trim(), peer.trim()),
+        None => {
+            let trimmed = s.trim();
+            (trimmed, trimmed)
+        }
+    };
+    if client.is_empty() || peer.is_empty() {
+        return Err(format!("empty address in --replicas entry '{s}'"));
+    }
+    Ok(ReplicaEndpoint {
+        client_addr: client.to_owned(),
+        peer_addr: peer.to_owned(),
+    })
 }
 
 /// Output format for per-trial and summary records.
@@ -90,6 +131,20 @@ async fn main() -> Result<()> {
             .collect::<Result<_>>()?
     };
 
+    // External replicas keep document state between runs (no reset RPC yet),
+    // so multiple scenarios or trials in one invocation would contaminate
+    // each other's convergence measurements.
+    if !args.replicas.is_empty() {
+        if scenarios.len() != 1 {
+            bail!(
+                "--replicas requires exactly one scenario per invocation; bounce replicas to reset state"
+            );
+        }
+        if args.trials != 1 {
+            bail!("--replicas requires --trials 1 per invocation; bounce replicas to reset state");
+        }
+    }
+
     if matches!(args.output, OutputFormat::Csv) {
         println!(
             "row_type,scenario,trial,node_count,op_count,topology_kind,edge_count,diameter,convergence_ms,mean_ms,p50_ms,p95_ms"
@@ -105,7 +160,12 @@ async fn main() -> Result<()> {
         let mut shape: Option<(&'static str, usize, usize)> = None;
 
         for t in 1..=args.trials {
-            let result = run_scenario_once(scenario).await?;
+            let source = if args.replicas.is_empty() {
+                NodeSource::InProcess
+            } else {
+                NodeSource::External(args.replicas.clone())
+            };
+            let result = run_scenario_once(scenario, source).await?;
             debug_assert_eq!(
                 result.total_ops, op_count,
                 "scenario '{}' trial {t}: runner reported {} ops, expected {}",
@@ -158,11 +218,11 @@ async fn main() -> Result<()> {
 // ── Scenario helpers ─────────────────────────────────────────────────────────
 
 /// Run a single scenario once and return its result.
-async fn run_scenario_once(scenario: &ScenarioFile) -> Result<RunResult> {
+async fn run_scenario_once(scenario: &ScenarioFile, source: NodeSource) -> Result<RunResult> {
     tracing::info!(scenario = %scenario.name, "starting");
     let result = match (&scenario.topology, &scenario.partition_heal) {
-        (Some(config), None) => runner::run(config).await?,
-        (None, Some(config)) => runner::run_partition_heal(config).await?,
+        (Some(config), None) => runner::run(config, source).await?,
+        (None, Some(config)) => runner::run_partition_heal(config, source).await?,
         _ => bail!(
             "scenario '{}': exactly one of [topology] or [partition_heal] must be present",
             scenario.name
@@ -502,5 +562,35 @@ mod tests {
         let sorted = vec![1.0f64, 2.0, 3.0, 4.0, 5.0];
         // ceil(0/100 * 5) = 0, saturating_sub(1) = 0 → first element
         assert_eq!(percentile(&sorted, 0.0), 1.0);
+    }
+
+    // ── parse_replica_endpoint ────────────────────────────────────────────
+
+    #[test]
+    fn replica_endpoint_single_addr_uses_same_for_client_and_peer() {
+        let ep = parse_replica_endpoint("localhost:50051").unwrap();
+        assert_eq!(ep.client_addr, "localhost:50051");
+        assert_eq!(ep.peer_addr, "localhost:50051");
+    }
+
+    #[test]
+    fn replica_endpoint_distinct_client_and_peer() {
+        let ep = parse_replica_endpoint("localhost:50051=replica-0:50051").unwrap();
+        assert_eq!(ep.client_addr, "localhost:50051");
+        assert_eq!(ep.peer_addr, "replica-0:50051");
+    }
+
+    #[test]
+    fn replica_endpoint_trims_whitespace_around_separator() {
+        let ep = parse_replica_endpoint(" localhost:50051 = replica-0:50051 ").unwrap();
+        assert_eq!(ep.client_addr, "localhost:50051");
+        assert_eq!(ep.peer_addr, "replica-0:50051");
+    }
+
+    #[test]
+    fn replica_endpoint_rejects_empty_side() {
+        assert!(parse_replica_endpoint("=replica-0:50051").is_err());
+        assert!(parse_replica_endpoint("localhost:50051=").is_err());
+        assert!(parse_replica_endpoint("").is_err());
     }
 }

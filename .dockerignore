@@ -1,0 +1,16 @@
+target/
+.git/
+.jj/
+.obsidian/
+.claude/
+analysis/
+docs/
+scenarios/
+*.csv
+*.parquet
+*.json
+*.md
+Justfile
+docker-compose.yml
+.dockerignore
+.gitignore
