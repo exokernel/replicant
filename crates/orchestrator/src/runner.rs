@@ -175,6 +175,8 @@ fn target_node(pattern: &WritePattern, i: usize, nodes: &[usize]) -> usize {
 
 /// Spawn nodes, wire the topology, apply writes, and wait for convergence.
 pub async fn run(config: &TopologyConfig) -> Result<RunResult> {
+    config.validate()?;
+
     let n = config.node_count;
     let mut tasks = JoinSet::new();
     let (addrs, mut clients) = spawn_nodes(n, &mut tasks).await?;

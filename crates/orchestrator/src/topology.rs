@@ -1,5 +1,7 @@
+use std::collections::{HashSet, VecDeque};
+
 use anyhow::{Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 /// Top-level scenario file — TOML format; exactly one of `[topology]` or
 /// `[partition_heal]` must be present.
@@ -25,28 +27,140 @@ pub enum WritePattern {
 
 /// Connection topology for a scenario run.
 ///
-/// More variants (ring, line, star) are planned; for now only `FullMesh` is
-/// implemented. `#[non_exhaustive]` keeps `match` arms forwards-compatible.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// Named variants (`FullMesh`, `Ring`, `Line`, `Star`) are derived
+/// programmatically from `n`. `Custom` carries an explicit undirected edge
+/// list for arbitrary graphs. `#[non_exhaustive]` keeps `match` arms
+/// forwards-compatible.
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum Connections {
-    /// Connect every pair — n*(n-1)/2 bidi sync streams.
+    /// Connect every pair — n*(n-1)/2 bidi sync streams. Diameter 1.
     FullMesh,
+    /// Cycle of length `n`: edges `(i, (i+1) mod n)`. Diameter ⌊n/2⌋.
+    /// Degenerate for `n < 3`.
+    Ring,
+    /// Path: edges `(i, i+1)` for `i in 0..n-1`. Diameter `n-1`.
+    Line,
+    /// Hub-and-spoke: edges `(0, k)` for `k in 1..n`. Diameter 2.
+    Star,
+    /// User-supplied undirected edge list. Must satisfy
+    /// [`Connections::validate`].
+    Custom {
+        /// Edges as `(i, j)`. Treated as undirected; duplicates (in either
+        /// orientation) are rejected.
+        edges: Vec<(usize, usize)>,
+    },
+}
+
+// Custom Deserialize so TOML accepts the ergonomic forms:
+//   connections = "full_mesh" | "ring" | "line" | "star"
+//   connections = { edges = [[0,1],[1,2]] }     # Custom
+// rather than serde's externally-tagged default for struct variants
+// (`connections = { custom = { edges = [...] } }`).
+impl<'de> Deserialize<'de> for Connections {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum Named {
+            FullMesh,
+            Ring,
+            Line,
+            Star,
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Named(Named),
+            Custom { edges: Vec<(usize, usize)> },
+        }
+        Ok(match Repr::deserialize(deserializer)? {
+            Repr::Named(Named::FullMesh) => Connections::FullMesh,
+            Repr::Named(Named::Ring) => Connections::Ring,
+            Repr::Named(Named::Line) => Connections::Line,
+            Repr::Named(Named::Star) => Connections::Star,
+            Repr::Custom { edges } => Connections::Custom { edges },
+        })
+    }
 }
 
 impl Connections {
-    /// Return the concrete (initiator, target) edge list for `n` nodes.
+    /// Return the (initiator, target) edge list for `n` nodes.
+    ///
+    /// Mechanical view of the topology; degenerate combinations (e.g. `Ring`
+    /// with `n < 3`) yield edges that fail [`Connections::validate`].
     pub fn edges(&self, n: usize) -> Vec<(usize, usize)> {
         match self {
             Self::FullMesh => (0..n)
                 .flat_map(|i| (i + 1..n).map(move |j| (i, j)))
                 .collect(),
+            Self::Ring => (0..n).map(|i| (i, (i + 1) % n)).collect(),
+            Self::Line => (0..n.saturating_sub(1)).map(|i| (i, i + 1)).collect(),
+            Self::Star => (1..n).map(|k| (0, k)).collect(),
+            Self::Custom { edges } => edges.clone(),
         }
+    }
+
+    /// Validate that the resulting edge list is a well-formed connected
+    /// undirected simple graph on `n` nodes.
+    ///
+    /// Catches the four common ways topologies break in practice:
+    /// out-of-range indices, self-loops, duplicate undirected edges, and
+    /// disconnected components — the last would never converge, so we fail
+    /// fast instead of waiting for the convergence timeout.
+    pub fn validate(&self, n: usize) -> Result<()> {
+        let edges = self.edges(n);
+
+        let mut seen: HashSet<(usize, usize)> = HashSet::with_capacity(edges.len());
+        for &(i, j) in &edges {
+            if i >= n || j >= n {
+                bail!("edge ({i},{j}) out of range for node_count={n}");
+            }
+            if i == j {
+                bail!("self-loop at node {i}");
+            }
+            let canon = if i < j { (i, j) } else { (j, i) };
+            if !seen.insert(canon) {
+                bail!("duplicate undirected edge ({},{})", canon.0, canon.1);
+            }
+        }
+
+        // Connectivity via BFS from node 0; n <= 1 is trivially connected.
+        if n > 1 {
+            let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+            for &(i, j) in &edges {
+                adj[i].push(j);
+                adj[j].push(i);
+            }
+            let mut visited = vec![false; n];
+            let mut queue: VecDeque<usize> = VecDeque::new();
+            visited[0] = true;
+            queue.push_back(0);
+            while let Some(node) = queue.pop_front() {
+                for &neighbor in &adj[node] {
+                    if !visited[neighbor] {
+                        visited[neighbor] = true;
+                        queue.push_back(neighbor);
+                    }
+                }
+            }
+            if !visited.iter().all(|&v| v) {
+                let unreached: Vec<usize> = visited
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, &v)| (!v).then_some(i))
+                    .collect();
+                bail!("disconnected topology: nodes {unreached:?} unreachable from node 0");
+            }
+        }
+
+        Ok(())
     }
 }
 
-/// Configuration for a full-mesh topology run.
+/// Configuration for a topology run.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TopologyConfig {
     /// Number of replica nodes to spawn.
@@ -120,6 +234,14 @@ impl ScenarioFile {
                     .map(|p| p.groups.len() * p.ops_per_group)
             })
             .expect("scenario must have topology or partition_heal — caller validated this")
+    }
+}
+
+impl TopologyConfig {
+    /// Check that the connection topology is well-formed for `node_count`
+    /// (see [`Connections::validate`]).
+    pub fn validate(&self) -> Result<()> {
+        self.connections.validate(self.node_count)
     }
 }
 
@@ -270,5 +392,216 @@ mod tests {
                 n * n.saturating_sub(1) / 2
             );
         }
+    }
+
+    // ── Connections::edges — Ring / Line / Star / Custom ───────────────────
+
+    #[test]
+    fn connections_ring_edges_n5() {
+        assert_eq!(
+            Connections::Ring.edges(5),
+            vec![(0, 1), (1, 2), (2, 3), (3, 4), (4, 0)]
+        );
+    }
+
+    #[test]
+    fn connections_ring_edge_count_equals_n() {
+        for n in 3..=6 {
+            assert_eq!(Connections::Ring.edges(n).len(), n);
+        }
+    }
+
+    #[test]
+    fn connections_line_edges_n5() {
+        assert_eq!(
+            Connections::Line.edges(5),
+            vec![(0, 1), (1, 2), (2, 3), (3, 4)]
+        );
+    }
+
+    #[test]
+    fn connections_line_edge_count_n_minus_1() {
+        for n in 2..=6 {
+            assert_eq!(Connections::Line.edges(n).len(), n - 1);
+        }
+        assert!(Connections::Line.edges(0).is_empty());
+        assert!(Connections::Line.edges(1).is_empty());
+    }
+
+    #[test]
+    fn connections_star_edges_n5() {
+        assert_eq!(
+            Connections::Star.edges(5),
+            vec![(0, 1), (0, 2), (0, 3), (0, 4)]
+        );
+    }
+
+    #[test]
+    fn connections_star_all_edges_anchor_at_zero() {
+        for &(i, _) in &Connections::Star.edges(8) {
+            assert_eq!(i, 0);
+        }
+    }
+
+    #[test]
+    fn connections_custom_edges_passthrough() {
+        let e = vec![(0, 2), (2, 1), (1, 3)];
+        assert_eq!(Connections::Custom { edges: e.clone() }.edges(4), e);
+    }
+
+    // ── Connections::validate ──────────────────────────────────────────────
+
+    #[test]
+    fn validate_named_topologies_ok_at_sensible_n() {
+        assert!(Connections::FullMesh.validate(4).is_ok());
+        assert!(Connections::Ring.validate(4).is_ok());
+        assert!(Connections::Line.validate(4).is_ok());
+        assert!(Connections::Star.validate(4).is_ok());
+    }
+
+    #[test]
+    fn validate_ring_n2_rejects_duplicate_edge() {
+        // Ring on 2 nodes emits (0,1) then (1,0) — same undirected edge.
+        let err = Connections::Ring.validate(2).unwrap_err();
+        assert!(err.to_string().contains("duplicate"), "{err}");
+    }
+
+    #[test]
+    fn validate_ring_n1_rejects_self_loop() {
+        let err = Connections::Ring.validate(1).unwrap_err();
+        assert!(err.to_string().contains("self-loop"), "{err}");
+    }
+
+    #[test]
+    fn validate_custom_rejects_out_of_range() {
+        let c = Connections::Custom {
+            edges: vec![(0, 1), (1, 5)],
+        };
+        let err = c.validate(3).unwrap_err();
+        assert!(err.to_string().contains("out of range"), "{err}");
+    }
+
+    #[test]
+    fn validate_custom_rejects_self_loop() {
+        let c = Connections::Custom {
+            edges: vec![(0, 1), (2, 2)],
+        };
+        let err = c.validate(3).unwrap_err();
+        assert!(err.to_string().contains("self-loop"), "{err}");
+    }
+
+    #[test]
+    fn validate_custom_rejects_duplicate_undirected_edges() {
+        // (0,1) and (1,0) are the same undirected edge.
+        let c = Connections::Custom {
+            edges: vec![(0, 1), (1, 2), (1, 0)],
+        };
+        let err = c.validate(3).unwrap_err();
+        assert!(err.to_string().contains("duplicate"), "{err}");
+    }
+
+    #[test]
+    fn validate_custom_rejects_disconnected_graph() {
+        // Two components: {0,1} and {2,3}.
+        let c = Connections::Custom {
+            edges: vec![(0, 1), (2, 3)],
+        };
+        let err = c.validate(4).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("disconnected"), "{msg}");
+        assert!(msg.contains("2") && msg.contains("3"), "{msg}");
+    }
+
+    #[test]
+    fn validate_custom_accepts_connected_tree() {
+        let c = Connections::Custom {
+            edges: vec![(0, 1), (1, 2), (2, 3)],
+        };
+        assert!(c.validate(4).is_ok());
+    }
+
+    #[test]
+    fn validate_n_zero_is_trivially_ok() {
+        assert!(Connections::FullMesh.validate(0).is_ok());
+    }
+
+    #[test]
+    fn topology_config_validate_delegates_to_connections() {
+        let bad = TopologyConfig {
+            node_count: 3,
+            connections: Connections::Custom {
+                edges: vec![(0, 1)],
+            },
+            write_pattern: WritePattern::RoundRobin,
+            op_count: 1,
+        };
+        // Node 2 is unreachable — should be caught by connections.validate.
+        let err = bad.validate().unwrap_err();
+        assert!(err.to_string().contains("disconnected"), "{err}");
+    }
+
+    // ── TOML deserialization for Connections ───────────────────────────────
+
+    fn parse_connections(s: &str) -> Connections {
+        #[derive(Deserialize)]
+        struct Wrap {
+            connections: Connections,
+        }
+        toml::from_str::<Wrap>(s).expect("parse").connections
+    }
+
+    #[test]
+    fn toml_connections_full_mesh() {
+        assert!(matches!(
+            parse_connections(r#"connections = "full_mesh""#),
+            Connections::FullMesh
+        ));
+    }
+
+    #[test]
+    fn toml_connections_ring_line_star() {
+        assert!(matches!(
+            parse_connections(r#"connections = "ring""#),
+            Connections::Ring
+        ));
+        assert!(matches!(
+            parse_connections(r#"connections = "line""#),
+            Connections::Line
+        ));
+        assert!(matches!(
+            parse_connections(r#"connections = "star""#),
+            Connections::Star
+        ));
+    }
+
+    #[test]
+    fn toml_connections_custom_inline_table() {
+        let c = parse_connections(r#"connections = { edges = [[0, 1], [1, 2]] }"#);
+        match c {
+            Connections::Custom { edges } => assert_eq!(edges, vec![(0, 1), (1, 2)]),
+            other => panic!("expected Custom, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn toml_connections_custom_dotted_form() {
+        // Dotted-key TOML form normalizes to the same value as inline-table.
+        let c = parse_connections("connections.edges = [[0, 1], [1, 2], [2, 3]]");
+        match c {
+            Connections::Custom { edges } => assert_eq!(edges, vec![(0, 1), (1, 2), (2, 3)]),
+            other => panic!("expected Custom, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn toml_connections_unknown_name_rejected() {
+        let err = toml::from_str::<std::collections::HashMap<String, Connections>>(
+            r#"connections = "mesh""#,
+        )
+        .unwrap_err();
+        // serde's untagged enum error wraps both arms; the message references
+        // the candidates rather than a single one — just confirm it failed.
+        let msg = err.to_string();
+        assert!(!msg.is_empty());
     }
 }
