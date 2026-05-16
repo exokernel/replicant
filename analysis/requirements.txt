@@ -4,3 +4,7 @@ seaborn
 pyarrow
 jupyterlab
 requests
+# Strips notebook outputs on `git add` so .ipynb diffs stay code-only.
+# After `pip install -r requirements.txt`, run `nbstripout --install` once
+# to register the local git filter (.gitattributes already binds it).
+nbstripout
