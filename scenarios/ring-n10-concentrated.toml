@@ -1,0 +1,7 @@
+name = "ring-n10-concentrated"
+
+[topology]
+node_count = 10
+connections = "ring"
+write_pattern = "concentrated"
+op_count = 20

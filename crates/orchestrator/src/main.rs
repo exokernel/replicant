@@ -92,7 +92,7 @@ async fn main() -> Result<()> {
 
     if matches!(args.output, OutputFormat::Csv) {
         println!(
-            "row_type,scenario,trial,node_count,op_count,convergence_ms,mean_ms,p50_ms,p95_ms"
+            "row_type,scenario,trial,node_count,op_count,topology_kind,edge_count,diameter,convergence_ms,mean_ms,p50_ms,p95_ms"
         );
     }
 
@@ -100,6 +100,9 @@ async fn main() -> Result<()> {
         let node_count = scenario.node_count();
         let op_count = scenario.op_count();
         let mut trial_ms: Vec<f64> = Vec::with_capacity(args.trials);
+        // Captured from the first trial — topology_kind/edge_count/diameter
+        // are deterministic per scenario, so the summary row reuses them.
+        let mut shape: Option<(&'static str, usize, usize)> = None;
 
         for t in 1..=args.trials {
             let result = run_scenario_once(scenario).await?;
@@ -108,6 +111,7 @@ async fn main() -> Result<()> {
                 "scenario '{}' trial {t}: runner reported {} ops, expected {}",
                 scenario.name, result.total_ops, op_count,
             );
+            shape = Some((result.topology_kind, result.edge_count, result.diameter));
             trial_ms.push(result.convergence_ms);
             emit_trial(
                 args.output,
@@ -115,10 +119,14 @@ async fn main() -> Result<()> {
                 t,
                 node_count,
                 op_count,
+                result.topology_kind,
+                result.edge_count,
+                result.diameter,
                 result.convergence_ms,
             );
         }
 
+        let (kind, edges, diameter) = shape.expect("trials >= 1 enforced above");
         let s = stats(&trial_ms);
         emit_summary(
             args.output,
@@ -126,6 +134,9 @@ async fn main() -> Result<()> {
             args.trials,
             node_count,
             op_count,
+            kind,
+            edges,
+            diameter,
             &s,
         );
     }
@@ -167,18 +178,24 @@ async fn run_scenario_once(scenario: &ScenarioFile) -> Result<RunResult> {
 
 // ── Output emission ──────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn emit_trial(
     fmt: OutputFormat,
     scenario: &str,
     trial: usize,
     node_count: usize,
     op_count: usize,
+    topology_kind: &str,
+    edge_count: usize,
+    diameter: usize,
     ms: f64,
 ) {
     match fmt {
         OutputFormat::Csv => {
             // Empty trailing fields are the summary-only columns (mean_ms, p50_ms, p95_ms).
-            println!("trial,{scenario},{trial},{node_count},{op_count},{ms:.3},,,");
+            println!(
+                "trial,{scenario},{trial},{node_count},{op_count},{topology_kind},{edge_count},{diameter},{ms:.3},,,"
+            );
         }
         OutputFormat::Json => {
             println!(
@@ -189,6 +206,9 @@ fn emit_trial(
                     "trial": trial,
                     "node_count": node_count,
                     "op_count": op_count,
+                    "topology_kind": topology_kind,
+                    "edge_count": edge_count,
+                    "diameter": diameter,
                     "convergence_ms": ms,
                 })
             );
@@ -196,19 +216,23 @@ fn emit_trial(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_summary(
     fmt: OutputFormat,
     scenario: &str,
     n_trials: usize,
     node_count: usize,
     op_count: usize,
+    topology_kind: &str,
+    edge_count: usize,
+    diameter: usize,
     s: &TrialStats,
 ) {
     match fmt {
         OutputFormat::Csv => {
             // `trial` column holds the trial count for summary rows; `convergence_ms` is empty.
             println!(
-                "summary,{scenario},{n_trials},{node_count},{op_count},,{:.3},{:.3},{:.3}",
+                "summary,{scenario},{n_trials},{node_count},{op_count},{topology_kind},{edge_count},{diameter},,{:.3},{:.3},{:.3}",
                 s.mean, s.p50, s.p95
             );
         }
@@ -221,6 +245,9 @@ fn emit_summary(
                     "trials": n_trials,
                     "node_count": node_count,
                     "op_count": op_count,
+                    "topology_kind": topology_kind,
+                    "edge_count": edge_count,
+                    "diameter": diameter,
                     "mean_ms": s.mean,
                     "p50_ms": s.p50,
                     "p95_ms": s.p95,

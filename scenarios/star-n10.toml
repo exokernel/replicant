@@ -1,0 +1,7 @@
+name = "star-n10"
+
+[topology]
+node_count = 10
+connections = "star"
+write_pattern = "round_robin"
+op_count = 20

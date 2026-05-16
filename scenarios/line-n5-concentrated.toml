@@ -1,0 +1,7 @@
+name = "line-n5-concentrated"
+
+[topology]
+node_count = 5
+connections = "line"
+write_pattern = "concentrated"
+op_count = 10

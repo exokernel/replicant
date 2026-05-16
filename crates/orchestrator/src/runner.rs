@@ -182,6 +182,9 @@ pub async fn run(config: &TopologyConfig) -> Result<RunResult> {
     let (addrs, mut clients) = spawn_nodes(n, &mut tasks).await?;
 
     let edges = config.connections.edges(n);
+    let edge_count = edges.len();
+    let topology_kind = config.connections.kind();
+    let diameter = config.connections.diameter(n);
     connect_edges(&mut clients, &addrs, &edges).await?;
     check_tasks(&mut tasks)?;
 
@@ -208,6 +211,9 @@ pub async fn run(config: &TopologyConfig) -> Result<RunResult> {
     Ok(RunResult {
         convergence_ms,
         total_ops: config.op_count,
+        topology_kind,
+        edge_count,
+        diameter,
     })
 }
 
@@ -287,9 +293,15 @@ pub async fn run_partition_heal(config: &PartitionConfig) -> Result<RunResult> {
     .await?;
     check_tasks(&mut tasks)?;
 
+    // Post-heal the wiring is full mesh, so report those structural fields;
+    // `topology_kind = "partition_heal"` flags this scenario shape so analyses
+    // can separate heal-driven convergence from steady-state full-mesh runs.
     Ok(RunResult {
         convergence_ms,
         total_ops: config.groups.len() * config.ops_per_group,
+        topology_kind: "partition_heal",
+        edge_count: Connections::FullMesh.edges(n).len(),
+        diameter: Connections::FullMesh.diameter(n),
     })
 }
 

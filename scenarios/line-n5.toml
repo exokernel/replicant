@@ -1,0 +1,7 @@
+name = "line-n5"
+
+[topology]
+node_count = 5
+connections = "line"
+write_pattern = "round_robin"
+op_count = 10

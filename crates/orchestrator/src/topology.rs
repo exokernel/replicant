@@ -87,6 +87,18 @@ impl<'de> Deserialize<'de> for Connections {
 }
 
 impl Connections {
+    /// Stable identifier for this topology, used in result reporting so
+    /// downstream analyses can group/pivot by topology kind.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::FullMesh => "full_mesh",
+            Self::Ring => "ring",
+            Self::Line => "line",
+            Self::Star => "star",
+            Self::Custom { .. } => "custom",
+        }
+    }
+
     /// Return the (initiator, target) edge list for `n` nodes.
     ///
     /// Mechanical view of the topology; degenerate combinations (e.g. `Ring`
@@ -101,6 +113,42 @@ impl Connections {
             Self::Star => (1..n).map(|k| (0, k)).collect(),
             Self::Custom { edges } => edges.clone(),
         }
+    }
+
+    /// Diameter of the (undirected) topology — the longest shortest-path
+    /// between any pair of nodes. Predictor of multi-hop convergence latency.
+    ///
+    /// Computed by BFS from every node (O(n·(n+e))); fine for thesis-scale
+    /// `n`. Assumes the graph is connected — call [`Connections::validate`]
+    /// first if the input came from a `Custom` user-supplied edge list.
+    /// Returns 0 for `n <= 1`. Unreachable nodes are skipped, so on a
+    /// disconnected graph this returns the largest within-component diameter.
+    pub fn diameter(&self, n: usize) -> usize {
+        if n <= 1 {
+            return 0;
+        }
+        let adj = adjacency_list(n, &self.edges(n));
+        let mut max_dist = 0;
+        for start in 0..n {
+            let mut dist = vec![usize::MAX; n];
+            let mut queue: VecDeque<usize> = VecDeque::new();
+            dist[start] = 0;
+            queue.push_back(start);
+            while let Some(node) = queue.pop_front() {
+                for &neighbor in &adj[node] {
+                    if dist[neighbor] == usize::MAX {
+                        dist[neighbor] = dist[node] + 1;
+                        queue.push_back(neighbor);
+                    }
+                }
+            }
+            for &d in &dist {
+                if d != usize::MAX && d > max_dist {
+                    max_dist = d;
+                }
+            }
+        }
+        max_dist
     }
 
     /// Validate that the resulting edge list is a well-formed connected
@@ -129,11 +177,7 @@ impl Connections {
 
         // Connectivity via BFS from node 0; n <= 1 is trivially connected.
         if n > 1 {
-            let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
-            for &(i, j) in &edges {
-                adj[i].push(j);
-                adj[j].push(i);
-            }
+            let adj = adjacency_list(n, &edges);
             let mut visited = vec![false; n];
             let mut queue: VecDeque<usize> = VecDeque::new();
             visited[0] = true;
@@ -204,6 +248,29 @@ pub struct RunResult {
     pub convergence_ms: f64,
     /// Total ops applied across all nodes.
     pub total_ops: usize,
+    /// Stable identifier for the topology that produced this run, e.g.
+    /// `"full_mesh"`, `"ring"`, `"partition_heal"`. Used as a pivot key
+    /// in CSV/JSON output.
+    pub topology_kind: &'static str,
+    /// Number of undirected edges in the final wired topology.
+    pub edge_count: usize,
+    /// Diameter of the final wired topology (longest shortest-path between
+    /// any pair of nodes). The structural predictor of multi-hop convergence
+    /// latency. `0` for `n <= 1`.
+    pub diameter: usize,
+}
+
+/// Build an undirected adjacency list from an edge list.
+///
+/// Each edge `(i, j)` adds `j` to `adj[i]` and `i` to `adj[j]`. Caller is
+/// responsible for ensuring `i, j < n`; out-of-range edges panic on index.
+fn adjacency_list(n: usize, edges: &[(usize, usize)]) -> Vec<Vec<usize>> {
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for &(i, j) in edges {
+        adj[i].push(j);
+        adj[j].push(i);
+    }
+    adj
 }
 
 impl ScenarioFile {
@@ -591,6 +658,74 @@ mod tests {
             Connections::Custom { edges } => assert_eq!(edges, vec![(0, 1), (1, 2), (2, 3)]),
             other => panic!("expected Custom, got {other:?}"),
         }
+    }
+
+    // ── Connections::kind ──────────────────────────────────────────────────
+
+    #[test]
+    fn kind_strings_are_stable() {
+        assert_eq!(Connections::FullMesh.kind(), "full_mesh");
+        assert_eq!(Connections::Ring.kind(), "ring");
+        assert_eq!(Connections::Line.kind(), "line");
+        assert_eq!(Connections::Star.kind(), "star");
+        assert_eq!(Connections::Custom { edges: vec![] }.kind(), "custom");
+    }
+
+    // ── Connections::diameter ──────────────────────────────────────────────
+
+    #[test]
+    fn diameter_zero_and_one_node() {
+        assert_eq!(Connections::FullMesh.diameter(0), 0);
+        assert_eq!(Connections::FullMesh.diameter(1), 0);
+    }
+
+    #[test]
+    fn diameter_full_mesh_is_one() {
+        for n in 2..=8 {
+            assert_eq!(Connections::FullMesh.diameter(n), 1, "n={n}");
+        }
+    }
+
+    #[test]
+    fn diameter_ring_is_floor_n_over_two() {
+        for n in 3..=12 {
+            assert_eq!(Connections::Ring.diameter(n), n / 2, "n={n}");
+        }
+    }
+
+    #[test]
+    fn diameter_line_is_n_minus_one() {
+        for n in 2..=10 {
+            assert_eq!(Connections::Line.diameter(n), n - 1, "n={n}");
+        }
+    }
+
+    #[test]
+    fn diameter_star_is_two_for_n_geq_three() {
+        // n=2 star is a single edge (diameter 1); n>=3 has leaf→hub→leaf paths.
+        assert_eq!(Connections::Star.diameter(2), 1);
+        for n in 3..=8 {
+            assert_eq!(Connections::Star.diameter(n), 2, "n={n}");
+        }
+    }
+
+    #[test]
+    fn diameter_custom_matches_structure() {
+        // Two-armed path: 0-1-2 plus a branch 1-3. Diameter is 2 (e.g. 0→2).
+        let c = Connections::Custom {
+            edges: vec![(0, 1), (1, 2), (1, 3)],
+        };
+        assert_eq!(c.diameter(4), 2);
+    }
+
+    #[test]
+    fn diameter_custom_disconnected_returns_largest_component() {
+        // Components: {0,1,2} as a line (diameter 2), {3,4} as one edge.
+        // Largest within-component diameter is 2.
+        let c = Connections::Custom {
+            edges: vec![(0, 1), (1, 2), (3, 4)],
+        };
+        assert_eq!(c.diameter(5), 2);
     }
 
     #[test]
