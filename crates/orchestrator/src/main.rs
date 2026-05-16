@@ -73,13 +73,8 @@ struct Args {
 
 /// Parse a single `client_addr[=peer_addr]` entry from the `--replicas` flag.
 fn parse_replica_endpoint(s: &str) -> Result<ReplicaEndpoint, String> {
-    let (client, peer) = match s.split_once('=') {
-        Some((client, peer)) => (client.trim(), peer.trim()),
-        None => {
-            let trimmed = s.trim();
-            (trimmed, trimmed)
-        }
-    };
+    let (client, peer) = s.split_once('=').unwrap_or((s, s));
+    let (client, peer) = (client.trim(), peer.trim());
     if client.is_empty() || peer.is_empty() {
         return Err(format!("empty address in --replicas entry '{s}'"));
     }
@@ -157,7 +152,7 @@ async fn main() -> Result<()> {
         let mut trial_ms: Vec<f64> = Vec::with_capacity(args.trials);
         // Captured from the first trial — topology_kind/edge_count/diameter
         // are deterministic per scenario, so the summary row reuses them.
-        let mut shape: Option<(&'static str, usize, usize)> = None;
+        let mut last_result: Option<RunResult> = None;
 
         for t in 1..=args.trials {
             let source = if args.replicas.is_empty() {
@@ -171,7 +166,6 @@ async fn main() -> Result<()> {
                 "scenario '{}' trial {t}: runner reported {} ops, expected {}",
                 scenario.name, result.total_ops, op_count,
             );
-            shape = Some((result.topology_kind, result.edge_count, result.diameter));
             trial_ms.push(result.convergence_ms);
             emit_trial(
                 args.output,
@@ -179,14 +173,12 @@ async fn main() -> Result<()> {
                 t,
                 node_count,
                 op_count,
-                result.topology_kind,
-                result.edge_count,
-                result.diameter,
-                result.convergence_ms,
+                &result,
             );
+            last_result = Some(result);
         }
 
-        let (kind, edges, diameter) = shape.expect("trials >= 1 enforced above");
+        let shape = last_result.expect("trials >= 1 enforced above");
         let s = stats(&trial_ms);
         emit_summary(
             args.output,
@@ -194,9 +186,7 @@ async fn main() -> Result<()> {
             args.trials,
             node_count,
             op_count,
-            kind,
-            edges,
-            diameter,
+            &shape,
             &s,
         );
     }
@@ -237,18 +227,21 @@ async fn run_scenario_once(scenario: &ScenarioFile, source: NodeSource) -> Resul
 
 // ── Output emission ──────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)]
 fn emit_trial(
     fmt: OutputFormat,
     scenario: &str,
     trial: usize,
     node_count: usize,
     op_count: usize,
-    topology_kind: &str,
-    edge_count: usize,
-    diameter: usize,
-    ms: f64,
+    result: &RunResult,
 ) {
+    let RunResult {
+        convergence_ms: ms,
+        topology_kind,
+        edge_count,
+        diameter,
+        ..
+    } = *result;
     match fmt {
         OutputFormat::Csv => {
             // Empty trailing fields are the summary-only columns (mean_ms, p50_ms, p95_ms).
@@ -275,18 +268,21 @@ fn emit_trial(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn emit_summary(
     fmt: OutputFormat,
     scenario: &str,
     n_trials: usize,
     node_count: usize,
     op_count: usize,
-    topology_kind: &str,
-    edge_count: usize,
-    diameter: usize,
+    shape: &RunResult,
     s: &TrialStats,
 ) {
+    let RunResult {
+        topology_kind,
+        edge_count,
+        diameter,
+        ..
+    } = *shape;
     match fmt {
         OutputFormat::Csv => {
             // `trial` column holds the trial count for summary rows; `convergence_ms` is empty.
@@ -446,7 +442,7 @@ impl PushMetricExporter for FileMetricExporter {
 fn serialize_metrics(rm: &ResourceMetrics) -> String {
     let metrics_arr: Vec<serde_json::Value> = rm
         .scope_metrics()
-        .flat_map(|sm| sm.metrics())
+        .flat_map(opentelemetry_sdk::metrics::data::ScopeMetrics::metrics)
         .map(|m| {
             let (kind, data_points) = match m.data() {
                 AggregatedMetrics::U64(MetricData::Sum(sum)) => (

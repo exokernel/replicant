@@ -64,41 +64,95 @@ impl ReplicaState {
         })
     }
 
+    // Each method below takes the adapter lock just long enough to call one
+    // trait method; the lock is never held across an `.await`. Panics if the
+    // mutex is poisoned (another thread panicked while holding it — the
+    // document state is no longer trustworthy).
+
     fn apply_op(&self, op: &Op) -> anyhow::Result<()> {
-        self.with_adapter(|a| a.apply_op(op))
+        self.adapter
+            .lock()
+            .expect("adapter mutex poisoned")
+            .apply_op(op)
     }
 
     fn get_heads(&self) -> Vec<Vec<u8>> {
-        self.with_adapter(|a| a.get_heads())
+        self.adapter
+            .lock()
+            .expect("adapter mutex poisoned")
+            .get_heads()
     }
 
     fn state_fingerprint(&self) -> Vec<u8> {
-        self.with_adapter(|a| a.state_fingerprint())
+        self.adapter
+            .lock()
+            .expect("adapter mutex poisoned")
+            .state_fingerprint()
     }
 
     fn doc_size_bytes(&self) -> usize {
-        self.with_adapter(|a| a.doc_size_bytes())
+        self.adapter
+            .lock()
+            .expect("adapter mutex poisoned")
+            .doc_size_bytes()
     }
 
     fn sync_generate(&self, peer: &str) -> Option<Vec<u8>> {
-        self.with_adapter(|a| a.sync_generate(peer))
+        self.adapter
+            .lock()
+            .expect("adapter mutex poisoned")
+            .sync_generate(peer)
     }
 
     fn sync_receive(&self, peer: &str, msg: Vec<u8>) -> anyhow::Result<()> {
-        self.with_adapter(|a| a.sync_receive(peer, msg))
-    }
-
-    /// Run `f` with exclusive access to the adapter.
-    ///
-    /// Panics if the mutex is poisoned (another thread panicked while holding
-    /// the adapter lock — the document state is no longer trustworthy).
-    fn with_adapter<R>(&self, f: impl FnOnce(&mut dyn CrdtAdapter) -> R) -> R {
-        let mut guard = self.adapter.lock().expect("adapter mutex poisoned");
-        f(&mut **guard)
+        self.adapter
+            .lock()
+            .expect("adapter mutex poisoned")
+            .sync_receive(peer, msg)
     }
 
     pub fn actor_id(&self) -> &str {
         &self.actor_id
+    }
+
+    // ── Metric recorders ───────────────────────────────────────────────────
+    //
+    // These wrap the attribute construction so callers don't repeat the
+    // `KeyValue::new("actor", ...)` boilerplate. Keeping them on `ReplicaState`
+    // means there's exactly one place that knows which attributes each
+    // instrument expects.
+
+    fn record_op_duration(&self, op_name: &'static str, elapsed_ms: f64) {
+        self.metrics.op_duration_ms.record(
+            elapsed_ms,
+            &[
+                KeyValue::new("actor", self.actor_id.clone()),
+                KeyValue::new("op", op_name),
+            ],
+        );
+    }
+
+    /// Sample the document size and record it on the gauge.
+    fn record_doc_size(&self) {
+        self.metrics.doc_size_bytes.record(
+            self.doc_size_bytes() as u64,
+            &[KeyValue::new("actor", self.actor_id.clone())],
+        );
+    }
+
+    fn record_sync_tx(&self, peer_id: &str) {
+        self.metrics.sync_tx.add(1, &self.peer_attrs(peer_id));
+    }
+
+    fn record_sync_rx(&self, peer_id: &str) {
+        self.metrics.sync_rx.add(1, &self.peer_attrs(peer_id));
+    }
+
+    fn peer_attrs(&self, peer_id: &str) -> [KeyValue; 2] {
+        [
+            KeyValue::new("actor", self.actor_id.clone()),
+            KeyValue::new("peer", peer_id.to_owned()),
+        ]
     }
 
     async fn register_peer(&self, peer_id: String, tx: mpsc::Sender<Vec<u8>>) {
@@ -128,13 +182,7 @@ impl ReplicaState {
             if let Some(msg) = self.sync_generate(peer_id)
                 && tx.try_send(msg).is_ok()
             {
-                self.metrics.sync_tx.add(
-                    1,
-                    &[
-                        KeyValue::new("actor", self.actor_id.clone()),
-                        KeyValue::new("peer", peer_id.clone()),
-                    ],
-                );
+                self.record_sync_tx(peer_id);
             }
         }
     }
@@ -184,18 +232,8 @@ impl Replica for ReplicaService {
             .map_err(|e| Status::internal(e.to_string()))?;
         let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
-        let actor = self.state.actor_id.clone();
-        self.state.metrics.op_duration_ms.record(
-            elapsed_ms,
-            &[
-                KeyValue::new("actor", actor.clone()),
-                KeyValue::new("op", op.name()),
-            ],
-        );
-        self.state.metrics.doc_size_bytes.record(
-            self.state.doc_size_bytes() as u64,
-            &[KeyValue::new("actor", actor)],
-        );
+        self.state.record_op_duration(op.name(), elapsed_ms);
+        self.state.record_doc_size();
 
         self.state.flush_to_peers().await;
 
@@ -322,22 +360,13 @@ async fn recv_loop(
                     tracing::error!(peer = %peer_id, "sync_receive failed: {e:#}");
                     break;
                 }
-                state.metrics.sync_rx.add(
-                    1,
-                    &[
-                        KeyValue::new("actor", state.actor_id.clone()),
-                        KeyValue::new("peer", peer_id.clone()),
-                    ],
-                );
+                state.record_sync_rx(&peer_id);
                 // Also re-sample doc size here: the apply_op path only updates
                 // the gauge when a *local* write lands, so without this a
                 // replica that only receives sync messages would report the
                 // pre-merge size forever. Recording on receive lets
                 // post-convergence equality checks (max() by (actor)) hold.
-                state.metrics.doc_size_bytes.record(
-                    state.doc_size_bytes() as u64,
-                    &[KeyValue::new("actor", state.actor_id.clone())],
-                );
+                state.record_doc_size();
                 // Immediately reply if the protocol has something to send back.
                 if let Some(response) = state.sync_generate(&peer_id)
                     && tx.send(response).await.is_err()

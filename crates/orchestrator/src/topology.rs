@@ -242,6 +242,7 @@ pub struct PartitionConfig {
 }
 
 /// Result of a completed scenario run.
+#[derive(Debug, Clone, Copy)]
 pub struct RunResult {
     /// Fractional milliseconds from write-start (full-mesh) or heal-start
     /// (partition-heal) until all node fingerprints agree.
