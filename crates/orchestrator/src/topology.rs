@@ -5,14 +5,61 @@ use serde::{Deserialize, Deserializer};
 
 /// Top-level scenario file — TOML format; exactly one of `[topology]` or
 /// `[partition_heal]` must be present.
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 pub struct ScenarioFile {
     /// Human-readable name used in log output and result reporting.
     pub name: String,
-    /// Present for a topology run.
-    pub topology: Option<TopologyConfig>,
-    /// Present for a partition-heal run.
-    pub partition_heal: Option<PartitionConfig>,
+    /// Which kind of scenario this file describes.
+    pub body: ScenarioBody,
+}
+
+/// The two scenario shapes a file may describe. The exactly-one-set invariant
+/// from the TOML layer is encoded here so downstream code never has to
+/// re-check it.
+#[derive(Debug)]
+pub enum ScenarioBody {
+    Topology(TopologyConfig),
+    PartitionHeal(PartitionConfig),
+}
+
+// Custom Deserialize so the TOML form stays as:
+//   [topology]    | [partition_heal]
+// rather than serde's default `body = { topology = {...} }`. Validates that
+// exactly one of the two tables is present and surfaces a clear error
+// otherwise, so the invariant is established at parse time.
+impl<'de> Deserialize<'de> for ScenarioFile {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            name: String,
+            topology: Option<TopologyConfig>,
+            partition_heal: Option<PartitionConfig>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        let body = match (raw.topology, raw.partition_heal) {
+            (Some(t), None) => ScenarioBody::Topology(t),
+            (None, Some(p)) => ScenarioBody::PartitionHeal(p),
+            (Some(_), Some(_)) => {
+                return Err(serde::de::Error::custom(format!(
+                    "scenario '{}': only one of [topology] or [partition_heal] may be present",
+                    raw.name
+                )));
+            }
+            (None, None) => {
+                return Err(serde::de::Error::custom(format!(
+                    "scenario '{}': one of [topology] or [partition_heal] must be present",
+                    raw.name
+                )));
+            }
+        };
+        Ok(Self {
+            name: raw.name,
+            body,
+        })
+    }
 }
 
 /// Write distribution for ops in a scenario run.
@@ -276,16 +323,11 @@ fn adjacency_list(n: usize, edges: &[(usize, usize)]) -> Vec<Vec<usize>> {
 
 impl ScenarioFile {
     /// Number of replica nodes this scenario will spawn.
-    ///
-    /// Returns the count from whichever variant is present. Panics if neither
-    /// `topology` nor `partition_heal` is set — `run_scenario_once` rejects
-    /// such files before this is reached.
     pub fn node_count(&self) -> usize {
-        self.topology
-            .as_ref()
-            .map(|t| t.node_count)
-            .or_else(|| self.partition_heal.as_ref().map(|p| p.node_count))
-            .expect("scenario must have topology or partition_heal — caller validated this")
+        match &self.body {
+            ScenarioBody::Topology(t) => t.node_count,
+            ScenarioBody::PartitionHeal(p) => p.node_count,
+        }
     }
 
     /// Total ops applied across all nodes in one trial of this scenario.
@@ -293,15 +335,10 @@ impl ScenarioFile {
     /// Deterministic from the config, so every trial of the same scenario
     /// reports the same value.
     pub fn op_count(&self) -> usize {
-        self.topology
-            .as_ref()
-            .map(|t| t.op_count)
-            .or_else(|| {
-                self.partition_heal
-                    .as_ref()
-                    .map(|p| p.groups.len() * p.ops_per_group)
-            })
-            .expect("scenario must have topology or partition_heal — caller validated this")
+        match &self.body {
+            ScenarioBody::Topology(t) => t.op_count,
+            ScenarioBody::PartitionHeal(p) => p.groups.len() * p.ops_per_group,
+        }
     }
 }
 
@@ -333,28 +370,25 @@ pub fn builtin_scenarios() -> Vec<ScenarioFile> {
     vec![
         ScenarioFile {
             name: "full-mesh-n2".to_owned(),
-            topology: Some(TopologyConfig {
+            body: ScenarioBody::Topology(TopologyConfig {
                 node_count: 2,
                 connections: Connections::FullMesh,
                 write_pattern: WritePattern::RoundRobin,
                 op_count: 2,
             }),
-            partition_heal: None,
         },
         ScenarioFile {
             name: "full-mesh-n3".to_owned(),
-            topology: Some(TopologyConfig {
+            body: ScenarioBody::Topology(TopologyConfig {
                 node_count: 3,
                 connections: Connections::FullMesh,
                 write_pattern: WritePattern::RoundRobin,
                 op_count: 6,
             }),
-            partition_heal: None,
         },
         ScenarioFile {
             name: "partition-heal-n4".to_owned(),
-            topology: None,
-            partition_heal: Some(PartitionConfig {
+            body: ScenarioBody::PartitionHeal(PartitionConfig {
                 node_count: 4,
                 groups: vec![Group { nodes: vec![0, 1] }, Group { nodes: vec![2, 3] }],
                 ops_per_group: 4,
@@ -415,13 +449,12 @@ mod tests {
     fn node_count_topology_variant() {
         let s = ScenarioFile {
             name: "t".into(),
-            topology: Some(TopologyConfig {
+            body: ScenarioBody::Topology(TopologyConfig {
                 node_count: 5,
                 connections: Connections::FullMesh,
                 write_pattern: WritePattern::RoundRobin,
                 op_count: 1,
             }),
-            partition_heal: None,
         };
         assert_eq!(s.node_count(), 5);
     }
@@ -430,8 +463,7 @@ mod tests {
     fn node_count_partition_heal_variant() {
         let s = ScenarioFile {
             name: "p".into(),
-            topology: None,
-            partition_heal: Some(PartitionConfig {
+            body: ScenarioBody::PartitionHeal(PartitionConfig {
                 node_count: 4,
                 groups: vec![Group { nodes: vec![0, 1] }, Group { nodes: vec![2, 3] }],
                 ops_per_group: 2,
@@ -439,6 +471,70 @@ mod tests {
             }),
         };
         assert_eq!(s.node_count(), 4);
+    }
+
+    // ── ScenarioFile parse-time invariants ─────────────────────────────────
+
+    #[test]
+    fn scenario_parses_topology_form() {
+        let s: ScenarioFile = toml::from_str(
+            r#"
+            name = "t"
+            [topology]
+            node_count = 3
+            connections = "full_mesh"
+            write_pattern = "round_robin"
+            op_count = 2
+            "#,
+        )
+        .unwrap();
+        assert_eq!(s.name, "t");
+        assert!(matches!(s.body, ScenarioBody::Topology(_)));
+    }
+
+    #[test]
+    fn scenario_parses_partition_heal_form() {
+        let s: ScenarioFile = toml::from_str(
+            r#"
+            name = "p"
+            [partition_heal]
+            node_count = 2
+            ops_per_group = 1
+            write_pattern = "round_robin"
+            [[partition_heal.groups]]
+            nodes = [0, 1]
+            "#,
+        )
+        .unwrap();
+        assert!(matches!(s.body, ScenarioBody::PartitionHeal(_)));
+    }
+
+    #[test]
+    fn scenario_rejects_both_bodies_present() {
+        let err = toml::from_str::<ScenarioFile>(
+            r#"
+            name = "x"
+            [topology]
+            node_count = 2
+            connections = "full_mesh"
+            write_pattern = "round_robin"
+            op_count = 1
+            [partition_heal]
+            node_count = 2
+            ops_per_group = 1
+            write_pattern = "round_robin"
+            [[partition_heal.groups]]
+            nodes = [0, 1]
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("only one of"), "{err}");
+    }
+
+    #[test]
+    fn scenario_rejects_no_body() {
+        let err = toml::from_str::<ScenarioFile>(r#"name = "x""#).unwrap_err();
+        assert!(err.to_string().contains("must be present"), "{err}");
     }
 
     #[test]

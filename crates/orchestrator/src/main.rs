@@ -25,7 +25,7 @@ mod runner;
 mod topology;
 
 use runner::{NodeSource, ReplicaEndpoint};
-use topology::{RunResult, ScenarioFile, builtin_scenarios};
+use topology::{RunResult, ScenarioBody, ScenarioFile, builtin_scenarios};
 
 // ── CLI ─────────────────────────────────────────────────────────────────────
 
@@ -209,13 +209,9 @@ async fn main() -> Result<()> {
 /// Run a single scenario once and return its result.
 async fn run_scenario_once(scenario: &ScenarioFile, source: NodeSource) -> Result<RunResult> {
     tracing::info!(scenario = %scenario.name, "starting");
-    let result = match (&scenario.topology, &scenario.partition_heal) {
-        (Some(config), None) => runner::run(config, source).await?,
-        (None, Some(config)) => runner::run_partition_heal(config, source).await?,
-        _ => bail!(
-            "scenario '{}': exactly one of [topology] or [partition_heal] must be present",
-            scenario.name
-        ),
+    let result = match &scenario.body {
+        ScenarioBody::Topology(config) => runner::run(config, source).await?,
+        ScenarioBody::PartitionHeal(config) => runner::run_partition_heal(config, source).await?,
     };
     tracing::info!(
         scenario = %scenario.name,
