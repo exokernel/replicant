@@ -6,6 +6,15 @@ default:
 fmt:
     cargo fmt --all
 
+# Strip outputs from all notebooks in place (jj does not honor the
+# .gitattributes nbstripout clean filter on snapshot, so we run it
+# explicitly). Run before `jj describe` / `jj git push` on any change
+# that re-executed a notebook. `jj fix` also runs nbstripout — this
+# recipe is the manual escape hatch.
+clean-notebooks:
+    find analysis -name '*.ipynb' -not -path '*/.ipynb_checkpoints/*' -print0 \
+        | xargs -0 nbstripout
+
 # Quick compile check without producing binaries (faster than lint)
 check:
     cargo check --all-targets

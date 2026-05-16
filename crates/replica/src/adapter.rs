@@ -399,4 +399,79 @@ mod tests {
         assert_eq!(a.state_fingerprint(), b.state_fingerprint());
         assert_eq!(b.state_fingerprint(), c.state_fingerprint());
     }
+
+    #[test]
+    fn save_bytes_not_canonical_across_converged_replicas() {
+        // Locks in a known Automerge property: two replicas with identical
+        // logical state (same heads, same fingerprint, same readable values)
+        // can produce *different* save() byte streams. The encoding preserves
+        // change-list storage order, which depends on integration order, and
+        // that order varies by graph position in non-mesh topologies with
+        // distributed writes.
+        //
+        // The notebook's per-scenario doc-size table treats this as expected
+        // and presents the spread as informational rather than an assertion.
+        // If a future Automerge release ever canonicalizes save(), this test
+        // will start failing and the table can be tightened to strict
+        // equality.
+        let n = 5;
+        let op_count = 10;
+        let mut replicas: Vec<AutomergeAdapter> =
+            (0..n).map(|_| AutomergeAdapter::new()).collect();
+        let id = |i: usize| format!("node-{i}");
+
+        for i in 0..op_count {
+            let writer = i % n;
+            replicas[writer]
+                .apply_op(&map_put("doc", &format!("k{i}"), i as u64))
+                .unwrap();
+            // Inline one round of bidirectional sync over each line edge —
+            // approximates the server's post-apply_op flush_to_peers.
+            for j in 0..n - 1 {
+                let (left, right) = replicas.split_at_mut(j + 1);
+                if let Some(msg) = left[j].sync_generate(&id(j + 1)) {
+                    right[0].sync_receive(&id(j), msg).unwrap();
+                }
+                if let Some(msg) = right[0].sync_generate(&id(j)) {
+                    left[j].sync_receive(&id(j + 1), msg).unwrap();
+                }
+            }
+        }
+        // Drain any in-flight messages until both directions of every edge
+        // report quiescence.
+        loop {
+            let mut any = false;
+            for j in 0..n - 1 {
+                let (left, right) = replicas.split_at_mut(j + 1);
+                if let Some(msg) = left[j].sync_generate(&id(j + 1)) {
+                    right[0].sync_receive(&id(j), msg).unwrap();
+                    any = true;
+                }
+                if let Some(msg) = right[0].sync_generate(&id(j)) {
+                    left[j].sync_receive(&id(j + 1), msg).unwrap();
+                    any = true;
+                }
+            }
+            if !any {
+                break;
+            }
+        }
+
+        // Fingerprints (the CRDT convergence invariant) must agree.
+        let fp = replicas[0].state_fingerprint();
+        for i in 1..n {
+            assert_eq!(replicas[i].state_fingerprint(), fp);
+        }
+
+        // save() bytes are allowed to differ — and empirically they do.
+        // Asserting they vary documents the current Automerge behavior so a
+        // future-upgrade regression toward canonical save() is loud rather
+        // than silent.
+        let sizes: Vec<usize> = (0..n).map(|i| replicas[i].doc_size_bytes()).collect();
+        assert!(
+            sizes.iter().min() != sizes.iter().max(),
+            "save() became canonical across line replicas — sizes: {sizes:?}. \
+             Tighten the notebook doc-size table to strict equality.",
+        );
+    }
 }
