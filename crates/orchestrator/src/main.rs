@@ -201,17 +201,16 @@ async fn main() -> Result<()> {
         );
     }
 
-    // If a metrics file was requested, trigger a final collection and write to disk.
+    // Flush any pending metrics before exit. Shutting down the provider gives
+    // the OTLP exporter a chance to send its final batch (PeriodicReader's
+    // interval is longer than a typical scenario run); for the file exporter
+    // it triggers the final JSON snapshot.
+    provider
+        .shutdown()
+        .map_err(|e| anyhow::anyhow!("metrics provider shutdown failed: {e:?}"))?;
     if file_exporter.is_some() {
-        provider
-            .force_flush()
-            .map_err(|e| anyhow::anyhow!("metrics flush failed: {e:?}"))?;
         tracing::info!(path = ?args.metrics_file, "OTel metrics written");
     }
-    // Drop without calling provider.shutdown(): the stdout MetricExporter
-    // (used when no metrics file is specified) writes a JSON blob on shutdown,
-    // which would pollute the structured stdout output.
-    drop(provider);
     Ok(())
 }
 
@@ -351,9 +350,12 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 
 /// Build the metrics provider.
 ///
-/// If `metrics_file` is `Some`, attaches a [`FileMetricExporter`] that writes a
-/// JSON snapshot to the given path on `force_flush`.  Otherwise falls back to
-/// the stdout exporter (whose output is suppressed by never calling `shutdown`).
+/// Exporter precedence:
+/// 1. `--metrics-file PATH` → [`FileMetricExporter`] (offline JSON snapshot).
+/// 2. `OTEL_EXPORTER_OTLP_ENDPOINT` (or the metrics-specific variant) set →
+///    OTLP gRPC exporter; endpoint is read from the env var by the builder.
+/// 3. Neither → no reader; instruments still record but nothing is exported,
+///    keeping `just smoke` and unit-test runs free of exporter noise.
 fn init_metrics(
     metrics_file: Option<&std::path::Path>,
 ) -> Result<(SdkMeterProvider, Option<FileMetricExporter>)> {
@@ -365,13 +367,20 @@ fn init_metrics(
         let exporter = FileMetricExporter::new(file);
         let reader = PeriodicReader::builder(exporter.clone()).build();
         let provider = SdkMeterProvider::builder().with_reader(reader).build();
-        Ok((provider, Some(exporter)))
-    } else {
-        use opentelemetry_stdout::MetricExporter;
-        let reader = PeriodicReader::builder(MetricExporter::default()).build();
-        let provider = SdkMeterProvider::builder().with_reader(reader).build();
-        Ok((provider, None))
+        return Ok((provider, Some(exporter)));
     }
+
+    let mut builder = SdkMeterProvider::builder();
+    let otlp_endpoint_set = std::env::var_os("OTEL_EXPORTER_OTLP_ENDPOINT").is_some()
+        || std::env::var_os("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT").is_some();
+    if otlp_endpoint_set {
+        let exporter = opentelemetry_otlp::MetricExporter::builder()
+            .with_tonic()
+            .build()
+            .context("building OTLP metric exporter")?;
+        builder = builder.with_reader(PeriodicReader::builder(exporter).build());
+    }
+    Ok((builder.build(), None))
 }
 
 // ── FileMetricExporter ────────────────────────────────────────────────────────

@@ -18,6 +18,11 @@ x-replica: &replica
   build: .
   networks: [replicant]
   restart: "no"
+  environment:
+    OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+  depends_on:
+    otel-collector:
+      condition: service_started
 
 services:
   replica-0:
@@ -54,6 +59,33 @@ services:
     hostname: replica-4
     command: ["--actor", "node-4", "--port", "50051"]
     ports: ["50055:50051"]
+
+  # Receives OTLP gRPC from replicas on :4317; exposes a Prometheus scrape
+  # endpoint on :8889. Pinned tag so `docker compose up` is reproducible.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.115.0
+    container_name: otel-collector
+    hostname: otel-collector
+    networks: [replicant]
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "4317:4317"  # OTLP gRPC (also reachable from host orchestrator)
+      - "8889:8889"  # Prometheus scrape endpoint
+
+  # Scrapes the collector; UI on :9090 for ad-hoc PromQL during a run.
+  prometheus:
+    image: prom/prometheus:v3.0.1
+    container_name: prometheus
+    hostname: prometheus
+    networks: [replicant]
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["9090:9090"]
+    depends_on:
+      otel-collector:
+        condition: service_started
 
 networks:
   replicant:

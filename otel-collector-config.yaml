@@ -1,0 +1,31 @@
+# OTel collector pipeline: OTLP gRPC in (from replicas), Prometheus scrape out.
+#
+# The Prometheus exporter exposes /metrics on :8889; the prometheus service in
+# docker-compose.yml scrapes that endpoint. Replicas send OTLP via
+# OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  batch:
+    timeout: 1s
+
+exporters:
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    # `actor` and `peer` arrive as resource attributes from the replica's SDK;
+    # promote them to labels so PromQL queries like
+    # `max(replicant_doc_size_bytes) by (actor)` work as expected.
+    resource_to_telemetry_conversion:
+      enabled: true
+
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [prometheus]

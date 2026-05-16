@@ -6,7 +6,7 @@
 
 use clap::Parser as _;
 use common::proto::{replica_server::ReplicaServer, sync_server::SyncServer};
-use opentelemetry_sdk::metrics::SdkMeterProvider;
+use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use replica::adapter::AutomergeAdapter;
 use replica::server::{ReplicaService, ReplicaState, SyncService};
 use tonic::transport::Server;
@@ -29,7 +29,7 @@ async fn main() -> anyhow::Result<()> {
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    let provider = init_metrics();
+    let provider = init_metrics()?;
     opentelemetry::global::set_meter_provider(provider.clone());
 
     let args = Args::parse();
@@ -50,14 +50,23 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Build a stdout metrics provider that exports every 30 seconds.
+/// Build a metrics provider.
 ///
-/// Uses the stdout exporter for development visibility. In production this
-/// would be replaced with an OTLP exporter pointed at a collector.
-fn init_metrics() -> SdkMeterProvider {
-    use opentelemetry_sdk::metrics::PeriodicReader;
-    use opentelemetry_stdout::MetricExporter;
+/// Attaches an OTLP gRPC exporter when `OTEL_EXPORTER_OTLP_ENDPOINT` (or the
+/// metrics-specific `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`) is set; the OTLP
+/// builder reads the env var itself. Without it, no reader is attached:
+/// instruments still record but nothing is exported, which keeps standalone
+/// `cargo run --bin replica` quiet for local development.
+fn init_metrics() -> anyhow::Result<SdkMeterProvider> {
+    let env_set = std::env::var_os("OTEL_EXPORTER_OTLP_ENDPOINT").is_some()
+        || std::env::var_os("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT").is_some();
 
-    let reader = PeriodicReader::builder(MetricExporter::default()).build();
-    SdkMeterProvider::builder().with_reader(reader).build()
+    let mut builder = SdkMeterProvider::builder();
+    if env_set {
+        let exporter = opentelemetry_otlp::MetricExporter::builder()
+            .with_tonic()
+            .build()?;
+        builder = builder.with_reader(PeriodicReader::builder(exporter).build());
+    }
+    Ok(builder.build())
 }
