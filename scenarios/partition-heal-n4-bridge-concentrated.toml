@@ -1,0 +1,13 @@
+name = "partition-heal-n4-bridge-concentrated"
+
+[partition_heal]
+node_count = 4
+write_pattern = "concentrated"
+heal_topology = "bridge"
+ops_per_group = 4
+
+[[partition_heal.groups]]
+nodes = [0, 1]
+
+[[partition_heal.groups]]
+nodes = [2, 3]

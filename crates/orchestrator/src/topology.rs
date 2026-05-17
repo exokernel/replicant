@@ -72,6 +72,22 @@ pub enum WritePattern {
     RoundRobin,
 }
 
+/// Post-heal wiring for a partition-heal scenario.
+///
+/// Selects how the partition is repaired in phase 2. `FullMesh` reconnects
+/// every pair across groups (original behaviour); `Bridge` connects only
+/// `groups[0].nodes[0]` to `groups[1].nodes[0]`, forcing all cross-partition
+/// state through one edge. `Bridge` requires exactly 2 groups.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HealTopology {
+    /// Connect every cross-group pair on heal (post-heal graph is a full mesh).
+    #[default]
+    FullMesh,
+    /// Connect only `groups[0].nodes[0]` to `groups[1].nodes[0]` on heal.
+    Bridge,
+}
+
 /// Connection topology for a scenario run.
 ///
 /// Named variants (`FullMesh`, `Ring`, `Line`, `Star`) are derived
@@ -286,6 +302,10 @@ pub struct PartitionConfig {
     pub ops_per_group: usize,
     /// Write distribution within each group.
     pub write_pattern: WritePattern,
+    /// Wiring added on heal. Defaults to `FullMesh` so pre-existing TOML
+    /// scenarios that omit the field keep their original behaviour.
+    #[serde(default)]
+    pub heal_topology: HealTopology,
 }
 
 /// Result of a completed scenario run.
@@ -351,7 +371,10 @@ impl TopologyConfig {
 }
 
 impl PartitionConfig {
-    /// Check that `node_count` equals the total number of nodes across all groups.
+    /// Check that `node_count` equals the total number of nodes across all
+    /// groups, and that `heal_topology = "bridge"` (if set) is paired with
+    /// exactly 2 groups — the bridge variant is currently only defined for
+    /// two-partition heals.
     pub fn validate(&self) -> Result<()> {
         let total: usize = self.groups.iter().map(|g| g.nodes.len()).sum();
         if total != self.node_count {
@@ -359,6 +382,12 @@ impl PartitionConfig {
                 "PartitionConfig: node_count={} but groups cover {} nodes",
                 self.node_count,
                 total
+            );
+        }
+        if self.heal_topology == HealTopology::Bridge && self.groups.len() != 2 {
+            bail!(
+                "PartitionConfig: heal_topology=\"bridge\" requires exactly 2 groups, got {}",
+                self.groups.len()
             );
         }
         Ok(())
@@ -393,6 +422,7 @@ pub fn builtin_scenarios() -> Vec<ScenarioFile> {
                 groups: vec![Group { nodes: vec![0, 1] }, Group { nodes: vec![2, 3] }],
                 ops_per_group: 4,
                 write_pattern: WritePattern::RoundRobin,
+                heal_topology: HealTopology::FullMesh,
             }),
         },
     ]
@@ -410,6 +440,7 @@ mod tests {
             groups: groups.into_iter().map(|nodes| Group { nodes }).collect(),
             ops_per_group: 1,
             write_pattern: WritePattern::RoundRobin,
+            heal_topology: HealTopology::FullMesh,
         }
     }
 
@@ -468,6 +499,7 @@ mod tests {
                 groups: vec![Group { nodes: vec![0, 1] }, Group { nodes: vec![2, 3] }],
                 ops_per_group: 2,
                 write_pattern: WritePattern::RoundRobin,
+                heal_topology: HealTopology::FullMesh,
             }),
         };
         assert_eq!(s.node_count(), 4);
@@ -535,6 +567,121 @@ mod tests {
     fn scenario_rejects_no_body() {
         let err = toml::from_str::<ScenarioFile>(r#"name = "x""#).unwrap_err();
         assert!(err.to_string().contains("must be present"), "{err}");
+    }
+
+    // ── HealTopology ───────────────────────────────────────────────────────
+
+    /// Pre-existing partition_heal TOML scenarios omit `heal_topology`; the
+    /// field must default to `FullMesh` so their behaviour does not change.
+    #[test]
+    fn heal_topology_defaults_to_full_mesh_when_absent() {
+        let s: ScenarioFile = toml::from_str(
+            r#"
+            name = "p"
+            [partition_heal]
+            node_count = 2
+            ops_per_group = 1
+            write_pattern = "round_robin"
+            [[partition_heal.groups]]
+            nodes = [0, 1]
+            "#,
+        )
+        .unwrap();
+        let ScenarioBody::PartitionHeal(cfg) = s.body else {
+            panic!("expected PartitionHeal body");
+        };
+        assert_eq!(cfg.heal_topology, HealTopology::FullMesh);
+    }
+
+    #[test]
+    fn heal_topology_parses_bridge_form() {
+        let s: ScenarioFile = toml::from_str(
+            r#"
+            name = "p"
+            [partition_heal]
+            node_count = 4
+            ops_per_group = 1
+            write_pattern = "round_robin"
+            heal_topology = "bridge"
+            [[partition_heal.groups]]
+            nodes = [0, 1]
+            [[partition_heal.groups]]
+            nodes = [2, 3]
+            "#,
+        )
+        .unwrap();
+        let ScenarioBody::PartitionHeal(cfg) = s.body else {
+            panic!("expected PartitionHeal body");
+        };
+        assert_eq!(cfg.heal_topology, HealTopology::Bridge);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn heal_topology_parses_full_mesh_form() {
+        let s: ScenarioFile = toml::from_str(
+            r#"
+            name = "p"
+            [partition_heal]
+            node_count = 4
+            ops_per_group = 1
+            write_pattern = "round_robin"
+            heal_topology = "full_mesh"
+            [[partition_heal.groups]]
+            nodes = [0, 1]
+            [[partition_heal.groups]]
+            nodes = [2, 3]
+            "#,
+        )
+        .unwrap();
+        let ScenarioBody::PartitionHeal(cfg) = s.body else {
+            panic!("expected PartitionHeal body");
+        };
+        assert_eq!(cfg.heal_topology, HealTopology::FullMesh);
+    }
+
+    #[test]
+    fn heal_topology_default_is_full_mesh() {
+        assert_eq!(HealTopology::default(), HealTopology::FullMesh);
+    }
+
+    #[test]
+    fn validate_err_when_bridge_with_one_group() {
+        let mut cfg = make_config(3, vec![vec![0, 1, 2]]);
+        cfg.heal_topology = HealTopology::Bridge;
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("requires exactly 2 groups"),
+            "{err}"
+        );
+        assert!(err.to_string().contains("got 1"), "{err}");
+    }
+
+    #[test]
+    fn validate_err_when_bridge_with_three_groups() {
+        let mut cfg = make_config(6, vec![vec![0, 1], vec![2, 3], vec![4, 5]]);
+        cfg.heal_topology = HealTopology::Bridge;
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("requires exactly 2 groups"),
+            "{err}"
+        );
+        assert!(err.to_string().contains("got 3"), "{err}");
+    }
+
+    #[test]
+    fn validate_ok_when_bridge_with_two_groups() {
+        let mut cfg = make_config(4, vec![vec![0, 1], vec![2, 3]]);
+        cfg.heal_topology = HealTopology::Bridge;
+        assert!(cfg.validate().is_ok());
+    }
+
+    /// Many-group partition-heals are still allowed under the default
+    /// `FullMesh` heal — the 2-group restriction only kicks in for `Bridge`.
+    #[test]
+    fn validate_ok_when_full_mesh_with_three_groups() {
+        let cfg = make_config(6, vec![vec![0, 1], vec![2, 3], vec![4, 5]]);
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]

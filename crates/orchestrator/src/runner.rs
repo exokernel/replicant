@@ -15,7 +15,9 @@ use common::proto::{
 use replica::adapter::AutomergeAdapter;
 use replica::server::{ReplicaService, ReplicaState, SyncService};
 
-use crate::topology::{Connections, PartitionConfig, RunResult, TopologyConfig, WritePattern};
+use crate::topology::{
+    Connections, Group, HealTopology, PartitionConfig, RunResult, TopologyConfig, WritePattern,
+};
 
 // ── Replica endpoints ──────────────────────────────────────────────────────
 
@@ -356,15 +358,12 @@ pub async fn run_partition_heal(config: &PartitionConfig, source: NodeSource) ->
     }
     check_tasks(&mut tasks)?;
 
-    // Heal: add the edges that cross group boundaries. `intra` is the set of
-    // edges already wired during the partition phase; subtracting them from
-    // the full mesh gives exactly the cross-group connections needed.
-    let intra_set: HashSet<(usize, usize)> = intra.into_iter().collect();
-    let heal_edges: Vec<(usize, usize)> = Connections::FullMesh
-        .edges(n)
-        .into_iter()
-        .filter(|e| !intra_set.contains(e))
-        .collect();
+    // Heal: pick the cross-group edges per heal_topology.
+    //   FullMesh — every cross-group pair; post-heal graph is K_n
+    //   Bridge   — only `groups[0].nodes[0] ↔ groups[1].nodes[0]` (validated
+    //              to require exactly 2 groups)
+    let intra_set: HashSet<(usize, usize)> = intra.iter().copied().collect();
+    let heal_edges = heal_edges(&config.heal_topology, &config.groups, n, &intra_set);
 
     let heal_start = Instant::now();
     connect_edges(&mut clients, &endpoints, &heal_edges).await?;
@@ -379,16 +378,52 @@ pub async fn run_partition_heal(config: &PartitionConfig, source: NodeSource) ->
     .await?;
     check_tasks(&mut tasks)?;
 
-    // Post-heal the wiring is full mesh, so report those structural fields;
-    // `topology_kind = "partition_heal"` flags this scenario shape so analyses
-    // can separate heal-driven convergence from steady-state full-mesh runs.
+    // Report structural fields for the actual post-heal graph (intra-group
+    // edges + heal edges). `topology_kind = "partition_heal"` flags the
+    // scenario shape so analyses can separate heal-driven convergence from
+    // steady-state runs; edge_count and diameter let downstream plots tell
+    // the FullMesh-heal and Bridge-heal variants apart on structural axes.
+    let mut final_edges = intra;
+    final_edges.extend(heal_edges.iter().copied());
+    let final_graph = Connections::Custom {
+        edges: final_edges.clone(),
+    };
     Ok(RunResult {
         convergence_ms,
         total_ops: config.groups.len() * config.ops_per_group,
         topology_kind: "partition_heal",
-        edge_count: Connections::FullMesh.edges(n).len(),
-        diameter: Connections::FullMesh.diameter(n),
+        edge_count: final_edges.len(),
+        diameter: final_graph.diameter(n),
     })
+}
+
+/// Compute the heal-phase edges for a partition-heal scenario.
+///
+/// Caller owns the set of intra-group edges already wired during the partition
+/// phase; this function returns *only* the cross-group edges to add at heal.
+///
+/// * `FullMesh` — every pair (i, j) with `i < j` that isn't already in `intra_set`.
+/// * `Bridge` — exactly one edge `(min, max)` between `groups[0].nodes[0]` and
+///   `groups[1].nodes[0]`. Assumes `groups.len() == 2` (enforced by
+///   [`PartitionConfig::validate`]).
+fn heal_edges(
+    heal: &HealTopology,
+    groups: &[Group],
+    n: usize,
+    intra_set: &HashSet<(usize, usize)>,
+) -> Vec<(usize, usize)> {
+    match heal {
+        HealTopology::FullMesh => Connections::FullMesh
+            .edges(n)
+            .into_iter()
+            .filter(|e| !intra_set.contains(e))
+            .collect(),
+        HealTopology::Bridge => {
+            let a = groups[0].nodes[0];
+            let b = groups[1].nodes[0];
+            vec![if a < b { (a, b) } else { (b, a) }]
+        }
+    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -455,6 +490,111 @@ mod tests {
         let deduped: std::collections::HashSet<_> = edges.iter().copied().collect();
         assert_eq!(n, deduped.len());
         assert!(edges.iter().all(|(i, j)| i < j));
+    }
+
+    // ── heal_edges ─────────────────────────────────────────────────────────
+
+    fn intra_for(groups: &[Group]) -> HashSet<(usize, usize)> {
+        groups
+            .iter()
+            .flat_map(|g| intra_group_edges(&g.nodes))
+            .collect()
+    }
+
+    fn two_groups(a: Vec<usize>, b: Vec<usize>) -> Vec<Group> {
+        vec![Group { nodes: a }, Group { nodes: b }]
+    }
+
+    #[test]
+    fn heal_edges_full_mesh_returns_only_cross_group_pairs() {
+        // n=4, groups [0,1] & [2,3]. Intra: (0,1),(2,3). Cross: (0,2),(0,3),(1,2),(1,3).
+        let groups = two_groups(vec![0, 1], vec![2, 3]);
+        let intra = intra_for(&groups);
+        let mut edges = heal_edges(&HealTopology::FullMesh, &groups, 4, &intra);
+        edges.sort_unstable();
+        assert_eq!(edges, vec![(0, 2), (0, 3), (1, 2), (1, 3)]);
+        // Sanity: union of intra + heal == full-mesh edges (i.e., no overlap and complete cover).
+        let mut all: Vec<_> = intra.iter().copied().chain(edges.iter().copied()).collect();
+        all.sort_unstable();
+        assert_eq!(all, Connections::FullMesh.edges(4));
+    }
+
+    #[test]
+    fn heal_edges_bridge_is_single_edge_between_group_zeros() {
+        let groups = two_groups(vec![0, 1], vec![2, 3]);
+        let intra = intra_for(&groups);
+        let edges = heal_edges(&HealTopology::Bridge, &groups, 4, &intra);
+        assert_eq!(edges, vec![(0, 2)]);
+    }
+
+    #[test]
+    fn heal_edges_bridge_normalizes_edge_ordering() {
+        // Reverse group ordering: groups[0].nodes[0]=2, groups[1].nodes[0]=0.
+        // The bridge edge must still be (min, max) = (0, 2).
+        let groups = two_groups(vec![2, 3], vec![0, 1]);
+        let intra = intra_for(&groups);
+        let edges = heal_edges(&HealTopology::Bridge, &groups, 4, &intra);
+        assert_eq!(edges, vec![(0, 2)]);
+    }
+
+    #[test]
+    fn heal_edges_bridge_picks_first_node_of_each_group() {
+        // groups[0].nodes[0]=1 (not the minimum 5 in group 0!), groups[1].nodes[0]=3.
+        let groups = two_groups(vec![1, 5, 7], vec![3, 0, 2]);
+        let intra = intra_for(&groups);
+        let edges = heal_edges(&HealTopology::Bridge, &groups, 8, &intra);
+        assert_eq!(edges, vec![(1, 3)]);
+    }
+
+    /// Post-heal graph for Bridge is two cliques joined by one edge — diameter
+    /// is `1 (intra-group) + 1 (bridge) + 1 (intra-group) = 3` for full-mesh
+    /// groups of size ≥ 2. The `Connections::Custom` diameter pass that the
+    /// runner uses must agree with this hand computation.
+    #[test]
+    fn bridge_post_heal_diameter_two_full_mesh_groups_is_three() {
+        let groups = two_groups(vec![0, 1], vec![2, 3]);
+        let intra: Vec<_> = groups
+            .iter()
+            .flat_map(|g| intra_group_edges(&g.nodes))
+            .collect();
+        let intra_set: HashSet<_> = intra.iter().copied().collect();
+        let heal = heal_edges(&HealTopology::Bridge, &groups, 4, &intra_set);
+
+        let mut all = intra;
+        all.extend(heal.iter().copied());
+        let graph = Connections::Custom { edges: all };
+        assert_eq!(graph.diameter(4), 3);
+    }
+
+    #[test]
+    fn bridge_post_heal_diameter_grows_with_group_size() {
+        // n=8, two cliques of size 4. Diameter from any far-node-in-g0 to
+        // any far-node-in-g1 is 1 + 1 + 1 = 3 (clique → bridge → clique).
+        let groups = two_groups(vec![0, 1, 2, 3], vec![4, 5, 6, 7]);
+        let intra: Vec<_> = groups
+            .iter()
+            .flat_map(|g| intra_group_edges(&g.nodes))
+            .collect();
+        let intra_set: HashSet<_> = intra.iter().copied().collect();
+        let heal = heal_edges(&HealTopology::Bridge, &groups, 8, &intra_set);
+        let mut all = intra;
+        all.extend(heal.iter().copied());
+        assert_eq!(Connections::Custom { edges: all }.diameter(8), 3);
+    }
+
+    #[test]
+    fn bridge_post_heal_edge_count_matches_intra_plus_one() {
+        // n=6, groups of size 3. Intra edges per group = 3 (clique on 3) → 6 total.
+        // Bridge adds 1. Final edge count = 7.
+        let groups = two_groups(vec![0, 1, 2], vec![3, 4, 5]);
+        let intra: Vec<_> = groups
+            .iter()
+            .flat_map(|g| intra_group_edges(&g.nodes))
+            .collect();
+        assert_eq!(intra.len(), 6);
+        let intra_set: HashSet<_> = intra.iter().copied().collect();
+        let heal = heal_edges(&HealTopology::Bridge, &groups, 6, &intra_set);
+        assert_eq!(intra.len() + heal.len(), 7);
     }
 
     // ── relay across non-mesh topologies ───────────────────────────────────
