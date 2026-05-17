@@ -42,23 +42,26 @@ smoke-docker:
         --replicas localhost:50051=replica-0:50051,localhost:50052=replica-1:50051,localhost:50053=replica-2:50051,localhost:50054=replica-3:50051,localhost:50055=replica-4:50051 \
         scenarios/full-mesh-n5.toml
 
-# End-to-end kind check: build image, spin up a local kind cluster, apply the deploy/k8s/overlays/kind manifests, port-forward 5 pods, run full-mesh-n5, tear the cluster down. Not in `just ci` (needs docker + kind). Set KEEP_KIND=1 to preserve the cluster after the run for debugging (`kubectl -n replicant get pods`, etc.).
+# End-to-end kind check: build image, spin up a local kind cluster (named `replicant`), apply the deploy/k8s/overlays/kind manifests, port-forward 5 pods, run full-mesh-n5, tear the cluster down. Not in `just ci` (needs docker + kind). Set KEEP_KIND=1 to preserve the cluster after the run for debugging. If the cluster already exists (e.g. from `just k8s-up`), this recipe reuses it and does NOT delete it on exit — only clusters it created itself are torn down.
 smoke-k8s:
     #!/usr/bin/env bash
     set -euo pipefail
-    cluster=replicant-smoke
+    cluster=replicant
     img=replicant-replica:dev
 
     # 1. Build the replica image locally (kind nodes only see images we load).
     docker build -t "$img" .
 
-    # 2. Spin up the kind cluster if not already present.
+    # 2. Spin up the kind cluster if not already present; remember whether we
+    # created it so the trap below only tears down clusters we own.
+    created_by_me=0
     if ! kind get clusters 2>/dev/null | grep -qx "$cluster"; then
         kind create cluster --name "$cluster"
+        created_by_me=1
     fi
     cleanup() {
         if [ "${pids+x}" = x ]; then kill "${pids[@]}" 2>/dev/null || true; fi
-        if [ "${KEEP_KIND:-0}" != "1" ]; then
+        if [ "$created_by_me" = "1" ] && [ "${KEEP_KIND:-0}" != "1" ]; then
             kind delete cluster --name "$cluster" >/dev/null 2>&1 || true
         fi
     }
@@ -96,6 +99,36 @@ smoke-k8s:
     cargo run --release --bin orchestrator -- \
         --replicas "$replicas" \
         scenarios/full-mesh-n5.toml
+
+# Bring up a persistent kind cluster (named `replicant`) with the full replica stack for manual development. Idempotent: re-runs build → load → apply on top of an existing cluster, so it's safe to use after editing manifests or rebuilding the image. Pair with `just k8s-down` to tear down, `just k8s-reset` to clear state between scenarios.
+k8s-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cluster=replicant
+    img=replicant-replica:dev
+
+    docker build -t "$img" .
+
+    if ! kind get clusters 2>/dev/null | grep -qx "$cluster"; then
+        kind create cluster --name "$cluster"
+    fi
+    kind load docker-image "$img" --name "$cluster"
+
+    kubectl apply -k deploy/k8s/overlays/kind
+    kubectl -n replicant rollout status statefulset/node --timeout=180s
+    kubectl -n replicant rollout status deployment/otel-collector --timeout=60s
+    echo "kind cluster '$cluster' is up. \`just k8s-reset\` to clear state, \`just k8s-down\` to tear down."
+
+# Delete the kind cluster created by `just k8s-up`. No-op if not present.
+k8s-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    kind delete cluster --name replicant 2>/dev/null || true
+
+# Clear all Automerge state by restarting the replica StatefulSet. Cluster must already be up (run `just k8s-up` first). Waits for the rollout to complete before returning.
+k8s-reset:
+    kubectl -n replicant rollout restart statefulset/node
+    kubectl -n replicant rollout status statefulset/node --timeout=180s
 
 # Build rustdoc for all crates and open in browser
 docs:
