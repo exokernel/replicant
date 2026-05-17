@@ -42,6 +42,61 @@ smoke-docker:
         --replicas localhost:50051=replica-0:50051,localhost:50052=replica-1:50051,localhost:50053=replica-2:50051,localhost:50054=replica-3:50051,localhost:50055=replica-4:50051 \
         scenarios/full-mesh-n5.toml
 
+# End-to-end kind check: build image, spin up a local kind cluster, apply the deploy/k8s/overlays/kind manifests, port-forward 5 pods, run full-mesh-n5, tear the cluster down. Not in `just ci` (needs docker + kind). Set KEEP_KIND=1 to preserve the cluster after the run for debugging (`kubectl -n replicant get pods`, etc.).
+smoke-k8s:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cluster=replicant-smoke
+    img=replicant-replica:dev
+
+    # 1. Build the replica image locally (kind nodes only see images we load).
+    docker build -t "$img" .
+
+    # 2. Spin up the kind cluster if not already present.
+    if ! kind get clusters 2>/dev/null | grep -qx "$cluster"; then
+        kind create cluster --name "$cluster"
+    fi
+    cleanup() {
+        if [ "${pids+x}" = x ]; then kill "${pids[@]}" 2>/dev/null || true; fi
+        if [ "${KEEP_KIND:-0}" != "1" ]; then
+            kind delete cluster --name "$cluster" >/dev/null 2>&1 || true
+        fi
+    }
+    trap cleanup EXIT
+
+    # 3. Load the freshly-built image into the kind nodes.
+    kind load docker-image "$img" --name "$cluster"
+
+    # 4. Apply manifests and wait for everything to become Ready.
+    kubectl apply -k deploy/k8s/overlays/kind
+    kubectl -n replicant rollout status statefulset/node --timeout=180s
+    kubectl -n replicant rollout status deployment/otel-collector --timeout=60s
+
+    # 5. Port-forward each replica pod to a distinct host port.
+    pids=()
+    for i in 0 1 2 3 4; do
+        kubectl -n replicant port-forward "pod/node-$i" "$((50051+i)):50051" \
+            >/dev/null 2>&1 &
+        pids+=($!)
+    done
+    # Wait until each forwarder is actually accepting connections.
+    for i in 0 1 2 3 4; do
+        until (exec 3<>"/dev/tcp/localhost/$((50051+i))") 2>/dev/null; do
+            sleep 0.2
+        done
+    done
+
+    # 6. Run the scenario. peer_addr is in-cluster DNS (resolvable from pods),
+    # client_addr is the port-forwarded host endpoint.
+    replicas=""
+    for i in 0 1 2 3 4; do
+        [ -n "$replicas" ] && replicas="${replicas},"
+        replicas="${replicas}localhost:$((50051+i))=node-${i}.node:50051"
+    done
+    cargo run --release --bin orchestrator -- \
+        --replicas "$replicas" \
+        scenarios/full-mesh-n5.toml
+
 # Build rustdoc for all crates and open in browser
 docs:
     cargo doc --workspace --no-deps --open

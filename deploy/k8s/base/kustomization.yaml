@@ -1,0 +1,21 @@
+# Base bundle: 5-replica StatefulSet + headless Service, otel-collector,
+# prometheus. Consumers patch via overlays (e.g. overlays/kind for local
+# dev image, overlays/eks for cross-AZ placement) — never apply this base
+# directly.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: replicant
+    includeSelectors: false
+
+resources:
+  - node-svc.yaml
+  - node-statefulset.yaml
+  - otel-collector-configmap.yaml
+  - otel-collector-deployment.yaml
+  - otel-collector-svc.yaml
+  - prometheus-configmap.yaml
+  - prometheus-deployment.yaml
+  - prometheus-svc.yaml

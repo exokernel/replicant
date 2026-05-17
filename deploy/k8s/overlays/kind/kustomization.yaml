@@ -1,0 +1,24 @@
+# Local kind cluster overlay. The replica image is built locally and
+# loaded into the cluster via `kind load docker-image`, so it has no
+# registry and must not be pulled (`imagePullPolicy: Never`).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: replicant
+
+resources:
+  - ../../base
+  - namespace.yaml
+
+images:
+  - name: replicant-replica
+    newTag: dev
+
+patches:
+  - target:
+      kind: StatefulSet
+      name: node
+    patch: |
+      - op: add
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never

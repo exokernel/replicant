@@ -1,0 +1,17 @@
+# UI on :9090 for ad-hoc PromQL during a run. ClusterIP — port-forward to
+# reach it from the host during a smoke run.
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: replicant
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: prometheus
+  ports:
+    - name: http
+      port: 9090
+      targetPort: http

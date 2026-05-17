@@ -1,0 +1,56 @@
+# Five replica pods named node-0..node-4 (StatefulSet ordinals → stable
+# DNS), each running the replica binary with --actor matching its pod name.
+#
+# The actor name MUST equal the pod name because the orchestrator wires
+# scenarios by index expecting actor IDs node-0..node-{n-1}. We get this
+# for free by naming the StatefulSet `node`.
+#
+# `$(POD_NAME)` is k8s's own env-var substitution (not shell), so a
+# distroless image with no /bin/sh still works.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: node
+  labels:
+    app.kubernetes.io/name: node
+    app.kubernetes.io/part-of: replicant
+spec:
+  serviceName: node
+  replicas: 5
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: node
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: node
+        app.kubernetes.io/part-of: replicant
+    spec:
+      terminationGracePeriodSeconds: 5
+      containers:
+        - name: replica
+          image: replicant-replica:dev
+          args:
+            - "--actor"
+            - "$(POD_NAME)"
+            - "--port"
+            - "50051"
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector:4317
+          ports:
+            - name: grpc
+              containerPort: 50051
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi

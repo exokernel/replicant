@@ -1,0 +1,18 @@
+# Headless Service backing the `node` StatefulSet. Headless (clusterIP: None)
+# so pod DNS — `node-0.node`, `node-1.node`, ... — resolves to the individual
+# pod IPs, which is what peers need for ConnectPeer routing.
+apiVersion: v1
+kind: Service
+metadata:
+  name: node
+  labels:
+    app.kubernetes.io/name: node
+    app.kubernetes.io/part-of: replicant
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: node
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: grpc

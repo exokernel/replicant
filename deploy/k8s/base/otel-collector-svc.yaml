@@ -1,0 +1,20 @@
+# Replicas dial otel-collector:4317 (in-cluster DNS); Prometheus scrapes
+# otel-collector:8889. Single Service exposes both.
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  labels:
+    app.kubernetes.io/name: otel-collector
+    app.kubernetes.io/part-of: replicant
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: otel-collector
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: otlp-grpc
+    - name: prom-export
+      port: 8889
+      targetPort: prom-export
