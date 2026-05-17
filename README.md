@@ -66,14 +66,21 @@ Manifests are organised as Kustomize bases under `deploy/k8s/base/` with overlay
 
 The Jupyter notebook at `analysis/convergence.ipynb` produces figures from benchmark data.
 
-**Offline path** (file-based metrics, no docker daemon): generate `results.csv` and per-scenario metric files, then open the notebook:
+**Offline path** (file-based metrics, no docker daemon): generate `results.csv` and per-scenario metrics files, then open the notebook. The two passes are separate because OTel counters accumulate across scenarios in a single invocation, so per-scenario attribution needs one invocation per scenario:
 
 ```sh
-cargo run --bin orchestrator -- --trials 10 --output csv \
-  --metrics-file metrics.json \
-  scenarios/full-mesh-n{2,3,5,10}.toml \
-  scenarios/partition-heal-n{4,6,8}.toml \
+# 1. Unified sweep across all scenarios for results.csv (timing/percentile tables).
+cargo run --release --bin orchestrator -- --trials 10 --output csv \
+  scenarios/*.toml \
   2>/dev/null > results.csv
+
+# 2. Per-scenario metrics-<scenario>.json files (sync/op/doc-size protocol data).
+for s in $(ls scenarios/*.toml | xargs -n1 basename -s .toml); do
+  cargo run --release --bin orchestrator -- --trials 10 \
+    --metrics-file "metrics-${s}.json" \
+    "scenarios/${s}.toml" \
+    > /dev/null 2>&1
+done
 
 cd analysis && jupyter lab convergence.ipynb
 ```
@@ -175,6 +182,11 @@ Nodes are split into groups that are fully connected internally. Each group
 writes independently, accumulating divergent history. The heal step adds
 cross-group edges; `convergence_ms` is measured from that point.
 
+The `heal_topology` field in `[partition_heal]` selects what gets reconnected:
+
+- **`heal_topology = "full_mesh"`** (default, omittable) — every cross-group pair gets an edge; post-heal graph is `K_n`.
+- **`heal_topology = "bridge"`** — only one edge is added, between `groups[0].nodes[0]` and `groups[1].nodes[0]`. Requires exactly 2 groups.
+
 **Partitioned (writes in progress):**
 
 ```mermaid
@@ -191,7 +203,7 @@ graph LR
     end
 ```
 
-**After heal (full mesh — all cross-group edges added):**
+**After `heal_topology = "full_mesh"` — every cross-group edge added:**
 
 ```mermaid
 graph LR
@@ -216,11 +228,30 @@ graph LR
     A2 --- B5
 ```
 
+**After `heal_topology = "bridge"` — single edge between `groups[0].nodes[0]` and `groups[1].nodes[0]`:**
+
+```mermaid
+graph LR
+    subgraph "Group A"
+        A0((Node 0)) --- A1((Node 1))
+        A0 --- A2((Node 2))
+        A1 --- A2
+    end
+    subgraph "Group B"
+        B3((Node 3)) --- B4((Node 4))
+        B3 --- B5((Node 5))
+        B4 --- B5
+    end
+    A0 --- B3
+```
+
+The bridge variant forces all cross-partition state through one edge. With far fewer cross-edges flooding (1 vs N²/4), bridge heal is **7-21× faster** than full-mesh heal in the n=4-8 scenarios — same edges-vs-diameter mechanism as the line-vs-full-mesh steady-state result above. See the notebook's "Partition-heal" section.
+
 ### Write patterns
 
 Two write distributions are supported via the `write_pattern` field in scenario
-TOML files. All bundled scenarios currently use `round_robin`; `concentrated`
-variants can be added by copying any scenario file and changing the field.
+TOML files. Bundled scenarios cover both patterns across every topology — see
+the `-concentrated` suffix on filenames in [scenarios/](scenarios/).
 
 **`round_robin`** — ops cycle through all nodes in scope:
 
