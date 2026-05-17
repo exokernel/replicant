@@ -6,3 +6,4 @@ NEXT_SESSION.md
 *.json
 analysis/figures/
 **/.ipynb_checkpoints/
+.venv/

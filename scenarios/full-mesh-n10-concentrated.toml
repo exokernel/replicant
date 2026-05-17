@@ -1,0 +1,7 @@
+name = "full-mesh-n10-concentrated"
+
+[topology]
+node_count = 10
+connections = "full_mesh"
+write_pattern = "concentrated"
+op_count = 20

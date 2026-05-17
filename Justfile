@@ -11,9 +11,23 @@ fmt:
 # explicitly). Run before `jj describe` / `jj git push` on any change
 # that re-executed a notebook. `jj fix` also runs nbstripout — this
 # recipe is the manual escape hatch.
+#
+# Resolves nbstripout from .venv/bin first (forge: pip-into-venv install),
+# then $PATH (mac: pipx/brew install). Works on either machine without
+# requiring the same install method.
 clean-notebooks:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -x .venv/bin/nbstripout ]; then
+        nbstripout=.venv/bin/nbstripout
+    elif command -v nbstripout >/dev/null 2>&1; then
+        nbstripout=nbstripout
+    else
+        echo "error: nbstripout not found. Install via 'pip install -r analysis/requirements.txt' (into .venv) or system-wide (brew/pipx)." >&2
+        exit 1
+    fi
     find analysis -name '*.ipynb' -not -path '*/.ipynb_checkpoints/*' -print0 \
-        | xargs -0 nbstripout
+        | xargs -0 "$nbstripout"
 
 # Quick compile check without producing binaries (faster than lint)
 check:

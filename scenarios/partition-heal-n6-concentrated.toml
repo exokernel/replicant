@@ -1,0 +1,12 @@
+name = "partition-heal-n6-concentrated"
+
+[partition_heal]
+node_count = 6
+write_pattern = "concentrated"
+ops_per_group = 6
+
+[[partition_heal.groups]]
+nodes = [0, 1, 2]
+
+[[partition_heal.groups]]
+nodes = [3, 4, 5]
