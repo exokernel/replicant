@@ -21,9 +21,15 @@ just ci       # full gate: fmt check → lint → test → smoke
 just docs     # build and open rustdoc
 ```
 
-## Containerized run (single-host)
+## Containerized run
 
-The orchestrator can drive a stack of dockerized replicas wired to a real OTel collector and Prometheus. `just smoke-docker` is the one-liner end-to-end check:
+The orchestrator can drive a stack of containerized replicas wired to a real OTel collector and Prometheus. Two runtimes are supported: docker compose (single host) and a local kind cluster (k8s, single host). Both run the same replica image; only the recipe and wiring differ.
+
+`--replicas` accepts comma-separated `client_addr[=peer_addr]` entries — the first is what the orchestrator dials, the second (defaults to the first when omitted) is what each replica passes to its peers in `ConnectPeer`. The two diverge whenever replicas live in a different network namespace from the orchestrator. When `--replicas` is set, the orchestrator accepts only one scenario and one trial per invocation since replica state persists between runs — bounce the stack to reset.
+
+### docker compose
+
+`just smoke-docker` is the one-liner end-to-end check:
 
 ```sh
 just smoke-docker    # builds the replica image, brings up 5 replicas +
@@ -42,7 +48,19 @@ cargo run --release --bin orchestrator -- \
 docker compose -f deploy/docker/compose.yaml down
 ```
 
-`--replicas` accepts comma-separated `client_addr[=peer_addr]` entries — the first is what the orchestrator dials, the second (defaults to the first when omitted) is what each replica passes to its peers in `ConnectPeer`. Diverges in compose: the orchestrator on the host reaches replicas via published ports (`localhost:5005N`) while containers resolve each other via service DNS (`replica-N:50051`). When `--replicas` is set, the orchestrator accepts only one scenario and one trial per invocation since replica state persists between runs — bounce the stack to reset.
+Wiring: the orchestrator on the host reaches replicas via published ports (`localhost:5005N`); containers resolve each other via service DNS (`replica-N:50051`).
+
+### kind cluster (local k8s)
+
+`just smoke-k8s` brings up a single-host kind cluster, applies the manifests in `deploy/k8s/overlays/kind`, port-forwards the 5 replica pods to host ports `50051..50055`, runs full-mesh-n5, and tears the cluster down:
+
+```sh
+just smoke-k8s                    # build → kind create → load → apply →
+                                  # port-forwards → orchestrator → teardown
+KEEP_KIND=1 just smoke-k8s        # preserve the cluster for debugging
+```
+
+Manifests are organised as Kustomize bases under `deploy/k8s/base/` with overlay-specific patches under `deploy/k8s/overlays/`. The same image runs in both runtimes (no separate "k8s build"). Replica pods are a `StatefulSet` for stable identity (`node-0`…`node-4` matching the actor scheme) — they are not stateful for storage, and `kubectl rollout restart statefulset/node -n replicant` is the one-liner to clear all state.
 
 ## Analysis
 
@@ -66,10 +84,11 @@ The notebook caches parsed data as `results.parquet` and refreshes when `results
 
 ## Requirements
 
-- Rust (stable, edition 2024)
+- Rust (toolchain pinned via `rust-toolchain.toml` to 1.95.0; rustup auto-installs)
 - [`just`](https://github.com/casey/just)
 - `protoc` (Protocol Buffers compiler)
-- Docker + Compose v2 (optional, only for the containerized run)
+- Docker + Compose v2 (optional, for `smoke-docker`)
+- [`kind`](https://kind.sigs.k8s.io/) + `kubectl` (optional, for `smoke-k8s`)
 
 ## Scenarios
 
