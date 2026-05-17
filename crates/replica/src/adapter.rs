@@ -416,8 +416,7 @@ mod tests {
         // equality.
         let n = 5;
         let op_count = 10;
-        let mut replicas: Vec<AutomergeAdapter> =
-            (0..n).map(|_| AutomergeAdapter::new()).collect();
+        let mut replicas: Vec<AutomergeAdapter> = (0..n).map(|_| AutomergeAdapter::new()).collect();
         let id = |i: usize| format!("node-{i}");
 
         for i in 0..op_count {
@@ -459,8 +458,8 @@ mod tests {
 
         // Fingerprints (the CRDT convergence invariant) must agree.
         let fp = replicas[0].state_fingerprint();
-        for i in 1..n {
-            assert_eq!(replicas[i].state_fingerprint(), fp);
+        for replica in replicas.iter_mut().skip(1) {
+            assert_eq!(replica.state_fingerprint(), fp);
         }
 
         // save() bytes are allowed to differ — and empirically they do.
