@@ -43,6 +43,12 @@ spec:
                   fieldPath: metadata.name
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: http://otel-collector:4317
+            # OTel SDK default flush is 60s — too coarse for the dashboard's
+            # rate panels to show anything other than one big counter jump
+            # per scenario. 2s matches Prometheus's scrape interval, so any
+            # multi-second workload produces a visible curve.
+            - name: OTEL_METRIC_EXPORT_INTERVAL
+              value: "2000"
           ports:
             - name: grpc
               containerPort: 50051

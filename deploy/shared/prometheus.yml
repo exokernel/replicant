@@ -1,6 +1,11 @@
 # Prometheus scrapes the OTel collector's Prometheus exporter endpoint.
 # Short scrape interval because benchmark runs are seconds-to-minutes long;
 # default 15s would miss most of the run.
+#
+# Single source of truth used by both docker compose (bind-mount from
+# ../shared/) and k8s (Kustomize configMapGenerator in deploy/k8s/base/
+# kustomization.yaml). The `otel-collector` hostname resolves on both stacks
+# (compose service name / k8s headless Service).
 
 global:
   scrape_interval: 2s

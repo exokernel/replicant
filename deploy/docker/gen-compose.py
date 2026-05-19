@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
-"""Emit a docker compose YAML for N replicant replicas + otel-collector + prometheus.
+"""Emit a docker compose YAML for N replicant replicas + observability stack.
 
-Run via `just smoke-docker <scenario>`; that recipe parses node_count from the
-scenario TOML and pipes the output to `deploy/docker/compose.generated.yaml`.
-Can also be invoked directly:
+Run via `just smoke-docker <scenario>` / `just docker-up <scenario>`; those
+recipes parse node_count from the scenario TOML and pipe the output to
+`deploy/docker/compose.generated.yaml`. Can also be invoked directly:
 
     python3 deploy/docker/gen-compose.py 5 > deploy/docker/compose.generated.yaml
     docker compose -f deploy/docker/compose.generated.yaml up -d --build
 
-The output is functionally identical to the hand-maintained compose.yaml this
-script replaced (n=5). Build contexts resolve relative to deploy/docker/, so
-the output file must live there.
+Output structure: replica services (N of them), then the observability
+stack (otel-collector → prometheus → grafana). Section comments and
+blank lines are inserted between groups so the generated file is
+human-scannable when debugging. Build contexts and volume bind-mounts
+resolve relative to deploy/docker/, so the output file must live there.
 """
 
 import argparse
 import sys
+from typing import TextIO
 
 import yaml
 
@@ -42,61 +45,126 @@ def replica_service(i: int) -> dict:
         "ports": [f"{REPLICA_HOST_PORT_BASE + i}:{REPLICA_INTERNAL_PORT}"],
         "networks": ["replicant"],
         "restart": "no",
-        "environment": {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel-collector:4317"},
+        "environment": {
+            "OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel-collector:4317",
+            # OTel SDK default flush is 60s — too coarse for the dashboard's
+            # rate panels to show anything other than one big counter jump
+            # per scenario. 2s matches Prometheus's scrape interval, so any
+            # multi-second workload produces a visible curve.
+            "OTEL_METRIC_EXPORT_INTERVAL": "2000",
+        },
         "depends_on": {"otel-collector": {"condition": "service_started"}},
     }
 
 
-def build_compose(n: int) -> dict:
-    if n < 1:
-        raise ValueError(f"node_count must be >= 1, got {n}")
-
-    services: dict[str, dict] = {f"replica-{i}": replica_service(i) for i in range(n)}
-
-    services["otel-collector"] = {
+def otel_collector_service() -> dict:
+    return {
         "image": "otel/opentelemetry-collector-contrib:0.152.0",
         "container_name": "otel-collector",
         "hostname": "otel-collector",
         "networks": ["replicant"],
         "command": ["--config=/etc/otel-collector-config.yaml"],
-        "volumes": ["./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro"],
+        "volumes": [
+            "../shared/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro"
+        ],
         "ports": ["4317:4317", "8889:8889"],
     }
 
-    services["prometheus"] = {
+
+def prometheus_service() -> dict:
+    return {
         "image": "prom/prometheus:v3.11.3",
         "container_name": "prometheus",
         "hostname": "prometheus",
         "networks": ["replicant"],
-        "volumes": ["./prometheus.yml:/etc/prometheus/prometheus.yml:ro"],
+        "volumes": ["../shared/prometheus.yml:/etc/prometheus/prometheus.yml:ro"],
         "ports": ["9090:9090"],
         "depends_on": {"otel-collector": {"condition": "service_started"}},
     }
 
+
+def grafana_service() -> dict:
     return {
-        "name": "replicant",
-        "services": services,
-        "networks": {"replicant": {"driver": "bridge"}},
+        "image": "grafana/grafana:11.3.1",
+        "container_name": "grafana",
+        "hostname": "grafana",
+        "networks": ["replicant"],
+        "environment": {
+            "GF_SECURITY_ADMIN_USER": "admin",
+            "GF_SECURITY_ADMIN_PASSWORD": "admin",
+            "GF_USERS_ALLOW_SIGN_UP": "false",
+            # Anonymous viewer would let you skip login entirely; we keep
+            # admin/admin so in-UI dashboard edits attribute correctly.
+        },
+        "volumes": [
+            "../shared/grafana/datasource.yaml:/etc/grafana/provisioning/datasources/datasource.yaml:ro",
+            "../shared/grafana/dashboards-provider.yaml:/etc/grafana/provisioning/dashboards/dashboards.yaml:ro",
+            "../shared/grafana/dashboards:/var/lib/grafana/dashboards:ro",
+        ],
+        "ports": ["3000:3000"],
+        "depends_on": {"prometheus": {"condition": "service_started"}},
     }
 
 
+def _dump_indented(data: dict, indent: int) -> str:
+    """yaml.dump `data` and prefix every non-blank line with `indent` spaces."""
+    body = yaml.dump(
+        data, Dumper=NoAliasDumper, sort_keys=False, default_flow_style=False
+    )
+    prefix = " " * indent
+    return "".join(
+        prefix + line if line.strip() else line for line in body.splitlines(keepends=True)
+    )
+
+
+def write_compose(n: int, out: TextIO) -> None:
+    if n < 1:
+        raise ValueError(f"node_count must be >= 1, got {n}")
+
+    out.write(
+        f"# Generated by deploy/docker/gen-compose.py for n={n}. Do not edit by hand —\n"
+        f"# re-run the generator to refresh. See the script docstring for usage.\n"
+        f"\n"
+        f"name: replicant\n"
+        f"\n"
+        f"networks:\n"
+        f"  replicant:\n"
+        f"    driver: bridge\n"
+        f"\n"
+        f"services:\n"
+        f"\n"
+        f"  # ---- Replica nodes ----\n"
+        f"  # One service per CRDT replica. Each binds host port 5005X to internal\n"
+        f"  # gRPC port 50051 and pushes OTel metrics to otel-collector:4317.\n"
+        f"\n"
+    )
+    for i in range(n):
+        if i > 0:
+            out.write("\n")
+        out.write(_dump_indented({f"replica-{i}": replica_service(i)}, 2))
+
+    out.write(
+        f"\n"
+        f"  # ---- Observability stack ----\n"
+        f"  # otel-collector receives OTLP from replicas and exposes a Prometheus\n"
+        f"  # scrape endpoint at :8889. Prometheus scrapes it every 2s. Grafana\n"
+        f"  # serves the dashboard UI at :3000 (admin/admin).\n"
+        f"\n"
+    )
+    out.write(_dump_indented({"otel-collector": otel_collector_service()}, 2))
+    out.write("\n")
+    out.write(_dump_indented({"prometheus": prometheus_service()}, 2))
+    out.write("\n")
+    out.write(_dump_indented({"grafana": grafana_service()}, 2))
+
+
 def main() -> int:
-    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p = argparse.ArgumentParser(
+        description="Emit a docker compose YAML for N replicant replicas + observability stack."
+    )
     p.add_argument("n", type=int, help="number of replica services to generate")
     args = p.parse_args()
-
-    header = (
-        f"# Generated by deploy/docker/gen-compose.py for n={args.n}. Do not edit by hand —\n"
-        f"# re-run the generator to refresh. See the script docstring for usage.\n"
-    )
-    sys.stdout.write(header)
-    yaml.dump(
-        build_compose(args.n),
-        sys.stdout,
-        Dumper=NoAliasDumper,
-        sort_keys=False,
-        default_flow_style=False,
-    )
+    write_compose(args.n, sys.stdout)
     return 0
 
 

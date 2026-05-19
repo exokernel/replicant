@@ -1,0 +1,16 @@
+# Grafana datasource provisioning. Loaded at startup from
+# /etc/grafana/provisioning/datasources/ on both compose (bind-mount) and
+# k8s (Kustomize configMapGenerator). The `prometheus` URL resolves on
+# both stacks (compose service name / k8s headless Service in namespace).
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true
+    jsonData:
+      timeInterval: 2s

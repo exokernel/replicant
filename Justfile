@@ -102,10 +102,15 @@ smoke-k8s scenario='scenarios/full-mesh-n5.toml':
 
     # 4. Apply manifests, scale to N replicas (the base sets a default but
     # scenarios with N != base get rescaled here), wait for everything Ready.
-    kubectl apply -k deploy/k8s/overlays/kind
+    # `kubectl apply -k` doesn't expose --load-restrictor; pipe through
+    # `kubectl kustomize` first so the configMapGenerators in base/ can
+    # read from deploy/shared/ (outside the kustomization root).
+    kubectl kustomize --load-restrictor=LoadRestrictionsNone deploy/k8s/overlays/kind | kubectl apply -f -
     kubectl -n replicant scale statefulset/node --replicas="$n"
     kubectl -n replicant rollout status statefulset/node --timeout=180s
     kubectl -n replicant rollout status deployment/otel-collector --timeout=60s
+    kubectl -n replicant rollout status deployment/prometheus --timeout=60s
+    kubectl -n replicant rollout status deployment/grafana --timeout=60s
 
     # 5. Port-forward each replica pod to a distinct host port.
     pids=()
@@ -142,7 +147,10 @@ docker-up scenario='scenarios/full-mesh-n5.toml':
     "$py" deploy/docker/gen-compose.py "$n" > deploy/docker/compose.generated.yaml
 
     docker compose -f deploy/docker/compose.generated.yaml up -d --build
-    echo "stack up with $n replicas (from $scenario). Prometheus: http://localhost:9090. \`just docker-down\` to tear down."
+    echo "stack up with $n replicas (from $scenario)."
+    echo "  Grafana:    http://localhost:3000  (admin/admin)"
+    echo "  Prometheus: http://localhost:9090"
+    echo "  \`just docker-down\` to tear down."
 
 # Tear down the docker compose stack brought up by `just docker-up`. No-op if not present.
 docker-down:
@@ -169,17 +177,43 @@ k8s-up scenario='scenarios/full-mesh-n5.toml':
     fi
     kind load docker-image "$img" --name "$cluster"
 
-    kubectl apply -k deploy/k8s/overlays/kind
+    # `kubectl apply -k` doesn't expose --load-restrictor; pipe through
+    # `kubectl kustomize` first so the configMapGenerators in base/ can
+    # read from deploy/shared/ (outside the kustomization root).
+    kubectl kustomize --load-restrictor=LoadRestrictionsNone deploy/k8s/overlays/kind | kubectl apply -f -
     kubectl -n replicant scale statefulset/node --replicas="$n"
     kubectl -n replicant rollout status statefulset/node --timeout=180s
     kubectl -n replicant rollout status deployment/otel-collector --timeout=60s
-    echo "kind cluster '$cluster' is up with $n replicas (from $scenario). \`just k8s-reset\` to clear state, \`just k8s-down\` to tear down."
+    kubectl -n replicant rollout status deployment/prometheus --timeout=60s
+    kubectl -n replicant rollout status deployment/grafana --timeout=60s
+    echo "kind cluster '$cluster' is up with $n replicas (from $scenario)."
+    echo "  \`just k8s-ui\` to port-forward Grafana (:3000) and Prometheus (:9090)."
+    echo "  \`just k8s-reset\` to clear state, \`just k8s-down\` to tear down."
 
 # Delete the kind cluster created by `just k8s-up`. No-op if not present.
 k8s-down:
     #!/usr/bin/env bash
     set -euo pipefail
     kind delete cluster --name replicant 2>/dev/null || true
+
+# Foreground port-forwards for the cluster's observability UIs. Run this in a separate shell after `just k8s-up`; Ctrl-C tears both forwards down. Grafana on :3000 (admin/admin), Prometheus on :9090.
+k8s-ui:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pids=()
+    cleanup() {
+        if [ "${pids+x}" = x ]; then kill "${pids[@]}" 2>/dev/null || true; fi
+    }
+    trap cleanup EXIT INT TERM
+    kubectl -n replicant port-forward svc/grafana 3000:3000 >/dev/null 2>&1 &
+    pids+=($!)
+    kubectl -n replicant port-forward svc/prometheus 9090:9090 >/dev/null 2>&1 &
+    pids+=($!)
+    echo "port-forwards up:"
+    echo "  Grafana:    http://localhost:3000  (admin/admin)"
+    echo "  Prometheus: http://localhost:9090"
+    echo "Ctrl-C to stop."
+    wait
 
 # Clear all Automerge state by restarting the replica StatefulSet. Cluster must already be up (run `just k8s-up` first). Waits for the rollout to complete before returning.
 k8s-reset:

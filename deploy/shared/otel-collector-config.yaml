@@ -1,7 +1,11 @@
 # OTel collector pipeline: OTLP gRPC in (from replicas), Prometheus scrape out.
 #
-# The Prometheus exporter exposes /metrics on :8889; the prometheus service in
-# docker-compose.yml scrapes that endpoint. Replicas send OTLP via
+# Single source of truth used by both docker compose (bind-mount from
+# ../shared/) and k8s (Kustomize configMapGenerator in deploy/k8s/base/
+# kustomization.yaml).
+#
+# The Prometheus exporter exposes /metrics on :8889; the prometheus service
+# scrapes that endpoint. Replicas send OTLP via
 # OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317.
 
 receivers:

@@ -1,7 +1,14 @@
 # Base bundle: 5-replica StatefulSet + headless Service, otel-collector,
-# prometheus. Consumers patch via overlays (e.g. overlays/kind for local
-# dev image, overlays/eks for cross-AZ placement) — never apply this base
-# directly.
+# prometheus, grafana. Consumers patch via overlays (e.g. overlays/kind
+# for local dev image, overlays/eks for cross-AZ placement) — never apply
+# this base directly.
+#
+# ConfigMaps for otel-collector, prometheus, and grafana provisioning are
+# generated from the canonical files in deploy/shared/ — same content the
+# docker compose stack bind-mounts. Kustomize forbids loading files
+# outside the kustomization root by default; the recipes that invoke
+# `kubectl apply -k` pass `--load-restrictor=LoadRestrictionsNone` so this
+# works.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
@@ -13,9 +20,48 @@ labels:
 resources:
   - node-svc.yaml
   - node-statefulset.yaml
-  - otel-collector-configmap.yaml
   - otel-collector-deployment.yaml
   - otel-collector-svc.yaml
-  - prometheus-configmap.yaml
   - prometheus-deployment.yaml
   - prometheus-svc.yaml
+  - grafana-deployment.yaml
+  - grafana-svc.yaml
+
+# Stable ConfigMap names so the Deployment volume references don't need
+# rewriting (otherwise Kustomize appends a content-hash suffix). Benchmark
+# runs are explicitly torn down, so we don't need the automatic rolling
+# restart that the hash would trigger.
+generatorOptions:
+  disableNameSuffixHash: true
+
+configMapGenerator:
+  - name: otel-collector-config
+    files:
+      - ../../shared/otel-collector-config.yaml
+    options:
+      labels:
+        app.kubernetes.io/name: otel-collector
+  - name: prometheus-config
+    files:
+      - prometheus.yml=../../shared/prometheus.yml
+    options:
+      labels:
+        app.kubernetes.io/name: prometheus
+  - name: grafana-datasource
+    files:
+      - datasource.yaml=../../shared/grafana/datasource.yaml
+    options:
+      labels:
+        app.kubernetes.io/name: grafana
+  - name: grafana-dashboards-provider
+    files:
+      - dashboards.yaml=../../shared/grafana/dashboards-provider.yaml
+    options:
+      labels:
+        app.kubernetes.io/name: grafana
+  - name: grafana-dashboards
+    files:
+      - replicant.json=../../shared/grafana/dashboards/replicant.json
+    options:
+      labels:
+        app.kubernetes.io/name: grafana
