@@ -46,22 +46,28 @@ The orchestrator can drive a stack of containerized replicas wired to a real OTe
 
 ```sh
 just smoke-docker    # builds the replica image, brings up 5 replicas +
-                     # otel-collector + prometheus, runs full-mesh-n5
-                     # against them, tears the stack down
+                     # otel-collector + prometheus + grafana, runs
+                     # full-mesh-n5 against them, tears the stack down
 ```
 
-For longer interactive sessions, drive the stack manually:
+For longer interactive sessions, leave the stack running:
 
 ```sh
-docker compose -f deploy/docker/compose.yaml up -d --build
-# Prom UI: http://localhost:9090
+just docker-up scenarios/full-mesh-n5.toml      # build → up; stays running
+# Grafana:    http://localhost:3000  (admin/admin)
+# Prometheus: http://localhost:9090
+
+# Run scenarios (one at a time, since replica state persists between runs):
 cargo run --release --bin orchestrator -- \
   --replicas localhost:50051=replica-0:50051,localhost:50052=replica-1:50051,localhost:50053=replica-2:50051,localhost:50054=replica-3:50051,localhost:50055=replica-4:50051 \
   scenarios/full-mesh-n5.toml
-docker compose -f deploy/docker/compose.yaml down
+
+just docker-reset                               # wipe Prometheus + replica
+                                                # state, keep Grafana edits
+just docker-down                                # tear down
 ```
 
-Wiring: the orchestrator on the host reaches replicas via published ports (`localhost:5005N`); containers resolve each other via service DNS (`replica-N:50051`).
+Wiring: the orchestrator on the host reaches replicas via published ports (`localhost:5005N`); containers resolve each other via service DNS (`replica-N:50051`). The compose YAML is regenerated per scenario from [`deploy/docker/gen-compose.py`](deploy/docker/gen-compose.py); configs for otel-collector and prometheus live in [`deploy/shared/`](deploy/shared/) and are bind-mounted by compose / loaded as ConfigMaps in k8s, so both stacks read the same source.
 
 ### kind cluster (local k8s)
 
@@ -73,7 +79,22 @@ just smoke-k8s                    # build → kind create → load → apply →
 KEEP_KIND=1 just smoke-k8s        # preserve the cluster for debugging
 ```
 
-Manifests are organised as Kustomize bases under `deploy/k8s/base/` with overlay-specific patches under `deploy/k8s/overlays/`. The same image runs in both runtimes (no separate "k8s build"). Replica pods are a `StatefulSet` for stable identity (`node-0`…`node-4` matching the actor scheme) — they are not stateful for storage, and `kubectl rollout restart statefulset/node -n replicant` is the one-liner to clear all state.
+For longer interactive sessions:
+
+```sh
+just k8s-up scenarios/full-mesh-n5.toml         # idempotent: rescales in place
+just k8s-ui                                     # foreground port-forwards:
+                                                # Grafana :3000, Prometheus :9090
+just k8s-reset                                  # wipe Prometheus + replica
+                                                # state, keep Grafana edits
+just k8s-down                                   # tear down
+```
+
+Manifests are organised as Kustomize bases under `deploy/k8s/base/` with overlay-specific patches under `deploy/k8s/overlays/`. The same image runs in both runtimes (no separate "k8s build"). Replica pods are a `StatefulSet` for stable identity (`node-0`…`node-4` matching the actor scheme) — they are not stateful for storage.
+
+### Dashboards
+
+Both stacks ship with a provisioned Grafana dashboard at [`deploy/shared/grafana/dashboards/replicant.json`](deploy/shared/grafana/dashboards/replicant.json) — four panels covering document size convergence, op latency p50/p95, sync messages tx/rx per actor, and sync edge inventory. Reachable at `http://localhost:3000` (admin/admin) when the stack is up via `docker-up` or `k8s-ui`. The dashboard is editable in-browser; edits persist across container restarts and across `*-reset` (which only wipes Prometheus tsdb + replica state), and are wiped by `*-down` if you want a fully clean slate. Useful for live debugging and demos; the analysis notebook ([`analysis/convergence.ipynb`](analysis/convergence.ipynb)) remains the source of truth for thesis-table numbers.
 
 ## Analysis
 
