@@ -278,6 +278,14 @@ pub struct TopologyConfig {
     pub write_pattern: WritePattern,
     /// Total `MapPut` ops to apply.
     pub op_count: usize,
+    /// Delay between successive op submissions, in milliseconds. `0` (the
+    /// default) means burst as fast as possible — the historical behaviour
+    /// and what every existing scenario file does. Positive values pace ops
+    /// so multi-second runs produce visible curves on Grafana's rate panels.
+    /// Sleeps fall *inside* the measurement window, so paced runs report a
+    /// larger `convergence_ms` than burst equivalents on the same topology.
+    #[serde(default)]
+    pub op_interval_ms: u64,
 }
 
 /// A single partition group in a partition-heal scenario.
@@ -404,6 +412,7 @@ pub fn builtin_scenarios() -> Vec<ScenarioFile> {
                 connections: Connections::FullMesh,
                 write_pattern: WritePattern::RoundRobin,
                 op_count: 2,
+                op_interval_ms: 0,
             }),
         },
         ScenarioFile {
@@ -413,6 +422,7 @@ pub fn builtin_scenarios() -> Vec<ScenarioFile> {
                 connections: Connections::FullMesh,
                 write_pattern: WritePattern::RoundRobin,
                 op_count: 6,
+                op_interval_ms: 0,
             }),
         },
         ScenarioFile {
@@ -485,6 +495,7 @@ mod tests {
                 connections: Connections::FullMesh,
                 write_pattern: WritePattern::RoundRobin,
                 op_count: 1,
+                op_interval_ms: 0,
             }),
         };
         assert_eq!(s.node_count(), 5);
@@ -567,6 +578,49 @@ mod tests {
     fn scenario_rejects_no_body() {
         let err = toml::from_str::<ScenarioFile>(r#"name = "x""#).unwrap_err();
         assert!(err.to_string().contains("must be present"), "{err}");
+    }
+
+    // ── op_interval_ms ─────────────────────────────────────────────────────
+
+    /// Pre-existing TOML scenarios omit `op_interval_ms`; it must default to 0
+    /// so they continue to burst ops as before.
+    #[test]
+    fn op_interval_ms_defaults_to_zero_when_absent() {
+        let s: ScenarioFile = toml::from_str(
+            r#"
+            name = "t"
+            [topology]
+            node_count = 3
+            connections = "full_mesh"
+            write_pattern = "round_robin"
+            op_count = 2
+            "#,
+        )
+        .unwrap();
+        let ScenarioBody::Topology(cfg) = s.body else {
+            panic!("expected Topology body");
+        };
+        assert_eq!(cfg.op_interval_ms, 0);
+    }
+
+    #[test]
+    fn op_interval_ms_parses_explicit_value() {
+        let s: ScenarioFile = toml::from_str(
+            r#"
+            name = "t"
+            [topology]
+            node_count = 3
+            connections = "full_mesh"
+            write_pattern = "round_robin"
+            op_count = 4
+            op_interval_ms = 250
+            "#,
+        )
+        .unwrap();
+        let ScenarioBody::Topology(cfg) = s.body else {
+            panic!("expected Topology body");
+        };
+        assert_eq!(cfg.op_interval_ms, 250);
     }
 
     // ── HealTopology ───────────────────────────────────────────────────────
@@ -845,6 +899,7 @@ mod tests {
             },
             write_pattern: WritePattern::RoundRobin,
             op_count: 1,
+            op_interval_ms: 0,
         };
         // Node 2 is unreachable — should be caught by connections.validate.
         let err = bad.validate().unwrap_err();

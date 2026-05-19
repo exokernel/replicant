@@ -284,14 +284,24 @@ pub async fn run(config: &TopologyConfig, source: NodeSource) -> Result<RunResul
     for i in 0..config.op_count {
         let target = target_node(&config.write_pattern, i, &all_nodes);
         map_put(&mut clients[target], &format!("k{i}"), &format!("v{i}")).await?;
+        // Pace between op submissions only — sleeping after the last op would
+        // just delay wait_for_nodes' first poll and inflate convergence_ms
+        // beyond what the pacing semantics imply.
+        if config.op_interval_ms > 0 && i + 1 < config.op_count {
+            tokio::time::sleep(Duration::from_millis(config.op_interval_ms)).await;
+        }
     }
     check_tasks(&mut tasks)?;
 
+    // Timeout absorbs the cumulative paced wall time plus a 5s convergence
+    // budget; burst runs (op_interval_ms = 0) keep the historical 5s deadline.
+    let pacing_budget =
+        Duration::from_millis(config.op_interval_ms.saturating_mul(config.op_count as u64));
     let convergence_ms = wait_for_nodes(
         &mut clients,
         &all_nodes,
         measure_start,
-        Duration::from_secs(5),
+        Duration::from_secs(5) + pacing_budget,
     )
     .await?;
     check_tasks(&mut tasks)?;
