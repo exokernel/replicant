@@ -1,3 +1,8 @@
+# yaml-language-server: $schema=
+# (Disables IDE schema auto-match: SchemaStore picks the SDK-side
+# "OpenTelemetry Declarative Configuration" schema by filename, but this is
+# a Collector pipeline config — different spec, no file_format field.)
+#
 # OTel collector pipeline: OTLP gRPC in (from replicas), Prometheus scrape out.
 #
 # Single source of truth used by both docker compose (bind-mount from
