@@ -160,6 +160,29 @@ docker-down:
         docker compose -f deploy/docker/compose.generated.yaml down
     fi
 
+# Wipe scenario data without rebuilding the stack: restart replica containers (clears in-memory Automerge state) and recreate the prometheus container (drops its tsdb). Grafana edits are preserved because Grafana's container is untouched. Stack must already be up (`just docker-up` first).
+docker-reset:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -f deploy/docker/compose.generated.yaml ]; then
+        echo "error: no compose.generated.yaml — bring stack up first with \`just docker-up\`" >&2
+        exit 1
+    fi
+    compose='docker compose -f deploy/docker/compose.generated.yaml'
+    replicas=$($compose ps --services --filter status=running 2>/dev/null | grep '^replica-' || true)
+    if [ -z "$replicas" ]; then
+        echo "error: no replica containers running — bring stack up first with \`just docker-up\`" >&2
+        exit 1
+    fi
+    # Replica state is purely in-memory, so `restart` (re-exec the
+    # process in the same container) is enough — no need to recreate.
+    $compose restart $replicas
+    # Prometheus's tsdb lives in the container's writable layer, so
+    # `restart` would preserve it. Recreate the container instead.
+    $compose rm -fsv prometheus
+    $compose up -d prometheus
+    echo "reset: replicas restarted, Prometheus wiped, Grafana edits preserved."
+
 # Bring up a persistent kind cluster (named `replicant`) with the replica stack sized for the given scenario. Idempotent: re-runs build → load → apply → scale on top of an existing cluster, so re-invoking with a different scenario rescales the StatefulSet in place. Pair with `just k8s-down` to tear down, `just k8s-reset` to clear state between scenarios.
 k8s-up scenario='scenarios/full-mesh-n5.toml':
     #!/usr/bin/env bash
@@ -215,10 +238,14 @@ k8s-ui:
     echo "Ctrl-C to stop."
     wait
 
-# Clear all Automerge state by restarting the replica StatefulSet. Cluster must already be up (run `just k8s-up` first). Waits for the rollout to complete before returning.
+# Wipe scenario data without re-applying manifests: rollout-restart the replica StatefulSet (clears in-memory Automerge state) and the prometheus Deployment (drops its emptyDir tsdb). Grafana edits are preserved because grafana's pod is untouched. Cluster must already be up (`just k8s-up` first).
 k8s-reset:
-    kubectl -n replicant rollout restart statefulset/node
+    #!/usr/bin/env bash
+    set -euo pipefail
+    kubectl -n replicant rollout restart statefulset/node deployment/prometheus
     kubectl -n replicant rollout status statefulset/node --timeout=180s
+    kubectl -n replicant rollout status deployment/prometheus --timeout=60s
+    echo "reset: replicas restarted, Prometheus wiped, Grafana edits preserved."
 
 # Build rustdoc for all crates and open in browser
 docs:
