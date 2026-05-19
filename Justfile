@@ -45,21 +45,37 @@ test:
 smoke:
     cargo run --bin orchestrator
 
-# End-to-end docker check: build image, run 5 replicas + otel-collector + prometheus, run full-mesh-n5, tear down. Not in `just ci` because it needs a docker daemon and image pulls. Shebang recipe + trap so the stack is always torn down and the recipe's exit code reflects the orchestrator, not the teardown.
-smoke-docker:
+# End-to-end docker check: generate an N-replica compose file from the scenario's node_count, build the image, run the stack, run the scenario, tear down. Not in `just ci` because it needs a docker daemon and image pulls. Shebang recipe + trap so the stack is always torn down and the recipe's exit code reflects the orchestrator, not the teardown.
+smoke-docker scenario='scenarios/full-mesh-n5.toml':
     #!/usr/bin/env bash
     set -euo pipefail
-    compose='docker compose -f deploy/docker/compose.yaml'
+    scenario='{{scenario}}'
+    n=$(grep -oP 'node_count\s*=\s*\K\d+' "$scenario" | head -1)
+    if [ -z "$n" ]; then echo "error: no node_count in $scenario" >&2; exit 1; fi
+
+    # Prefer the analysis .venv interpreter so the pyyaml from requirements.txt
+    # is used; fall back to system python3 (also expected to have pyyaml).
+    py=$([ -x .venv/bin/python3 ] && echo .venv/bin/python3 || echo python3)
+    "$py" deploy/docker/gen-compose.py "$n" > deploy/docker/compose.generated.yaml
+
+    compose='docker compose -f deploy/docker/compose.generated.yaml'
     $compose up -d --build
     trap "$compose down" EXIT
-    cargo run --release --bin orchestrator -- \
-        --replicas localhost:50051=replica-0:50051,localhost:50052=replica-1:50051,localhost:50053=replica-2:50051,localhost:50054=replica-3:50051,localhost:50055=replica-4:50051 \
-        scenarios/full-mesh-n5.toml
 
-# End-to-end kind check: build image, spin up a local kind cluster (named `replicant`), apply the deploy/k8s/overlays/kind manifests, port-forward 5 pods, run full-mesh-n5, tear the cluster down. Not in `just ci` (needs docker + kind). Set KEEP_KIND=1 to preserve the cluster after the run for debugging. If the cluster already exists (e.g. from `just k8s-up`), this recipe reuses it and does NOT delete it on exit — only clusters it created itself are torn down.
-smoke-k8s:
+    replicas=""
+    for i in $(seq 0 $((n-1))); do
+        [ -n "$replicas" ] && replicas="${replicas},"
+        replicas="${replicas}localhost:$((50051+i))=replica-${i}:50051"
+    done
+    cargo run --release --bin orchestrator -- --replicas "$replicas" "$scenario"
+
+# End-to-end kind check: parse N from the scenario's node_count, build the image, spin up the kind cluster (named `replicant`), apply manifests and scale the StatefulSet to N, port-forward N pods, run the scenario, tear the cluster down. Not in `just ci` (needs docker + kind). Set KEEP_KIND=1 to preserve the cluster after the run for debugging. If the cluster already exists (e.g. from `just k8s-up`), this recipe reuses it and does NOT delete it on exit — only clusters it created itself are torn down.
+smoke-k8s scenario='scenarios/full-mesh-n5.toml':
     #!/usr/bin/env bash
     set -euo pipefail
+    scenario='{{scenario}}'
+    n=$(grep -oP 'node_count\s*=\s*\K\d+' "$scenario" | head -1)
+    if [ -z "$n" ]; then echo "error: no node_count in $scenario" >&2; exit 1; fi
     cluster=replicant
     img=replicant-replica:dev
 
@@ -84,20 +100,22 @@ smoke-k8s:
     # 3. Load the freshly-built image into the kind nodes.
     kind load docker-image "$img" --name "$cluster"
 
-    # 4. Apply manifests and wait for everything to become Ready.
+    # 4. Apply manifests, scale to N replicas (the base sets a default but
+    # scenarios with N != base get rescaled here), wait for everything Ready.
     kubectl apply -k deploy/k8s/overlays/kind
+    kubectl -n replicant scale statefulset/node --replicas="$n"
     kubectl -n replicant rollout status statefulset/node --timeout=180s
     kubectl -n replicant rollout status deployment/otel-collector --timeout=60s
 
     # 5. Port-forward each replica pod to a distinct host port.
     pids=()
-    for i in 0 1 2 3 4; do
+    for i in $(seq 0 $((n-1))); do
         kubectl -n replicant port-forward "pod/node-$i" "$((50051+i)):50051" \
             >/dev/null 2>&1 &
         pids+=($!)
     done
     # Wait until each forwarder is actually accepting connections.
-    for i in 0 1 2 3 4; do
+    for i in $(seq 0 $((n-1))); do
         until (exec 3<>"/dev/tcp/localhost/$((50051+i))") 2>/dev/null; do
             sleep 0.2
         done
@@ -106,18 +124,41 @@ smoke-k8s:
     # 6. Run the scenario. peer_addr is in-cluster DNS (resolvable from pods),
     # client_addr is the port-forwarded host endpoint.
     replicas=""
-    for i in 0 1 2 3 4; do
+    for i in $(seq 0 $((n-1))); do
         [ -n "$replicas" ] && replicas="${replicas},"
         replicas="${replicas}localhost:$((50051+i))=node-${i}.node:50051"
     done
-    cargo run --release --bin orchestrator -- \
-        --replicas "$replicas" \
-        scenarios/full-mesh-n5.toml
+    cargo run --release --bin orchestrator -- --replicas "$replicas" "$scenario"
 
-# Bring up a persistent kind cluster (named `replicant`) with the full replica stack for manual development. Idempotent: re-runs build → load → apply on top of an existing cluster, so it's safe to use after editing manifests or rebuilding the image. Pair with `just k8s-down` to tear down, `just k8s-reset` to clear state between scenarios.
-k8s-up:
+# Bring up the docker compose stack sized for the given scenario and leave it running. Use when you want to inspect Prometheus (http://localhost:9090) while iterating, or run many scenarios against the same stack. Pair with `just docker-down` to tear down. Idempotent: re-running regenerates the compose file from the new scenario and `docker compose up -d` reconciles.
+docker-up scenario='scenarios/full-mesh-n5.toml':
     #!/usr/bin/env bash
     set -euo pipefail
+    scenario='{{scenario}}'
+    n=$(grep -oP 'node_count\s*=\s*\K\d+' "$scenario" | head -1)
+    if [ -z "$n" ]; then echo "error: no node_count in $scenario" >&2; exit 1; fi
+
+    py=$([ -x .venv/bin/python3 ] && echo .venv/bin/python3 || echo python3)
+    "$py" deploy/docker/gen-compose.py "$n" > deploy/docker/compose.generated.yaml
+
+    docker compose -f deploy/docker/compose.generated.yaml up -d --build
+    echo "stack up with $n replicas (from $scenario). Prometheus: http://localhost:9090. \`just docker-down\` to tear down."
+
+# Tear down the docker compose stack brought up by `just docker-up`. No-op if not present.
+docker-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -f deploy/docker/compose.generated.yaml ]; then
+        docker compose -f deploy/docker/compose.generated.yaml down
+    fi
+
+# Bring up a persistent kind cluster (named `replicant`) with the replica stack sized for the given scenario. Idempotent: re-runs build → load → apply → scale on top of an existing cluster, so re-invoking with a different scenario rescales the StatefulSet in place. Pair with `just k8s-down` to tear down, `just k8s-reset` to clear state between scenarios.
+k8s-up scenario='scenarios/full-mesh-n5.toml':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    scenario='{{scenario}}'
+    n=$(grep -oP 'node_count\s*=\s*\K\d+' "$scenario" | head -1)
+    if [ -z "$n" ]; then echo "error: no node_count in $scenario" >&2; exit 1; fi
     cluster=replicant
     img=replicant-replica:dev
 
@@ -129,9 +170,10 @@ k8s-up:
     kind load docker-image "$img" --name "$cluster"
 
     kubectl apply -k deploy/k8s/overlays/kind
+    kubectl -n replicant scale statefulset/node --replicas="$n"
     kubectl -n replicant rollout status statefulset/node --timeout=180s
     kubectl -n replicant rollout status deployment/otel-collector --timeout=60s
-    echo "kind cluster '$cluster' is up. \`just k8s-reset\` to clear state, \`just k8s-down\` to tear down."
+    echo "kind cluster '$cluster' is up with $n replicas (from $scenario). \`just k8s-reset\` to clear state, \`just k8s-down\` to tear down."
 
 # Delete the kind cluster created by `just k8s-up`. No-op if not present.
 k8s-down:

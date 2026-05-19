@@ -4,6 +4,9 @@ seaborn
 pyarrow
 jupyterlab
 requests
+# YAML library for deploy/docker/gen-compose.py (compose file generator).
+# Listed explicitly so deploy tooling doesn't rely on a transitive dep.
+pyyaml
 # Strips notebook outputs on `git add` so .ipynb diffs stay code-only.
 # After `pip install -r requirements.txt`, run `nbstripout --install` once
 # to register the local git filter (.gitattributes already binds it).
