@@ -66,18 +66,20 @@ Manifests are organised as Kustomize bases under `deploy/k8s/base/` with overlay
 
 The Jupyter notebook at `analysis/convergence.ipynb` produces figures from benchmark data.
 
-**Offline path** (file-based metrics, no docker daemon): generate `results.csv` and per-scenario metrics files, then open the notebook. The two passes are separate because OTel counters accumulate across scenarios in a single invocation, so per-scenario attribution needs one invocation per scenario:
+**Offline path** (file-based metrics, no docker daemon): generate `results/results.csv` and per-scenario metrics files under `results/`, then open the notebook. The two passes are separate because OTel counters accumulate across scenarios in a single invocation, so per-scenario attribution needs one invocation per scenario:
 
 ```sh
-# 1. Unified sweep across all scenarios for results.csv (timing/percentile tables).
+mkdir -p results
+
+# 1. Unified sweep across all scenarios for results/results.csv (timing/percentile tables).
 cargo run --release --bin orchestrator -- --trials 10 --output csv \
   scenarios/*.toml \
-  2>/dev/null > results.csv
+  2>/dev/null > results/results.csv
 
-# 2. Per-scenario metrics-<scenario>.json files (sync/op/doc-size protocol data).
+# 2. Per-scenario results/metrics-<scenario>.json files (sync/op/doc-size protocol data).
 for s in $(ls scenarios/*.toml | xargs -n1 basename -s .toml); do
   cargo run --release --bin orchestrator -- --trials 10 \
-    --metrics-file "metrics-${s}.json" \
+    --metrics-file "results/metrics-${s}.json" \
     "scenarios/${s}.toml" \
     > /dev/null 2>&1
 done
@@ -85,7 +87,7 @@ done
 cd analysis && jupyter lab convergence.ipynb
 ```
 
-The notebook caches parsed data as `results.parquet` and refreshes when `results.csv` is newer.
+The notebook caches parsed data as `results/results.parquet` and refreshes when `results/results.csv` is newer. The `results/` directory is gitignored.
 
 **Live path** (Prometheus-backed): bring up the containerized stack (`just smoke-docker` or the manual flow above), then run the notebook's "Prometheus-backed metrics (live stack)" section. It queries the running Prom directly via PromQL — useful for ad-hoc inspection and to assert the structural invariant that all replicas converge to the same `doc_size_bytes`.
 

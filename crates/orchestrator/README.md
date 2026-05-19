@@ -7,11 +7,12 @@ Lines to stdout; tracing logs go to stderr.
 ## Usage
 
 ```sh
-# Run all thesis evaluation scenarios, 10 trials each → results.csv
+# Run all thesis evaluation scenarios, 10 trials each → results/results.csv
+mkdir -p results
 cargo run --bin orchestrator -- --trials 10 --output csv \
   scenarios/full-mesh-n{2,3,5,10}.toml \
   scenarios/partition-heal-n{4,6,8}.toml \
-  2>/dev/null > results.csv
+  2>/dev/null > results/results.csv
 
 # Single scenario, JSON Lines output
 cargo run --bin orchestrator -- --output json scenarios/full-mesh-n5.toml

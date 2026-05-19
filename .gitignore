@@ -1,9 +1,7 @@
 /target
 .obsidian/
 NEXT_SESSION.md
-*.csv
-*.parquet
-*.json
+/results/
 analysis/figures/
 **/.ipynb_checkpoints/
 .venv/
