@@ -5,121 +5,146 @@ defined here must be used identically by every `CrdtAdapter` implementation
 and by the orchestrator. Changing a name here is a breaking change to
 collected data.
 
-## Common attributes
+The metrics inventory is intentionally small. Each instrument earns its
+place by answering a specific thesis question. Add a new metric only when
+an existing one cannot.
 
-All attributes are strings. These appear on most metrics.
+## Conventions
 
-| Attribute   | Example values                                                         | Description                                                       |
-|-------------|------------------------------------------------------------------------|-------------------------------------------------------------------|
-| `actor`     | `replica-a`, `replica-b`                                               | Stable replica ID, set explicitly at startup — never a random UUID. |
-| `op`        | `map_put`, `map_delete`, `list_insert`, `list_delete`, `list_splice`, `text_splice` | Operation type, matching `OpRequest` oneof field names.  |
-| `result`    | `ok`, `error`                                                          | Outcome of an operation.                                          |
-| `direction` | `send`, `receive`                                                      | Direction of a sync message.                                      |
-| `peer`      | `replica-b`                                                            | The peer involved in a sync exchange.                             |
+All metric names use the `replicant.*` namespace. Attribute values are
+strings. Units are recorded on the instrument via OTel's `with_unit` builder
+so consumers don't need to infer them from names.
+
+| Attribute | Example values                                              | Description                                                       |
+|-----------|-------------------------------------------------------------|-------------------------------------------------------------------|
+| `actor`   | `node-0`, `node-1`                                          | Stable replica ID, set explicitly at startup — never random.      |
+| `peer`    | `node-1`                                                    | The peer involved in a sync exchange.                             |
+| `op`      | `map_put` (currently the only op type emitted)              | Operation type, matching `OpRequest` oneof field names.           |
 
 ---
 
-## Comparable metrics
+## Emitted metrics
 
-These metrics use identical names and semantics across all `CrdtAdapter`
-implementations. Timing is recorded in the scaffolding layer, *outside* the
-adapter, so the measured boundary is the same for every library. None of
-these metric names contain a library name — that is intentional.
+All four are emitted by the **replica** binary; the orchestrator emits no
+OTel metrics of its own (it consumes them via the file exporter or
+Prometheus). Defined in [`crates/replica/src/metrics.rs`](../crates/replica/src/metrics.rs);
+recorded at call sites in [`crates/replica/src/server.rs`](../crates/replica/src/server.rs).
 
 ### Op metrics
 
-| Name                        | Type      | Unit | Attributes           | Description                                                                      |
-|-----------------------------|-----------|------|----------------------|----------------------------------------------------------------------------------|
-| `replicant.op.duration_us`  | Histogram | µs   | `actor`, `op`        | Wall time for one `apply_op` call. Measures CRDT library time only; excludes gRPC overhead. |
-| `replicant.op.count`        | Counter   | ops  | `actor`, `op`, `result` | Total operations applied.                                                     |
+| Name                       | Type              | Unit | Attributes      | Description                                                          |
+|----------------------------|-------------------|------|-----------------|----------------------------------------------------------------------|
+| `replicant.op.duration`    | Histogram<f64>    | ms   | `actor`, `op`   | Wall time for one `apply_op` call. CRDT library + commit only; excludes gRPC overhead. |
 
 ### Sync metrics
 
-| Name                                  | Type      | Unit     | Attributes                      | Description                                                              |
-|---------------------------------------|-----------|----------|---------------------------------|--------------------------------------------------------------------------|
-| `replicant.sync.message.duration_us`  | Histogram | µs       | `actor`, `direction`            | Wall time to generate or receive one sync message.                       |
-| `replicant.sync.bytes`                | Counter   | bytes    | `actor`, `direction`, `peer`    | Bytes sent or received in sync messages. Measures replication bandwidth. |
-| `replicant.sync.messages`             | Counter   | messages | `actor`, `direction`, `peer`    | Number of sync messages exchanged.                                       |
+`tx` and `rx` are split into two separate counters rather than a single
+counter with a `direction` attribute. This keeps Prometheus queries simple
+(`sum(replicant_sync_messages_tx_total) by (actor)` without needing a
+filter) and matches what the analysis notebook expects.
+
+| Name                            | Type            | Unit | Attributes        | Description                                  |
+|---------------------------------|-----------------|------|-------------------|----------------------------------------------|
+| `replicant.sync.messages.tx`    | Counter<u64>    | —    | `actor`, `peer`   | Outbound sync messages sent to a peer.       |
+| `replicant.sync.messages.rx`    | Counter<u64>    | —    | `actor`, `peer`   | Inbound sync messages received from a peer.  |
 
 ### Document state metrics
 
-Sampled by each replica approximately every 1 second. Not emitted per-op.
+Sampled on every local op application AND on every received sync message,
+so post-convergence the gauge reflects each replica's final save() byte
+length. See [[finding_automerge_save_not_canonical]] in the analysis notebook
+for why these values can differ across logically-converged replicas.
 
-| Name                          | Type  | Unit    | Attributes | Description                                                              |
-|-------------------------------|-------|---------|------------|--------------------------------------------------------------------------|
-| `replicant.doc.size_bytes`    | Gauge | bytes   | `actor`    | Serialized document size (`save()` byte length).                         |
-| `replicant.doc.heads_count`   | Gauge | heads   | `actor`    | Number of current document heads (width of the DAG frontier).            |
-| `replicant.doc.changes_total` | Gauge | changes | `actor`    | Total changes in the document DAG.                                       |
-
-### Convergence metrics
-
-Emitted by the **orchestrator**, not by replicas.
-
-| Name                                | Type      | Unit   | Attributes | Description                                                                                   |
-|-------------------------------------|-----------|--------|------------|-----------------------------------------------------------------------------------------------|
-| `replicant.convergence.latency_us`  | Histogram | µs     | —          | Time from end of workload burst to all replicas reporting equal `GetStateFingerprint` values. |
-| `replicant.convergence.rounds`      | Histogram | rounds | —          | Sync round-trips until quiescence after a workload burst.                                     |
+| Name                       | Type           | Unit  | Attributes | Description                                          |
+|----------------------------|----------------|-------|------------|------------------------------------------------------|
+| `replicant.doc.size_bytes` | Gauge<u64>     | By    | `actor`    | Serialized document size (`AutoCommit::save()` byte length). |
 
 ---
 
-## Diagnostic metrics
+## Convergence is not an OTel metric
 
-These metrics diagnose *why* a library performs the way it does. They are
-**not** comparable across libraries and live in a library-specific namespace.
-Each adapter emits its own via `emit_internal_metrics(&meter)`.
+Convergence latency is the thesis's headline measurement, but it is **not**
+emitted as an OTel instrument. The orchestrator measures convergence
+externally and writes it to its CSV / JSON Lines output as a `convergence_ms`
+column. Reasons:
 
-Naming pattern: `replicant.<library>.<signal>`
+- Convergence is a *whole-cluster* property, not per-replica. OTel
+  instruments naturally attach to per-actor attributes; convergence has no
+  natural `actor` tag.
+- The orchestrator already produces structured per-trial output to stdout.
+  Reporting convergence as a column there keeps the analysis pipeline
+  uniform — every measurement lives in `results/results.csv`, queryable by
+  pandas without joining against the OTel snapshot.
 
-| Name                                    | Type      | Unit | Attributes | Description                                      |
-|-----------------------------------------|-----------|------|------------|--------------------------------------------------|
-| `replicant.automerge.save.duration_us`  | Histogram | µs   | `actor`    | Time for `AutoCommit::save()` (full serialization). |
-
-Add entries here as profiling reveals interesting internal signals.
-
----
-
-## Recommended histogram boundaries
-
-Default OTel bucket boundaries are poorly suited to µs-scale measurements.
-Configure these explicitly in the SDK or collector pipeline.
-
-| Metric group           | Boundaries (µs)                                              |
-|------------------------|--------------------------------------------------------------|
-| Op duration            | 1, 5, 10, 25, 50, 100, 250, 500, 1 000, 5 000, 10 000       |
-| Sync message duration  | 10, 50, 100, 250, 500, 1 000, 5 000, 10 000, 50 000         |
-| Convergence latency    | 1 000, 5 000, 10 000, 50 000, 100 000, 500 000, 1 000 000   |
+See [`crates/orchestrator/src/runner.rs`](../crates/orchestrator/src/runner.rs)
+for the measurement protocol — fingerprint-poll loop after the workload
+burst until all replicas report identical `GetStateFingerprint`.
 
 ---
 
 ## Collection topology
 
+The replicas push OTel data via OTLP gRPC to an `otelcol` endpoint, which
+fans out to two consumption paths used by the analysis notebook:
+
 ```
-Replicas      ──OTLP push──▶ ┐
-                              ├──▶ otelcol ──▶ JSON / Parquet files ──▶ pandas
-Orchestrator  ──OTLP push──▶ ┘
+                                       ┌──▶ File exporter ──▶ results/metrics-*.json ──▶ pandas (offline)
+Replicas ──OTLP push──▶ otelcol ───────┤
+                                       └──▶ Prometheus exporter (/metrics on :8889) ──▶ Prometheus scrape ──▶ PromQL (live)
 ```
 
-Both replicas and the orchestrator push to the same `otelcol` endpoint.
-The collector is a single process on localhost (prototype) or a container
-sidecar (docker-compose / k8s). After the benchmark run, output files are
-pulled for offline analysis.
+- **Offline path** (used for all thesis-table data): orchestrator runs with
+  `--metrics-file results/metrics-<scenario>.json` per scenario. The file
+  exporter writes one JSON Lines record per PeriodicReader flush. The
+  notebook's "OTel Protocol Metrics" section loads these.
+- **Live path** (used for ad-hoc Prometheus inspection): `just docker-up
+  <scenario>` brings up Prometheus alongside the replicas; it scrapes
+  the collector's `:8889` endpoint every 2s. The notebook's
+  "Prometheus-backed metrics (live stack)" section queries PromQL.
 
-No Prometheus or Grafana required for the prototype.
+Both paths are derived from the same OTLP stream, so the metric names and
+attribute semantics are identical across them. The k8s deployment uses the
+same collector pipeline (`deploy/k8s/base/otel-collector-{configmap,deployment,svc}.yaml`).
 
 ---
 
-## Convergence measurement protocol
+## Diagnostic metrics (per-adapter, future work)
 
-Convergence latency is measured from the orchestrator's clock throughout, so
-no cross-replica clock synchronization is required.
+Comparable metrics above use identical names and semantics across all
+`CrdtAdapter` implementations. Library-specific diagnostic metrics
+(`replicant.<library>.<signal>`) are not currently emitted but would live
+in a separate `emit_internal_metrics(&meter)` hook on the adapter trait
+when we add a second adapter.
 
-1. Run the workload burst (orchestrator sends `ApplyOp` calls to replicas).
-2. Stop sending new ops. Record wall time **T₀**.
-3. Poll `GetStateFingerprint` on all replicas at a fixed interval (e.g. 10 ms).
-4. When all replicas return identical fingerprint bytes, record wall time **T₁**.
-5. Emit `replicant.convergence.latency_us = T₁ − T₀`.
+Candidates that would earn their place:
 
-The fingerprint is opaque to the orchestrator — it just compares byte equality.
-For Automerge, the `AutomergeAdapter` returns sorted, concatenated `get_heads()`
-bytes. Two replicas with equal fingerprints have the same DAG frontier and have
-therefore converged.
+- `replicant.automerge.save.duration_us` — cost of `AutoCommit::save()`.
+  Worth adding if op latency histograms start showing `save()` as the
+  dominant term (currently it's not, but the call is now on the
+  sync_receive path too — see the doc_size_bytes overhead note in
+  [NEXT_SESSION.md](../NEXT_SESSION.md)).
+- `replicant.sync.bytes` — replication bandwidth in addition to message
+  counts. Useful for distinguishing "many small messages" from "few large
+  messages" at the topology level.
+
+Add entries here only after the code emits them. Don't pre-document
+aspirational metrics — this file was previously full of them and went stale.
+
+---
+
+## Adding a new metric
+
+1. Declare the instrument in `crates/replica/src/metrics.rs` (`Metrics`
+   struct) with a `replicant.*` name, OTel type, unit, and the attribute
+   keys it uses.
+2. Build it in `Metrics::new`.
+3. Record it at the relevant call site in `server.rs` (or wherever the
+   measurement boundary lives — keep recordings **outside** the
+   `CrdtAdapter` trait so adapters stay purely functional).
+4. Add a row to the appropriate table above.
+5. If the metric is consumed by the notebook, update
+   [analysis/convergence.ipynb](../analysis/convergence.ipynb) to load and
+   plot it.
+
+Keep this doc and the code synchronized — every metric name in the tables
+above must `grep` to a real `replicant.<...>` string in `crates/replica/`.
