@@ -1,5 +1,18 @@
 # Replicant
 
+```
+ ____  _____ ____  _     ___ ____    _    _   _ _____
+|  _ \| ____|  _ \| |   |_ _/ ___|  / \  | \ | |_   _|
+| |_) |  _| | |_) | |    | | |     / _ \ |  \| | | |
+|  _ <| |___|  __/| |___ | | |___ / ___ \| |\  | | |
+|_| \_\_____|_|   |_____|___\____/_/   \_\_| \_| |_|
+```
+
+> *"All those moments will be lost in time, like tears in rain..."*
+> — Roy Batty, *Blade Runner* (1982)
+>
+> ...unless you measure them.
+
 A CRDT benchmarking framework built on [Automerge](https://automerge.org/) and gRPC. Replicant spins up replica nodes, drives sync workloads between them, and collects latency/throughput metrics via OpenTelemetry.
 
 ## Crates
