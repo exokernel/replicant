@@ -38,7 +38,9 @@ just docs     # build and open rustdoc
 
 The orchestrator can drive a stack of containerized replicas wired to a real OTel collector and Prometheus. Two runtimes are supported: docker compose (single host) and a local kind cluster (k8s, single host). Both run the same replica image; only the recipe and wiring differ.
 
-`--replicas` accepts comma-separated `client_addr[=peer_addr]` entries — the first is what the orchestrator dials, the second (defaults to the first when omitted) is what each replica passes to its peers in `ConnectPeer`. The two diverge whenever replicas live in a different network namespace from the orchestrator. When `--replicas` is set, the orchestrator accepts only one scenario and one trial per invocation since replica state persists between runs — bounce the stack to reset.
+`--replicas` accepts comma-separated `client_addr[=peer_addr]` entries — the first is what the orchestrator dials, the second (defaults to the first when omitted) is what each replica passes to its peers in `ConnectPeer`. The two diverge whenever replicas live in a different network namespace from the orchestrator.
+
+Replica state is cleared between trials and between scenarios via a `Replica.Reset` RPC, so a single orchestrator invocation against an externally-managed stack can sweep multiple scenarios with `--trials N` — no need to bounce containers/pods between runs. The `just bench-docker` and `just bench-k8s` recipes wrap this: one stack per distinct `node_count` bucket, Reset between trials within a bucket, output to `results/results-{docker,k8s}.csv` for the analysis notebooks.
 
 ### docker compose
 
@@ -57,10 +59,14 @@ just docker-up scenarios/full-mesh-n5.toml      # build → up; stays running
 # Grafana:    http://localhost:3000  (admin/admin)
 # Prometheus: http://localhost:9090
 
-# Run scenarios (one at a time, since replica state persists between runs):
-cargo run --release --bin orchestrator -- \
+# Run one or many scenarios (Replica.Reset clears state between trials and
+# between scenarios — no container bounce needed):
+cargo run --release --bin orchestrator -- --trials 10 \
   --replicas localhost:50051=replica-0:50051,localhost:50052=replica-1:50051,localhost:50053=replica-2:50051,localhost:50054=replica-3:50051,localhost:50055=replica-4:50051 \
-  scenarios/full-mesh-n5.toml
+  scenarios/full-mesh-n5.toml scenarios/star-n5.toml
+
+# Or use the sweep recipe (wraps stack lifecycle + Reset + CSV emit):
+just bench-docker "scenarios/*-n5*.toml" 10      # writes results/results-docker.csv
 
 just docker-reset                               # wipe Prometheus + replica
                                                 # state, keep Grafana edits
@@ -82,48 +88,67 @@ KEEP_KIND=1 just smoke-k8s        # preserve the cluster for debugging
 For longer interactive sessions:
 
 ```sh
-just k8s-up scenarios/full-mesh-n5.toml         # idempotent: rescales in place
+just k8s-up scenarios/full-mesh-n5.toml         # idempotent: rescales in place;
+                                                # also sets up the per-pod
+                                                # `localhost:5005N` port-forwards
+                                                # in the background so the
+                                                # orchestrator can dial each pod
 just k8s-ui                                     # foreground port-forwards:
                                                 # Grafana :3000, Prometheus :9090
 just k8s-reset                                  # wipe Prometheus + replica
                                                 # state, keep Grafana edits
 just k8s-down                                   # tear down
+
+# Multi-trial sweep (uses Replica.Reset, no pod bounces):
+just bench-k8s "scenarios/*-n5*.toml" 10        # writes results/results-k8s.csv
 ```
 
 Manifests are organised as Kustomize bases under `deploy/k8s/base/` with overlay-specific patches under `deploy/k8s/overlays/`. The same image runs in both runtimes (no separate "k8s build"). Replica pods are a `StatefulSet` for stable identity (`node-0`…`node-4` matching the actor scheme) — they are not stateful for storage.
 
 ### Dashboards
 
-Both stacks ship with a provisioned Grafana dashboard at [`deploy/shared/grafana/dashboards/replicant.json`](deploy/shared/grafana/dashboards/replicant.json) — four panels covering document size convergence, op latency p50/p95, sync messages tx/rx per actor, and sync edge inventory. Reachable at `http://localhost:3000` (admin/admin) when the stack is up via `docker-up` or `k8s-ui`. The dashboard is editable in-browser; edits persist across container restarts and across `*-reset` (which only wipes Prometheus tsdb + replica state), and are wiped by `*-down` if you want a fully clean slate. Useful for live debugging and demos; the analysis notebook ([`analysis/convergence.ipynb`](analysis/convergence.ipynb)) remains the source of truth for thesis-table numbers.
+Both stacks ship with a provisioned Grafana dashboard at [`deploy/shared/grafana/dashboards/replicant.json`](deploy/shared/grafana/dashboards/replicant.json) — four panels covering document size convergence, op latency p50/p95, sync messages tx/rx per actor, and sync edge inventory. Reachable at `http://localhost:3000` (admin/admin) when the stack is up via `docker-up` or `k8s-ui`. The dashboard is editable in-browser; edits persist across container restarts and across `*-reset` (which only wipes Prometheus tsdb + replica state), and are wiped by `*-down` if you want a fully clean slate. Useful for live debugging and demos; the analysis notebooks (especially [`analysis/convergence.ipynb`](analysis/convergence.ipynb)) remain the source of truth for the numbers that go into the write-up.
 
 ## Analysis
 
-The Jupyter notebook at `analysis/convergence.ipynb` produces figures from benchmark data.
+Four Jupyter notebooks under `analysis/`, one per question — see [`analysis/README.md`](analysis/README.md) for the pointer table:
 
-**Offline path** (file-based metrics, no docker daemon): generate `results/results.csv` and per-scenario metrics files under `results/`, then open the notebook. The two passes are separate because OTel counters accumulate across scenarios in a single invocation, so per-scenario attribution needs one invocation per scenario:
+- [`convergence.ipynb`](analysis/convergence.ipynb) — CSV-driven plots. Pick `SOURCE = "in_process" | "docker" | "k8s"`.
+- [`protocol_metrics.ipynb`](analysis/protocol_metrics.ipynb) — OTel JSON files (in-process only — see notebook header for why).
+- [`live_metrics.ipynb`](analysis/live_metrics.ipynb) — live PromQL on a running stack.
+- [`comparison.ipynb`](analysis/comparison.ipynb) — cross-source view; default `INCLUDE = ["docker", "k8s"]`.
+
+**Offline path** (CSV from a finished sweep, no live stack required): three CSVs feed the notebooks depending on `SOURCE`:
 
 ```sh
 mkdir -p results
 
-# 1. Unified sweep across all scenarios for results/results.csv (timing/percentile tables).
+# in_process — same orchestrator process as the replicas. Cheapest, but
+# round_robin on relay-heavy topologies is artifactually slow here; see
+# analysis/comparison.ipynb.
 cargo run --release --bin orchestrator -- --trials 10 --output csv \
-  scenarios/*.toml \
-  2>/dev/null > results/results.csv
+  scenarios/*.toml > results/results.csv
 
-# 2. Per-scenario results/metrics-<scenario>.json files (sync/op/doc-size protocol data).
+# docker / k8s — externally-managed stacks, multi-scenario + multi-trial via
+# the Replica.Reset RPC. The recipes own the stack lifecycle (one stack per
+# distinct node_count bucket) and write the per-source CSV the notebook reads.
+just bench-docker "scenarios/*.toml" 10                  # results/results-docker.csv
+just bench-k8s    "scenarios/*.toml" 10                  # results/results-k8s.csv
+
+# Per-scenario OTel JSON for protocol_metrics.ipynb (in_process only — one
+# invocation per scenario so counters don't accumulate across scenarios):
 for s in $(ls scenarios/*.toml | xargs -n1 basename -s .toml); do
   cargo run --release --bin orchestrator -- --trials 10 \
-    --metrics-file "results/metrics-${s}.json" \
-    "scenarios/${s}.toml" \
-    > /dev/null 2>&1
+    --metrics-file "results/metrics-${s}.json" --output csv \
+    "scenarios/${s}.toml" > /dev/null 2>&1
 done
 
-cd analysis && jupyter lab convergence.ipynb
+cd analysis && jupyter lab
 ```
 
-The notebook caches parsed data as `results/results.parquet` and refreshes when `results/results.csv` is newer. The `results/` directory is gitignored.
+Each CSV is cached alongside it as `<stem>.parquet` and refreshed when the CSV is newer. The `results/` directory is gitignored.
 
-**Live path** (Prometheus-backed): bring up the containerized stack (`just smoke-docker` or the manual flow above), then run the notebook's "Prometheus-backed metrics (live stack)" section. It queries the running Prom directly via PromQL — useful for ad-hoc inspection and to assert the structural invariant that all replicas converge to the same `doc_size_bytes`.
+**Live path** (Prometheus-backed): bring up a containerized stack (`just docker-up` or `just k8s-up` + `just k8s-ui`), run a scenario against it (typically a paced one — see [`scenarios/full-mesh-n5-paced.toml`](scenarios/full-mesh-n5-paced.toml)), then open `analysis/live_metrics.ipynb` and Run All. It queries Prometheus directly via PromQL — useful for live demos and for asserting the structural invariant that all replicas converge to the same `doc_size_bytes`.
 
 ## Requirements
 

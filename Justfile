@@ -343,7 +343,7 @@ docker-reset:
     $compose up -d prometheus
     echo "reset: replicas restarted, Prometheus wiped, Grafana edits preserved."
 
-# Bring up a persistent kind cluster (named `replicant`) with the replica stack sized for the given scenario. Idempotent: re-runs build → load → apply → scale on top of an existing cluster, so re-invoking with a different scenario rescales the StatefulSet in place. Pair with `just k8s-down` to tear down, `just k8s-reset` to clear state between scenarios.
+# Bring up a persistent kind cluster (named `replicant`) with the replica stack sized for the given scenario, plus background per-pod port-forwards on localhost:50051..50050+N so the host-side orchestrator can dial each replica directly. Idempotent: re-runs build → load → apply → scale on top of an existing cluster, so re-invoking with a different scenario rescales the StatefulSet and the forwards. Pair with `just k8s-down` to tear down, `just k8s-reset` to clear state between scenarios.
 k8s-up scenario='scenarios/full-mesh-n5.toml':
     #!/usr/bin/env bash
     set -euo pipefail
@@ -369,14 +369,35 @@ k8s-up scenario='scenarios/full-mesh-n5.toml':
     kubectl -n replicant rollout status deployment/otel-collector --timeout=60s
     kubectl -n replicant rollout status deployment/prometheus --timeout=60s
     kubectl -n replicant rollout status deployment/grafana --timeout=60s
+
+    # Background per-pod port-forwards so the host-side orchestrator can dial
+    # each replica without a manual loop in another shell. Clears any stale
+    # forwards from a previous k8s-up first (so a rescale-from-10-to-5
+    # doesn't leave 5 orphans on :50056-:50060). nohup + disown so they
+    # outlive this recipe.
+    pkill -f 'kubectl -n replicant port-forward pod/node-' 2>/dev/null || true
+    for i in $(seq 0 $((n-1))); do
+        nohup kubectl -n replicant port-forward "pod/node-$i" "$((50051+i)):50051" >/dev/null 2>&1 &
+        disown
+    done
+    # Wait until each forwarder is actually accepting connections (5s max).
+    for i in $(seq 0 $((n-1))); do
+        for _ in $(seq 1 50); do
+            (exec 3<>"/dev/tcp/localhost/$((50051+i))") 2>/dev/null && break
+            sleep 0.1
+        done
+    done
+
     echo "kind cluster '$cluster' is up with $n replicas (from $scenario)."
+    echo "  replica ports localhost:50051..$((50050+n)) → node-0..node-$((n-1)) forwarded in background"
     echo "  \`just k8s-ui\` to port-forward Grafana (:3000) and Prometheus (:9090)."
     echo "  \`just k8s-reset\` to clear state, \`just k8s-down\` to tear down."
 
-# Delete the kind cluster created by `just k8s-up`. No-op if not present.
+# Delete the kind cluster created by `just k8s-up`. No-op if not present. Also kills the background per-pod port-forwards launched by k8s-up.
 k8s-down:
     #!/usr/bin/env bash
     set -euo pipefail
+    pkill -f 'kubectl -n replicant port-forward pod/node-' 2>/dev/null || true
     kind delete cluster --name replicant 2>/dev/null || true
 
 # Foreground port-forwards for the cluster's observability UIs. Run this in a separate shell after `just k8s-up`; Ctrl-C tears both forwards down. Grafana on :3000 (admin/admin), Prometheus on :9090.
@@ -398,14 +419,29 @@ k8s-ui:
     echo "Ctrl-C to stop."
     wait
 
-# Wipe scenario data without re-applying manifests: rollout-restart the replica StatefulSet (clears in-memory Automerge state) and the prometheus Deployment (drops its emptyDir tsdb). Grafana edits are preserved because grafana's pod is untouched. Cluster must already be up (`just k8s-up` first).
+# Wipe scenario data without re-applying manifests: rollout-restart the replica StatefulSet (clears in-memory Automerge state) and the prometheus Deployment (drops its emptyDir tsdb). Grafana edits are preserved because grafana's pod is untouched. Restoring the per-pod port-forwards is part of the reset since the pods themselves are replaced. Cluster must already be up (`just k8s-up` first).
 k8s-reset:
     #!/usr/bin/env bash
     set -euo pipefail
     kubectl -n replicant rollout restart statefulset/node deployment/prometheus
     kubectl -n replicant rollout status statefulset/node --timeout=180s
     kubectl -n replicant rollout status deployment/prometheus --timeout=60s
-    echo "reset: replicas restarted, Prometheus wiped, Grafana edits preserved."
+
+    # Replicas got new pods, so the existing port-forwards point at gone IPs.
+    # Replace them.
+    n=$(kubectl -n replicant get statefulset/node -o jsonpath='{.spec.replicas}')
+    pkill -f 'kubectl -n replicant port-forward pod/node-' 2>/dev/null || true
+    for i in $(seq 0 $((n-1))); do
+        nohup kubectl -n replicant port-forward "pod/node-$i" "$((50051+i)):50051" >/dev/null 2>&1 &
+        disown
+    done
+    for i in $(seq 0 $((n-1))); do
+        for _ in $(seq 1 50); do
+            (exec 3<>"/dev/tcp/localhost/$((50051+i))") 2>/dev/null && break
+            sleep 0.1
+        done
+    done
+    echo "reset: replicas restarted, Prometheus wiped, Grafana edits preserved, port-forwards re-established."
 
 # Build rustdoc for all crates and open in browser
 docs:
