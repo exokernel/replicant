@@ -61,9 +61,9 @@ struct Args {
     ///
     /// Each external replica must be launched with actor ID `node-N` (matching
     /// the orchestrator's wiring scheme) and the scenario's `node_count` must
-    /// equal the number of entries. Replica state persists across orchestrator
-    /// runs, so this flag is currently restricted to one scenario and one trial
-    /// per invocation; bounce the replicas between runs to reset state.
+    /// equal the number of entries. The runner calls the `Reset` RPC on every
+    /// replica at the start of each trial, so multiple scenarios and trials can
+    /// share a single long-lived stack without the prior run's state leaking in.
     #[arg(long, value_delimiter = ',', value_parser = parse_replica_endpoint)]
     replicas: Vec<ReplicaEndpoint>,
 
@@ -125,20 +125,6 @@ async fn main() -> Result<()> {
             })
             .collect::<Result<_>>()?
     };
-
-    // External replicas keep document state between runs (no reset RPC yet),
-    // so multiple scenarios or trials in one invocation would contaminate
-    // each other's convergence measurements.
-    if !args.replicas.is_empty() {
-        if scenarios.len() != 1 {
-            bail!(
-                "--replicas requires exactly one scenario per invocation; bounce replicas to reset state"
-            );
-        }
-        if args.trials != 1 {
-            bail!("--replicas requires --trials 1 per invocation; bounce replicas to reset state");
-        }
-    }
 
     if matches!(args.output, OutputFormat::Csv) {
         println!(

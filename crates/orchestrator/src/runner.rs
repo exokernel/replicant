@@ -145,6 +145,27 @@ async fn acquire_nodes(
     }
 }
 
+/// Reset every replica back to an empty document with no peer connections.
+///
+/// Issued in parallel so the per-trial overhead is one round-trip's worth of
+/// latency rather than `n × round-trip`. For in-process replicas this is
+/// effectively a no-op; for external (docker/k8s) replicas it replaces what
+/// used to require a full container bounce between trials.
+async fn reset_all(clients: &mut [ReplicaClient<Channel>]) -> Result<()> {
+    let mut set: JoinSet<Result<()>> = JoinSet::new();
+    for client in clients.iter() {
+        let mut c = client.clone();
+        set.spawn(async move {
+            c.reset(Request::new(Empty {})).await?;
+            Ok(())
+        });
+    }
+    while let Some(joined) = set.join_next().await {
+        joined.context("reset task panicked")??;
+    }
+    Ok(())
+}
+
 /// Call `ConnectPeer` for each edge and wait for all streams to be ready.
 ///
 /// Each `ConnectPeer` RPC blocks until the TCP connection and gRPC stream are
@@ -269,6 +290,10 @@ pub async fn run(config: &TopologyConfig, source: NodeSource) -> Result<RunResul
     let mut tasks = JoinSet::new();
     let (endpoints, mut clients) = acquire_nodes(source, n, &mut tasks).await?;
 
+    // Reset before wiring peers so each trial starts from a clean slate even
+    // when the same external stack is reused across many scenarios/trials.
+    reset_all(&mut clients).await?;
+
     let edges = config.connections.edges(n);
     let edge_count = edges.len();
     let topology_kind = config.connections.kind();
@@ -326,6 +351,10 @@ pub async fn run_partition_heal(config: &PartitionConfig, source: NodeSource) ->
     let n = config.node_count;
     let mut tasks = JoinSet::new();
     let (endpoints, mut clients) = acquire_nodes(source, n, &mut tasks).await?;
+
+    // Reset before wiring peers so each trial starts from a clean slate even
+    // when the same external stack is reused across many scenarios/trials.
+    reset_all(&mut clients).await?;
 
     // Wire each group internally and collect those edges for later subtraction.
     let intra: Vec<(usize, usize)> = config
@@ -608,6 +637,124 @@ mod tests {
     }
 
     // ── relay across non-mesh topologies ───────────────────────────────────
+
+    /// `Replica.Reset` over the wire: write, converge, reset, verify the
+    /// fingerprint is empty, then re-wire and write again — proves the second
+    /// trial starts from a clean slate. This is the exact pattern the
+    /// orchestrator runs each time a `--replicas`-mode trial begins.
+    #[tokio::test]
+    async fn reset_clears_state_and_allows_subsequent_run() {
+        let mut tasks = JoinSet::new();
+        let (endpoints, mut clients) = spawn_nodes(2, &mut tasks).await.unwrap();
+        let edges = vec![(0, 1)];
+
+        // Trial 1: write something and converge.
+        connect_edges(&mut clients, &endpoints, &edges)
+            .await
+            .unwrap();
+        for i in 0..5 {
+            map_put(&mut clients[0], &format!("trial1_k{i}"), &format!("v{i}"))
+                .await
+                .unwrap();
+        }
+        wait_for_nodes(
+            &mut clients,
+            &[0, 1],
+            Instant::now(),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+
+        let fp_before = clients[0]
+            .get_state_fingerprint(Request::new(Empty {}))
+            .await
+            .unwrap()
+            .into_inner()
+            .fingerprint;
+        assert!(
+            !fp_before.is_empty(),
+            "fingerprint must be non-empty after writes"
+        );
+
+        // Reset every replica back to empty.
+        reset_all(&mut clients).await.unwrap();
+
+        for (i, client) in clients.iter_mut().enumerate() {
+            let fp = client
+                .get_state_fingerprint(Request::new(Empty {}))
+                .await
+                .unwrap()
+                .into_inner()
+                .fingerprint;
+            assert!(
+                fp.is_empty(),
+                "node {i} fingerprint must be empty after reset"
+            );
+        }
+
+        // Trial 2: re-wire peers (Reset cleared peer_txs) and write *different*
+        // data. Convergence here only succeeds if the previous trial's sync
+        // state was fully discarded — a stale per-peer sync::State would leave
+        // the new handshake stuck or produce a divergent fingerprint.
+        connect_edges(&mut clients, &endpoints, &edges)
+            .await
+            .unwrap();
+        for i in 0..3 {
+            map_put(&mut clients[0], &format!("trial2_k{i}"), &format!("w{i}"))
+                .await
+                .unwrap();
+        }
+        wait_for_nodes(
+            &mut clients,
+            &[0, 1],
+            Instant::now(),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+
+        let fp_after_a = clients[0]
+            .get_state_fingerprint(Request::new(Empty {}))
+            .await
+            .unwrap()
+            .into_inner()
+            .fingerprint;
+        let fp_after_b = clients[1]
+            .get_state_fingerprint(Request::new(Empty {}))
+            .await
+            .unwrap()
+            .into_inner()
+            .fingerprint;
+        assert_eq!(fp_after_a, fp_after_b, "post-reset trial must converge");
+        assert_ne!(
+            fp_after_a, fp_before,
+            "post-reset fingerprint must reflect the new writes, not the prior trial",
+        );
+
+        check_tasks(&mut tasks).unwrap();
+    }
+
+    /// Reset must be safe to call when there are no peer connections and an
+    /// empty document — i.e. the very first trial after `spawn_nodes`. The
+    /// orchestrator unconditionally resets at the start of every trial, so
+    /// this path needs to not deadlock or panic on the no-op case.
+    #[tokio::test]
+    async fn reset_is_noop_on_fresh_replica() {
+        let mut tasks = JoinSet::new();
+        let (_endpoints, mut clients) = spawn_nodes(2, &mut tasks).await.unwrap();
+        reset_all(&mut clients).await.unwrap();
+        for client in clients.iter_mut() {
+            let fp = client
+                .get_state_fingerprint(Request::new(Empty {}))
+                .await
+                .unwrap()
+                .into_inner()
+                .fingerprint;
+            assert!(fp.is_empty());
+        }
+        check_tasks(&mut tasks).unwrap();
+    }
 
     /// Convergence across a 4-node line (0↔1↔2↔3) with all writes at node 0
     /// only succeeds if `recv_loop` relays received state onward — nodes 2

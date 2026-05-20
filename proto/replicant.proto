@@ -9,7 +9,10 @@ service Replica {
   rpc GetHeads            (Empty)      returns (HeadsResponse);
   rpc GetStateFingerprint (Empty)      returns (FingerprintResponse);
   rpc ConnectPeer         (PeerRef)    returns (Empty);
-  rpc Shutdown            (Empty)      returns (Empty);
+  // Drops every peer connection and clears the document back to its initial
+  // empty state. Used by the orchestrator to recycle externally-managed
+  // replicas between trials and scenarios without bouncing the container.
+  rpc Reset               (Empty)      returns (Empty);
 }
 
 // ── Replica ↔ Replica ──────────────────────────────────────────────────────

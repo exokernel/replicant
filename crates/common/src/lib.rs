@@ -220,6 +220,13 @@ pub trait CrdtAdapter: Send + 'static {
 
     /// Process an inbound sync message from `peer`.
     fn sync_receive(&mut self, peer: &str, msg: Vec<u8>) -> anyhow::Result<()>;
+
+    /// Discard all document and per-peer sync state, returning the adapter
+    /// to its initial empty state.
+    ///
+    /// Used by the replica's `Reset` RPC so externally-managed replicas can be
+    /// recycled between trials without bouncing the container.
+    fn reset(&mut self);
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────

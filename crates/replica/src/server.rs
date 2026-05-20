@@ -5,6 +5,7 @@ use std::time::Instant;
 use anyhow::Context as _;
 use opentelemetry::KeyValue;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio_stream::StreamExt as _;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
@@ -35,6 +36,12 @@ pub struct ReplicaState {
     /// Uses `tokio::sync::Mutex` because `flush_to_peers` holds this lock
     /// across `.await` points while sending on each channel.
     peer_txs: tokio::sync::Mutex<HashMap<String, mpsc::Sender<Vec<u8>>>>,
+    /// Join handles for the inbound and outbound sync-stream driver tasks.
+    ///
+    /// Tracked so [`Self::reset`] can `abort` + `await` each task before
+    /// wiping the adapter, ruling out a race where an in-flight `sync_receive`
+    /// from an old peer connection pollutes the freshly-reset document.
+    peer_tasks: tokio::sync::Mutex<Vec<JoinHandle<()>>>,
     metrics: Metrics,
 }
 
@@ -60,6 +67,7 @@ impl ReplicaState {
             actor_id,
             adapter: Mutex::new(Box::new(adapter)),
             peer_txs: tokio::sync::Mutex::new(HashMap::new()),
+            peer_tasks: tokio::sync::Mutex::new(Vec::new()),
             metrics: Metrics::new(&meter),
         })
     }
@@ -161,6 +169,47 @@ impl ReplicaState {
 
     async fn deregister_peer(&self, peer_id: &str) {
         self.peer_txs.lock().await.remove(peer_id);
+    }
+
+    /// Store the join handle for a peer driver task so [`Self::reset`] can
+    /// shut it down deterministically.
+    async fn register_peer_task(&self, handle: JoinHandle<()>) {
+        self.peer_tasks.lock().await.push(handle);
+    }
+
+    /// Drop all peer connections and wipe the document back to its initial
+    /// empty state.
+    ///
+    /// Steps, in order:
+    /// 1. Abort every registered peer driver task and await its completion.
+    ///    Awaiting matters: it guarantees that any `sync_receive` already in
+    ///    flight has returned the adapter mutex before we touch it.
+    /// 2. Clear `peer_txs`. The abort'd tasks' cleanup tails already call
+    ///    `deregister_peer`, so this is idempotent; it covers the case where
+    ///    a task was cancelled before reaching that tail.
+    /// 3. Reset the adapter. Doing this last means any stale `sync_receive`
+    ///    that did land between abort and adapter-lock acquisition is wiped
+    ///    by the subsequent `reset` call.
+    ///
+    /// Callers (the orchestrator) must serialize `reset` with `connect_peer`
+    /// on a given replica — concurrent `connect_peer` during reset would race
+    /// against the peer-task-list drain.
+    pub async fn reset(&self) {
+        let handles: Vec<JoinHandle<()>> = self.peer_tasks.lock().await.drain(..).collect();
+        for h in &handles {
+            h.abort();
+        }
+        for h in handles {
+            // Aborted tasks resolve with a `Cancelled` JoinError; treat that
+            // as a normal exit. Real panics still land in the warn branch.
+            if let Err(e) = h.await
+                && !e.is_cancelled()
+            {
+                tracing::warn!(actor = %self.actor_id, "peer task panicked during reset: {e}");
+            }
+        }
+        self.peer_txs.lock().await.clear();
+        self.adapter.lock().expect("adapter mutex poisoned").reset();
     }
 
     /// Generate and push any pending sync messages to all connected peers.
@@ -269,29 +318,29 @@ impl Replica for ReplicaService {
         // orchestrator's `ConnectPeer` call only returns after the stream is
         // actually usable, removing the need for any post-connect sleep.
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-        let handle = tokio::spawn(connect_to_peer(state, peer_id.clone(), addr, ready_tx));
+        let task_peer_id = peer_id.clone();
+        let task_state = state.clone();
+        // Wrap the driver so its `Result` is logged and the spawned task's
+        // output type is `()` — that lets `reset()` store every peer-task
+        // handle in a single homogeneous Vec and abort/await them uniformly.
+        let handle = tokio::spawn(async move {
+            if let Err(e) = connect_to_peer(task_state, task_peer_id.clone(), addr, ready_tx).await
+            {
+                tracing::error!(peer = %task_peer_id, "sync stream error: {e:#}");
+            }
+        });
+        // Register the handle BEFORE awaiting `ready_rx`. If a concurrent
+        // `reset` aborts the task during setup, `ready_rx` resolves with an
+        // error, which we convert to a clean RPC failure.
+        state.register_peer_task(handle).await;
         ready_rx.await.map_err(|_| {
             Status::internal("connect_to_peer task dropped before signalling ready")
         })?;
-        // Await the handle in a watcher task so errors and panics that occur
-        // after the stream signals ready are logged rather than silently lost
-        // when the handle would otherwise be dropped here.
-        tokio::spawn(async move {
-            match handle.await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => tracing::error!(peer = %peer_id, "sync stream error: {e:#}"),
-                Err(e) => tracing::error!(peer = %peer_id, "sync stream task panicked: {e}"),
-            }
-        });
         Ok(Response::new(proto::Empty {}))
     }
 
-    async fn shutdown(&self, _: Request<proto::Empty>) -> Result<Response<proto::Empty>, Status> {
-        // Graceful per-replica shutdown is not yet implemented. In the current
-        // in-process model the orchestrator tears everything down by dropping
-        // the process, which triggers provider.shutdown() and flushes OTel.
-        // Warn so a future caller relying on this RPC sees that it is a no-op.
-        tracing::warn!(actor = %self.state.actor_id, "shutdown RPC is a no-op");
+    async fn reset(&self, _: Request<proto::Empty>) -> Result<Response<proto::Empty>, Status> {
+        self.state.reset().await;
         Ok(Response::new(proto::Empty {}))
     }
 }
@@ -334,7 +383,10 @@ impl Sync for SyncService {
 
         let state = self.state.clone();
         let inbound = request.into_inner();
-        tokio::spawn(recv_loop(state, peer_id, inbound, raw_tx));
+        let handle = tokio::spawn(recv_loop(state.clone(), peer_id, inbound, raw_tx));
+        // Track the handle so `reset()` can shut this driver down with the
+        // outbound peers' drivers uniformly.
+        state.register_peer_task(handle).await;
 
         // grpc_rx is the outbound wire stream; tonic drains it and sends each
         // message back to the calling peer over the open HTTP/2 connection.

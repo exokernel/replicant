@@ -170,6 +170,10 @@ impl CrdtAdapter for AutomergeAdapter {
         self.doc.sync().receive_sync_message(state, decoded)?;
         Ok(())
     }
+
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
 }
 
 #[cfg(test)]
@@ -398,6 +402,80 @@ mod tests {
 
         assert_eq!(a.state_fingerprint(), b.state_fingerprint());
         assert_eq!(b.state_fingerprint(), c.state_fingerprint());
+    }
+
+    #[test]
+    fn reset_clears_doc_and_sync_state() {
+        // Reset returns the adapter to its initial empty state: heads/
+        // fingerprint go back to empty, doc_size matches a fresh adapter,
+        // and any per-peer sync::State entries are dropped (so sync_generate
+        // produces a fresh handshake message rather than continuing an
+        // already-quiesced conversation).
+        let mut a = AutomergeAdapter::new();
+        a.apply_op(&map_put("doc", "k", "v")).unwrap();
+        // Populate sync_states for a peer so the reset has something to clear.
+        let initial_msg = a.sync_generate("peer-x");
+        assert!(
+            initial_msg.is_some(),
+            "fresh adapter should send a handshake"
+        );
+        let fresh_size = AutomergeAdapter::new().doc_size_bytes();
+        assert!(!a.get_heads().is_empty());
+        assert!(
+            a.doc_size_bytes() > fresh_size,
+            "doc must have grown after a write"
+        );
+
+        a.reset();
+
+        assert!(a.get_heads().is_empty(), "heads not cleared by reset");
+        assert!(
+            a.state_fingerprint().is_empty(),
+            "fingerprint not cleared by reset"
+        );
+        assert_eq!(
+            a.doc_size_bytes(),
+            fresh_size,
+            "doc not reset to empty size"
+        );
+        // A new sync conversation against the same peer-id should start from
+        // scratch — if sync_states leaked across reset, the second call would
+        // observe quiescence and return None.
+        assert!(
+            a.sync_generate("peer-x").is_some(),
+            "reset must drop per-peer sync state"
+        );
+    }
+
+    #[test]
+    fn reset_allows_clean_re_sync_to_another_replica() {
+        // End-to-end at the adapter layer: a writes, syncs with b, reset both,
+        // a writes different data, sync, and both converge on the new state
+        // alone — proving the old DAG is gone, not merely hidden.
+        let mut a = AutomergeAdapter::new();
+        let mut b = AutomergeAdapter::new();
+        a.apply_op(&map_put("doc", "before", "old")).unwrap();
+        sync_until_quiescent(&mut a, "a", &mut b, "b");
+        assert_eq!(a.state_fingerprint(), b.state_fingerprint());
+
+        a.reset();
+        b.reset();
+        assert!(a.state_fingerprint().is_empty());
+        assert!(b.state_fingerprint().is_empty());
+
+        a.apply_op(&map_put("doc", "after", "new")).unwrap();
+        sync_until_quiescent(&mut a, "a", &mut b, "b");
+        assert_eq!(a.state_fingerprint(), b.state_fingerprint());
+        // The fresh post-reset doc must match a from-scratch baseline that
+        // only ever saw the "after" write — i.e. the size profile is that
+        // of a one-write document, not a two-write one.
+        let mut baseline = AutomergeAdapter::new();
+        baseline.apply_op(&map_put("doc", "after", "new")).unwrap();
+        assert_eq!(
+            a.doc_size_bytes(),
+            baseline.doc_size_bytes(),
+            "post-reset doc size differs from a from-scratch single-write doc"
+        );
     }
 
     #[test]
