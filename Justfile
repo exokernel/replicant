@@ -69,7 +69,7 @@ smoke-docker scenario='scenarios/full-mesh-n5.toml':
     done
     cargo run --release --bin orchestrator -- --replicas "$replicas" "$scenario"
 
-# Multi-trial docker benchmark: bring up a stack sized to the scenarios' shared node_count, run every scenario × `trials` against that one stack (Reset between trials), redirect stdout to results/results-docker.csv for notebook analysis, tear down. All scenarios must share node_count because the stack is fixed-size. Pass scenarios as a space-separated string. Exclusive of `just docker-up`/`just docker-down` (owns the stack lifecycle).
+# Multi-trial docker benchmark: groups scenarios by node_count, brings up a docker stack sized to each group's N (Reset between trials within a group), and concatenates per-group CSVs into results/results-docker.csv for notebook analysis. Single-N callers (e.g. `scenarios/*-n5*.toml`) get one stack up/down; mixed-N callers (e.g. `scenarios/*.toml`) get one stack per distinct N. Pass scenarios as a space-separated string. Exclusive of `just docker-up`/`just docker-down` (owns the stack lifecycle).
 bench-docker scenarios='scenarios/full-mesh-n5.toml' trials='10':
     #!/usr/bin/env bash
     set -euo pipefail
@@ -77,37 +77,53 @@ bench-docker scenarios='scenarios/full-mesh-n5.toml' trials='10':
     trials='{{trials}}'
     out='results/results-docker.csv'
 
-    # Validate all scenarios share node_count — the stack can only have one N.
-    n=''
+    # Validate scenarios exist and bucket them by node_count.
+    declare -A by_n
     for s in $scenarios; do
         [ -f "$s" ] || { echo "error: scenario file not found: $s" >&2; exit 1; }
         sn=$(grep -oP 'node_count\s*=\s*\K\d+' "$s" | head -1)
         if [ -z "$sn" ]; then echo "error: no node_count in $s" >&2; exit 1; fi
-        if [ -z "$n" ]; then
-            n="$sn"
-        elif [ "$n" != "$sn" ]; then
-            echo "error: $s has node_count=$sn but earlier scenarios have node_count=$n; all scenarios in one bench run must share node_count" >&2
-            exit 1
-        fi
+        by_n[$sn]+="$s "
     done
+    # Sort distinct N's numerically so the output CSV row order is deterministic.
+    ns=($(printf '%s\n' "${!by_n[@]}" | sort -n))
 
     py=$([ -x .venv/bin/python3 ] && echo .venv/bin/python3 || echo python3)
-    "$py" deploy/docker/gen-compose.py "$n" > deploy/docker/compose.generated.yaml
-
     compose='docker compose -f deploy/docker/compose.generated.yaml'
-    $compose up -d --build
-    trap "$compose down" EXIT
-
-    replicas=""
-    for i in $(seq 0 $((n-1))); do
-        [ -n "$replicas" ] && replicas="${replicas},"
-        replicas="${replicas}localhost:$((50051+i))=replica-${i}:50051"
-    done
+    # Latest compose.generated.yaml is what the trap targets — `down` is
+    # idempotent if no stack matches, so this is safe at any point in the loop.
+    trap '$compose down 2>/dev/null || true' EXIT
 
     mkdir -p results
-    # $scenarios is intentionally unquoted so the shell splits on whitespace.
-    cargo run --release --bin orchestrator -- --trials "$trials" --replicas "$replicas" $scenarios > "$out"
-    echo "wrote $out"
+    : > "$out"  # start clean — bench runs are not additive across invocations
+    header_written=0
+
+    for n in "${ns[@]}"; do
+        echo ">>> bench-docker: N=$n, scenarios:${by_n[$n]}" >&2
+        "$py" deploy/docker/gen-compose.py "$n" > deploy/docker/compose.generated.yaml
+        $compose up -d --build
+
+        replicas=""
+        for i in $(seq 0 $((n-1))); do
+            [ -n "$replicas" ] && replicas="${replicas},"
+            replicas="${replicas}localhost:$((50051+i))=replica-${i}:50051"
+        done
+
+        tmpcsv=$(mktemp)
+        # ${by_n[$n]} intentionally unquoted so the shell splits on whitespace.
+        cargo run --release --bin orchestrator -- --trials "$trials" --replicas "$replicas" ${by_n[$n]} > "$tmpcsv"
+        if [ "$header_written" = "0" ]; then
+            cat "$tmpcsv" >> "$out"
+            header_written=1
+        else
+            tail -n +2 "$tmpcsv" >> "$out"
+        fi
+        rm "$tmpcsv"
+
+        $compose down
+    done
+
+    echo "wrote $out (${#ns[@]} node-count groups)"
 
 # End-to-end kind verification: parse N from the scenario's node_count, build the image, spin up the kind cluster (named `replicant`), apply manifests and scale the StatefulSet to N, port-forward N pods, run one trial of the scenario, tear the cluster down. Output goes to the terminal — this proves the deployment plumbing works, it is NOT for analysis. For multi-trial sweeps that produce a notebook-readable CSV, use `just bench-k8s`. Not in `just ci` (needs docker + kind). Set KEEP_KIND=1 to preserve the cluster after the run for debugging. If the cluster already exists (e.g. from `just k8s-up`), this recipe reuses it and does NOT delete it on exit — only clusters it created itself are torn down.
 smoke-k8s scenario='scenarios/full-mesh-n5.toml':
@@ -175,7 +191,7 @@ smoke-k8s scenario='scenarios/full-mesh-n5.toml':
     done
     cargo run --release --bin orchestrator -- --replicas "$replicas" "$scenario"
 
-# Multi-trial kind benchmark: bring up the kind cluster sized to the scenarios' shared node_count, run every scenario × `trials` against that one cluster (Reset between trials), redirect stdout to results/results-k8s.csv for notebook analysis, tear down (unless KEEP_KIND=1 or the cluster was already up). All scenarios must share node_count because the StatefulSet is fixed-size in one run. Pass scenarios as a space-separated string. Exclusive of `just k8s-up`/`just k8s-down` (owns the cluster lifecycle).
+# Multi-trial kind benchmark: groups scenarios by node_count, rescales the kind StatefulSet to each group's N (Reset between trials within a group), and concatenates per-group CSVs into results/results-k8s.csv for notebook analysis. The kind cluster, image, and manifests are shared across all groups — only the StatefulSet replica count and port-forwards change between groups. Set KEEP_KIND=1 to preserve the cluster after the run; if the cluster was already up it is preserved automatically. Exclusive of `just k8s-up`/`just k8s-down` (owns the cluster lifecycle).
 bench-k8s scenarios='scenarios/full-mesh-n5.toml' trials='10':
     #!/usr/bin/env bash
     set -euo pipefail
@@ -185,19 +201,15 @@ bench-k8s scenarios='scenarios/full-mesh-n5.toml' trials='10':
     cluster=replicant
     img=replicant-replica:dev
 
-    # Validate all scenarios share node_count — the cluster can only have one N.
-    n=''
+    # Validate scenarios exist and bucket them by node_count.
+    declare -A by_n
     for s in $scenarios; do
         [ -f "$s" ] || { echo "error: scenario file not found: $s" >&2; exit 1; }
         sn=$(grep -oP 'node_count\s*=\s*\K\d+' "$s" | head -1)
         if [ -z "$sn" ]; then echo "error: no node_count in $s" >&2; exit 1; fi
-        if [ -z "$n" ]; then
-            n="$sn"
-        elif [ "$n" != "$sn" ]; then
-            echo "error: $s has node_count=$sn but earlier scenarios have node_count=$n; all scenarios in one bench run must share node_count" >&2
-            exit 1
-        fi
+        by_n[$sn]+="$s "
     done
+    ns=($(printf '%s\n' "${!by_n[@]}" | sort -n))
 
     docker build -t "$img" .
 
@@ -206,8 +218,9 @@ bench-k8s scenarios='scenarios/full-mesh-n5.toml' trials='10':
         kind create cluster --name "$cluster"
         created_by_me=1
     fi
+    pids=()
     cleanup() {
-        if [ "${pids+x}" = x ]; then kill "${pids[@]}" 2>/dev/null || true; fi
+        if [ "${#pids[@]}" -gt 0 ]; then kill "${pids[@]}" 2>/dev/null || true; fi
         if [ "$created_by_me" = "1" ] && [ "${KEEP_KIND:-0}" != "1" ]; then
             kind delete cluster --name "$cluster" >/dev/null 2>&1 || true
         fi
@@ -216,35 +229,60 @@ bench-k8s scenarios='scenarios/full-mesh-n5.toml' trials='10':
 
     kind load docker-image "$img" --name "$cluster"
 
+    # One-time manifest apply — the StatefulSet is rescaled per group below.
     kubectl kustomize --load-restrictor=LoadRestrictionsNone deploy/k8s/overlays/kind | kubectl apply -f -
-    kubectl -n replicant scale statefulset/node --replicas="$n"
-    kubectl -n replicant rollout status statefulset/node --timeout=180s
     kubectl -n replicant rollout status deployment/otel-collector --timeout=60s
     kubectl -n replicant rollout status deployment/prometheus --timeout=60s
     kubectl -n replicant rollout status deployment/grafana --timeout=60s
 
-    pids=()
-    for i in $(seq 0 $((n-1))); do
-        kubectl -n replicant port-forward "pod/node-$i" "$((50051+i)):50051" \
-            >/dev/null 2>&1 &
-        pids+=($!)
-    done
-    for i in $(seq 0 $((n-1))); do
-        until (exec 3<>"/dev/tcp/localhost/$((50051+i))") 2>/dev/null; do
-            sleep 0.2
-        done
-    done
-
-    replicas=""
-    for i in $(seq 0 $((n-1))); do
-        [ -n "$replicas" ] && replicas="${replicas},"
-        replicas="${replicas}localhost:$((50051+i))=node-${i}.node:50051"
-    done
-
     mkdir -p results
-    # $scenarios is intentionally unquoted so the shell splits on whitespace.
-    cargo run --release --bin orchestrator -- --trials "$trials" --replicas "$replicas" $scenarios > "$out"
-    echo "wrote $out"
+    : > "$out"  # start clean — bench runs are not additive across invocations
+    header_written=0
+
+    for n in "${ns[@]}"; do
+        echo ">>> bench-k8s: N=$n, scenarios:${by_n[$n]}" >&2
+
+        # Tear down stale port-forwards from the previous group before rescaling
+        # (some of the pods they target may be about to be terminated).
+        if [ "${#pids[@]}" -gt 0 ]; then
+            kill "${pids[@]}" 2>/dev/null || true
+            wait "${pids[@]}" 2>/dev/null || true
+            pids=()
+        fi
+
+        kubectl -n replicant scale statefulset/node --replicas="$n"
+        kubectl -n replicant rollout status statefulset/node --timeout=180s
+
+        for i in $(seq 0 $((n-1))); do
+            kubectl -n replicant port-forward "pod/node-$i" "$((50051+i)):50051" \
+                >/dev/null 2>&1 &
+            pids+=($!)
+        done
+        for i in $(seq 0 $((n-1))); do
+            until (exec 3<>"/dev/tcp/localhost/$((50051+i))") 2>/dev/null; do
+                sleep 0.2
+            done
+        done
+
+        replicas=""
+        for i in $(seq 0 $((n-1))); do
+            [ -n "$replicas" ] && replicas="${replicas},"
+            replicas="${replicas}localhost:$((50051+i))=node-${i}.node:50051"
+        done
+
+        tmpcsv=$(mktemp)
+        # ${by_n[$n]} intentionally unquoted so the shell splits on whitespace.
+        cargo run --release --bin orchestrator -- --trials "$trials" --replicas "$replicas" ${by_n[$n]} > "$tmpcsv"
+        if [ "$header_written" = "0" ]; then
+            cat "$tmpcsv" >> "$out"
+            header_written=1
+        else
+            tail -n +2 "$tmpcsv" >> "$out"
+        fi
+        rm "$tmpcsv"
+    done
+
+    echo "wrote $out (${#ns[@]} node-count groups)"
 
 # Bring up the docker compose stack sized for the given scenario and leave it running. Use when you want to inspect Prometheus (http://localhost:9090) while iterating, or run many scenarios against the same stack. Pair with `just docker-down` to tear down. Idempotent: re-running regenerates the compose file from the new scenario and `docker compose up -d` reconciles.
 docker-up scenario='scenarios/full-mesh-n5.toml':
