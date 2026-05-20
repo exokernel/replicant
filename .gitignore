@@ -1,5 +1,6 @@
 /target
 .obsidian/
+.claude/
 NEXT_SESSION.md
 /results/
 analysis/figures/
