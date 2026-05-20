@@ -10,7 +10,7 @@ Ordered roughly by impact on the thesis (highest first).
 The `CrdtAdapter` trait is the thesis contribution; it has exactly one implementation (Automerge). Until a second backend (Yjs, Loro, or Diamond Types) lands, the abstraction is unproven — we can't claim it generalizes. The trait may need revision to fit a second CRDT's sync model.
 
 ### Statistical rigor in the analysis
-The notebook reports CV and p50/p95 but does no confidence intervals, hypothesis tests, or warm-up handling. The "edges drive convergence, not diameter" finding is the strongest empirical claim — it'd benefit from a methodology paragraph and CI bands on the convergence-vs-N plots.
+The notebook reports CV and p50/p95 but does no confidence intervals, hypothesis tests, or warm-up handling. The "edges drive convergence, not diameter" observation is the most prominent pattern in the data so far — if we ever do want to elevate it from a description to a defensible claim, that would need a methodology paragraph and CI bands on the convergence-vs-N plots.
 
 ### Reproducibility metadata in the CSV
 Results CSV records `convergence_ms` but not the replicant commit hash, host OS/kernel, container runtime, or hardware. Six months on, "what produced figure 4.3?" should be answerable from the artifact alone. Easiest path: extend the orchestrator to emit a leading comment row or a sidecar `results-{source}.meta.json`.
@@ -40,4 +40,4 @@ The current `convergence.ipynb` is doing four jobs (CSV analysis, OTel JSON inge
 
 ---
 
-**Verdict:** the framework's bones can absorb everything in this list as additive work — no item requires redesigning what's there. Order matters though: deferring the second-backend or statistical-rigor items narrows the thesis claim, while deferring multi-host or workload-diversity items only narrows the empirical breadth.
+**Verdict:** the framework's bones can absorb everything in this list as additive work — no item requires redesigning what's there. Order matters though: deferring the second-backend or statistical-rigor items narrows what the framework can credibly claim to contribute, while deferring multi-host or workload-diversity items only narrows the empirical breadth.
