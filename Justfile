@@ -90,9 +90,20 @@ bench-docker scenarios='scenarios/full-mesh-n5.toml' trials='10':
 
     py=$([ -x .venv/bin/python3 ] && echo .venv/bin/python3 || echo python3)
     compose='docker compose -f deploy/docker/compose.generated.yaml'
-    # Latest compose.generated.yaml is what the trap targets — `down` is
-    # idempotent if no stack matches, so this is safe at any point in the loop.
-    trap '$compose down 2>/dev/null || true' EXIT
+    # `--remove-orphans` makes the recipe self-healing against stragglers
+    # from a previously-interrupted run (same project name) — without it, a
+    # leaked replica-N container from a prior bench would hold port 50051+N
+    # and the next `up` would fail with "address already in use". The trap
+    # uses the same flag for the same reason.
+    trap '$compose down --remove-orphans 2>/dev/null || true' EXIT
+
+    # Defensive pre-loop sweep: if a previous bench-docker invocation
+    # crashed mid-run (e.g. orchestrator failure before the loop's own
+    # `down`), this clears any leftover containers tied to the same
+    # compose file before the first `up`.
+    if [ -f deploy/docker/compose.generated.yaml ]; then
+        $compose down --remove-orphans 2>/dev/null || true
+    fi
 
     mkdir -p results
     : > "$out"  # start clean — bench runs are not additive across invocations
@@ -101,7 +112,7 @@ bench-docker scenarios='scenarios/full-mesh-n5.toml' trials='10':
     for n in "${ns[@]}"; do
         echo ">>> bench-docker: N=$n, scenarios:${by_n[$n]}" >&2
         "$py" deploy/docker/gen-compose.py "$n" > deploy/docker/compose.generated.yaml
-        $compose up -d --build
+        $compose up -d --build --remove-orphans
 
         replicas=""
         for i in $(seq 0 $((n-1))); do
@@ -120,7 +131,7 @@ bench-docker scenarios='scenarios/full-mesh-n5.toml' trials='10':
         fi
         rm "$tmpcsv"
 
-        $compose down
+        $compose down --remove-orphans
     done
 
     echo "wrote $out (${#ns[@]} node-count groups)"
