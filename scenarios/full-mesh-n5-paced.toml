@@ -5,4 +5,4 @@ node_count = 5
 connections = "full_mesh"
 write_pattern = "round_robin"
 op_count = 10
-op_interval_ms = 500
+op_interval_ms = 1
