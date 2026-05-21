@@ -15,6 +15,8 @@
 
 A CRDT benchmarking framework built on [Automerge](https://automerge.org/) and gRPC. Replicant spins up replica nodes, drives sync workloads between them, and collects latency/throughput metrics via OpenTelemetry.
 
+> **Status: work in progress.** Replicant is an early-stage research framework. Any specific numbers or patterns surfaced by the notebooks are descriptions of what one or two sweeps produced on a single host — not claims about CRDT performance in general. Treat figures as illustrative; see [TODO.md](TODO.md) for the framework gaps (second CRDT backend, statistical rigor, reproducibility metadata, multi-host) that need to land before any of it would be defensible as more than that.
+
 ## Crates
 
 | Crate | Role |
@@ -234,8 +236,6 @@ graph LR
         S0 --- S3((3))
     end
 ```
-
-> **Headline finding** (Phase D, release build, 10 trials): diameter alone does **not** predict convergence. Full-mesh-n10 (diameter 1, 45 edges) is the *slowest* at ~42 ms/op; line-n10 (diameter 9, 9 edges) is the *fastest* at ~9 ms/op. Convergence ≈ f(edge_count, max_degree, write_pattern) ≫ f(diameter). See the notebook's "Convergence vs diameter" and "Sync traffic per write op" sections.
 
 ### Partition-heal topology
 
