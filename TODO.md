@@ -4,6 +4,12 @@ Identified 2026-05-20 during an early-stage architecture review. The framework's
 
 Ordered roughly by impact on the thesis (highest first).
 
+> **2026-07-13 update:** thesis reframed around an RQ (offline-divergence
+> sweep across Automerge/Yrs/Loro — see NEXT_SESSION.md "Thesis direction
+> pivot"). This puts **Second CRDT backend** and **Workload diversity**
+> on the critical path (both are discharged by the pilot); **Multi-host
+> testbed** (Phase G) is parked behind the pilot.
+
 ## High-impact — validates the contribution claim
 
 ### Second CRDT backend
