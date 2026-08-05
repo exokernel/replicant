@@ -1,0 +1,8 @@
+name = "full-mesh-n2-text"
+
+[topology]
+node_count = 2
+connections = "full_mesh"
+write_pattern = "round_robin"
+workload = "text_splice"
+op_count = 2

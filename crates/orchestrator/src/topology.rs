@@ -72,6 +72,21 @@ pub enum WritePattern {
     RoundRobin,
 }
 
+/// The kind of CRDT operation each write applies.
+///
+/// Defaults to `MapPut` so every pre-existing scenario TOML — which omits the
+/// field — keeps its original map-put behaviour. `TextSplice` exercises the
+/// sequence-CRDT path (Automerge `splice_text`), the workload RQ-1 measures.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Workload {
+    /// Each write is a `MapPut` on the root map (historical behaviour).
+    #[default]
+    MapPut,
+    /// Each write is a `TextSplice` on a named text object under root.
+    TextSplice,
+}
+
 /// Post-heal wiring for a partition-heal scenario.
 ///
 /// Selects how the partition is repaired in phase 2. `FullMesh` reconnects
@@ -276,7 +291,11 @@ pub struct TopologyConfig {
     pub connections: Connections,
     /// How to distribute write ops across nodes.
     pub write_pattern: WritePattern,
-    /// Total `MapPut` ops to apply.
+    /// Which CRDT op each write applies. Defaults to `MapPut` so existing
+    /// scenario TOMLs that omit the field are unchanged.
+    #[serde(default)]
+    pub workload: Workload,
+    /// Total ops to apply.
     pub op_count: usize,
     /// Delay between successive op submissions, in milliseconds. `0` (the
     /// default) means burst as fast as possible — the historical behaviour
@@ -310,6 +329,10 @@ pub struct PartitionConfig {
     pub ops_per_group: usize,
     /// Write distribution within each group.
     pub write_pattern: WritePattern,
+    /// Which CRDT op each write applies. Defaults to `MapPut` so existing
+    /// scenario TOMLs that omit the field are unchanged.
+    #[serde(default)]
+    pub workload: Workload,
     /// Wiring added on heal. Defaults to `FullMesh` so pre-existing TOML
     /// scenarios that omit the field keep their original behaviour.
     #[serde(default)]
@@ -411,6 +434,7 @@ pub fn builtin_scenarios() -> Vec<ScenarioFile> {
                 node_count: 2,
                 connections: Connections::FullMesh,
                 write_pattern: WritePattern::RoundRobin,
+                workload: Workload::MapPut,
                 op_count: 2,
                 op_interval_ms: 0,
             }),
@@ -421,6 +445,7 @@ pub fn builtin_scenarios() -> Vec<ScenarioFile> {
                 node_count: 3,
                 connections: Connections::FullMesh,
                 write_pattern: WritePattern::RoundRobin,
+                workload: Workload::MapPut,
                 op_count: 6,
                 op_interval_ms: 0,
             }),
@@ -432,6 +457,7 @@ pub fn builtin_scenarios() -> Vec<ScenarioFile> {
                 groups: vec![Group { nodes: vec![0, 1] }, Group { nodes: vec![2, 3] }],
                 ops_per_group: 4,
                 write_pattern: WritePattern::RoundRobin,
+                workload: Workload::MapPut,
                 heal_topology: HealTopology::FullMesh,
             }),
         },
@@ -450,6 +476,7 @@ mod tests {
             groups: groups.into_iter().map(|nodes| Group { nodes }).collect(),
             ops_per_group: 1,
             write_pattern: WritePattern::RoundRobin,
+            workload: Workload::MapPut,
             heal_topology: HealTopology::FullMesh,
         }
     }
@@ -494,6 +521,7 @@ mod tests {
                 node_count: 5,
                 connections: Connections::FullMesh,
                 write_pattern: WritePattern::RoundRobin,
+                workload: Workload::MapPut,
                 op_count: 1,
                 op_interval_ms: 0,
             }),
@@ -510,6 +538,7 @@ mod tests {
                 groups: vec![Group { nodes: vec![0, 1] }, Group { nodes: vec![2, 3] }],
                 ops_per_group: 2,
                 write_pattern: WritePattern::RoundRobin,
+                workload: Workload::MapPut,
                 heal_topology: HealTopology::FullMesh,
             }),
         };
@@ -898,6 +927,7 @@ mod tests {
                 edges: vec![(0, 1)],
             },
             write_pattern: WritePattern::RoundRobin,
+            workload: Workload::MapPut,
             op_count: 1,
             op_interval_ms: 0,
         };

@@ -9,14 +9,16 @@ use tonic::Request;
 use tonic::transport::{Channel, Server};
 
 use common::proto::{
-    Empty, MapPut, OpRequest, PeerRef, ScalarValue, op_request, replica_client::ReplicaClient,
-    replica_server::ReplicaServer, scalar_value, sync_server::SyncServer,
+    Empty, MapPut, OpRequest, PeerRef, ScalarValue, TextSplice, op_request,
+    replica_client::ReplicaClient, replica_server::ReplicaServer, scalar_value,
+    sync_server::SyncServer,
 };
 use replica::adapter::AutomergeAdapter;
 use replica::server::{ReplicaService, ReplicaState, SyncService};
 
 use crate::topology::{
-    Connections, Group, HealTopology, PartitionConfig, RunResult, TopologyConfig, WritePattern,
+    Connections, Group, HealTopology, PartitionConfig, RunResult, TopologyConfig, Workload,
+    WritePattern,
 };
 
 // ── Replica endpoints ──────────────────────────────────────────────────────
@@ -205,6 +207,47 @@ async fn map_put(client: &mut ReplicaClient<Channel>, key: &str, val: &str) -> R
     Ok(())
 }
 
+/// Apply a single `TextSplice` on the named text object under root.
+///
+/// `pos = 0` (prepend) is always a valid splice position regardless of the
+/// replica's current text length, so it stays valid under any write pattern
+/// without the orchestrator tracking per-node document length. Phase 1's
+/// generator replaces this fixed anchor with the swept locality rule.
+async fn text_splice(
+    client: &mut ReplicaClient<Channel>,
+    obj: &str,
+    pos: usize,
+    insert: &str,
+) -> Result<()> {
+    client
+        .apply_op(Request::new(OpRequest {
+            op: Some(op_request::Op::TextSplice(TextSplice {
+                obj: obj.to_owned(),
+                pos: pos as u64,
+                del_count: 0,
+                insert: insert.to_owned(),
+            })),
+        }))
+        .await?;
+    Ok(())
+}
+
+/// Apply write number `seq` to `client` under the configured `workload`.
+///
+/// `seq` disambiguates `MapPut` keys; the text workload ignores it (each op is
+/// a fixed-anchor prepend of one filler character — content is merge-cost
+/// irrelevant, only position and op shape matter).
+async fn apply_write(
+    client: &mut ReplicaClient<Channel>,
+    workload: Workload,
+    seq: usize,
+) -> Result<()> {
+    match workload {
+        Workload::MapPut => map_put(client, &format!("k{seq}"), &format!("v{seq}")).await,
+        Workload::TextSplice => text_splice(client, "text", 0, "x").await,
+    }
+}
+
 /// Poll nodes at `indices` until all have equal, non-empty fingerprints.
 ///
 /// Returns fractional ms from `start` to convergence.
@@ -308,7 +351,7 @@ pub async fn run(config: &TopologyConfig, source: NodeSource) -> Result<RunResul
     let measure_start = Instant::now();
     for i in 0..config.op_count {
         let target = target_node(&config.write_pattern, i, &all_nodes);
-        map_put(&mut clients[target], &format!("k{i}"), &format!("v{i}")).await?;
+        apply_write(&mut clients[target], config.workload, i).await?;
         // Pace between op submissions only — sleeping after the last op would
         // just delay wait_for_nodes' first poll and inflate convergence_ms
         // beyond what the pacing semantics imply.
@@ -370,12 +413,7 @@ pub async fn run_partition_heal(config: &PartitionConfig, source: NodeSource) ->
     for group in &config.groups {
         for i in 0..config.ops_per_group {
             let target = target_node(&config.write_pattern, i, &group.nodes);
-            map_put(
-                &mut clients[target],
-                &format!("k{op_idx}"),
-                &format!("v{op_idx}"),
-            )
-            .await?;
+            apply_write(&mut clients[target], config.workload, op_idx).await?;
             op_idx += 1;
         }
     }
