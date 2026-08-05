@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -17,8 +17,8 @@ use replica::adapter::AutomergeAdapter;
 use replica::server::{ReplicaService, ReplicaState, SyncService};
 
 use crate::topology::{
-    Connections, Group, HealTopology, PartitionConfig, RunResult, TopologyConfig, Workload,
-    WritePattern,
+    Connections, Group, HealTopology, PartitionConfig, RunResult, SplitMix64, TopologyConfig,
+    Workload, WritePattern,
 };
 
 // ── Replica endpoints ──────────────────────────────────────────────────────
@@ -232,6 +232,26 @@ async fn text_splice(
     Ok(())
 }
 
+/// Fixed base for divergence-sweep seeds. Recorded (as this constant) so a
+/// cell's op streams are reproducible; the per-replica seed folds in the cell
+/// parameters, the node index, and the repetition so every stream is distinct.
+const DIVERGENCE_SEED_BASE: u64 = 0x5EED_D1F5_0FF5_E7A1;
+
+/// Derive the deterministic per-replica PRNG seed for one repetition of a cell.
+///
+/// `seed = f(cell, replica_id, repetition)`: distinct replicas, cells, and
+/// repetitions get independent streams, while identical inputs always replay
+/// the same stream (the reproducibility guarantee the sweep records). The
+/// mixed value is passed through one SplitMix64 round to avalanche the fields.
+fn seed_for(config: &PartitionConfig, node: usize, repetition: usize) -> u64 {
+    let mixed = DIVERGENCE_SEED_BASE
+        ^ (config.ops_per_group as u64).wrapping_mul(0x1_0000_0001)
+        ^ ((config.locality as u64) << 3)
+        ^ ((node as u64) << 32)
+        ^ (repetition as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    SplitMix64::new(mixed).next_u64()
+}
+
 /// Apply write number `seq` to `client` under the configured `workload`.
 ///
 /// `seq` disambiguates `MapPut` keys; the text workload ignores it (each op is
@@ -388,7 +408,11 @@ pub async fn run(config: &TopologyConfig, source: NodeSource) -> Result<RunResul
 /// Phase 1: each group connects internally and writes independently.
 /// Phase 2 (heal): remaining cross-group edges are added; time from heal
 /// trigger to global convergence is returned.
-pub async fn run_partition_heal(config: &PartitionConfig, source: NodeSource) -> Result<RunResult> {
+pub async fn run_partition_heal(
+    config: &PartitionConfig,
+    source: NodeSource,
+    repetition: usize,
+) -> Result<RunResult> {
     config.validate()?;
 
     let n = config.node_count;
@@ -408,12 +432,42 @@ pub async fn run_partition_heal(config: &PartitionConfig, source: NodeSource) ->
     connect_edges(&mut clients, &endpoints, &intra).await?;
     check_tasks(&mut tasks)?;
 
-    // Apply ops to each group; keys are globally unique across groups.
+    // Apply ops to each group independently (the offline-divergence phase).
+    //
+    // For `MapPut`, keys are globally unique across groups (`op_idx`). For
+    // `TextSplice`, each op's position is drawn *operationally* against the
+    // issuing replica's own simulated text length via a per-replica seeded
+    // PRNG (`seed = f(cell, replica, repetition)`), so positions are always
+    // valid and the two sides diverge independently. During the partition a
+    // replica's document only grows from ops sent directly to it, so the
+    // per-target length counter equals its real text length for the singleton
+    // groups the divergence-n2 family uses; for multi-node groups it may
+    // under-count (peers' synced ops), but the drawn position stays `<= len`
+    // and therefore a valid anchor.
     let mut op_idx = 0;
+    // Per physical node: (seeded PRNG, simulated text length).
+    let mut gen_state: HashMap<usize, (SplitMix64, usize)> = HashMap::new();
     for group in &config.groups {
         for i in 0..config.ops_per_group {
             let target = target_node(&config.write_pattern, i, &group.nodes);
-            apply_write(&mut clients[target], config.workload, op_idx).await?;
+            match config.workload {
+                Workload::MapPut => {
+                    map_put(
+                        &mut clients[target],
+                        &format!("k{op_idx}"),
+                        &format!("v{op_idx}"),
+                    )
+                    .await?;
+                }
+                Workload::TextSplice => {
+                    let state = gen_state.entry(target).or_insert_with(|| {
+                        (SplitMix64::new(seed_for(config, target, repetition)), 0)
+                    });
+                    let pos = config.locality.draw_pos(&mut state.0, state.1);
+                    state.1 += 1;
+                    text_splice(&mut clients[target], "text", pos, "x").await?;
+                }
+            }
             op_idx += 1;
         }
     }
@@ -826,5 +880,43 @@ mod tests {
         .await
         .unwrap();
         check_tasks(&mut tasks).unwrap();
+    }
+
+    // ── seed_for (divergence generator) ────────────────────────────────────
+
+    fn text_cfg(ops: usize, locality: &str) -> PartitionConfig {
+        toml::from_str(&format!(
+            "node_count = 2\n\
+             write_pattern = \"concentrated\"\n\
+             workload = \"text_splice\"\n\
+             locality = \"{locality}\"\n\
+             ops_per_group = {ops}\n\
+             groups = [{{ nodes = [0] }}, {{ nodes = [1] }}]"
+        ))
+        .expect("valid partition config")
+    }
+
+    #[test]
+    fn seed_for_is_deterministic() {
+        let c = text_cfg(100, "random_position");
+        assert_eq!(seed_for(&c, 0, 1), seed_for(&c, 0, 1));
+    }
+
+    #[test]
+    fn seed_for_varies_by_replica_repetition_and_cell() {
+        let c = text_cfg(100, "random_position");
+        let base = seed_for(&c, 0, 1);
+        assert_ne!(base, seed_for(&c, 1, 1), "distinct replica must reseed");
+        assert_ne!(base, seed_for(&c, 0, 2), "distinct repetition must reseed");
+        assert_ne!(
+            base,
+            seed_for(&text_cfg(1000, "random_position"), 0, 1),
+            "distinct ops-per-side must reseed"
+        );
+        assert_ne!(
+            base,
+            seed_for(&text_cfg(100, "same_region"), 0, 1),
+            "distinct locality must reseed"
+        );
     }
 }

@@ -146,7 +146,7 @@ async fn main() -> Result<()> {
             } else {
                 NodeSource::External(args.replicas.clone())
             };
-            let result = run_scenario_once(scenario, source).await?;
+            let result = run_scenario_once(scenario, source, t).await?;
             debug_assert_eq!(
                 result.total_ops, op_count,
                 "scenario '{}' trial {t}: runner reported {} ops, expected {}",
@@ -193,11 +193,21 @@ async fn main() -> Result<()> {
 // ── Scenario helpers ─────────────────────────────────────────────────────────
 
 /// Run a single scenario once and return its result.
-async fn run_scenario_once(scenario: &ScenarioFile, source: NodeSource) -> Result<RunResult> {
+///
+/// `repetition` is the 1-based trial index; it seeds the divergence generator
+/// so each repetition of a text cell draws an independent op stream (the
+/// source of run-to-run CV), while map-put scenarios ignore it.
+async fn run_scenario_once(
+    scenario: &ScenarioFile,
+    source: NodeSource,
+    repetition: usize,
+) -> Result<RunResult> {
     tracing::info!(scenario = %scenario.name, "starting");
     let result = match &scenario.body {
         ScenarioBody::Topology(config) => runner::run(config, source).await?,
-        ScenarioBody::PartitionHeal(config) => runner::run_partition_heal(config, source).await?,
+        ScenarioBody::PartitionHeal(config) => {
+            runner::run_partition_heal(config, source, repetition).await?
+        }
     };
     tracing::info!(
         scenario = %scenario.name,

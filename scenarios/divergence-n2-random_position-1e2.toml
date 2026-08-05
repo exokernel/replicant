@@ -1,0 +1,17 @@
+# divergence-n2: 2 replicas partitioned, each applies 100 text-splice ops with
+# random_position locality, then heal and measure convergence. One cell of the RQ-1
+# offline-divergence grid (ops-per-side x edit-locality).
+name = "divergence-n2-random_position-1e2"
+
+[partition_heal]
+node_count = 2
+write_pattern = "concentrated"
+workload = "text_splice"
+locality = "random_position"
+ops_per_group = 100
+
+[[partition_heal.groups]]
+nodes = [0]
+
+[[partition_heal.groups]]
+nodes = [1]

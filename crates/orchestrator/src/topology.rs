@@ -87,6 +87,65 @@ pub enum Workload {
     TextSplice,
 }
 
+/// Edit-locality rule for `TextSplice` workloads — the position each insert
+/// targets, drawn operationally against the issuing replica's own text length.
+///
+/// This is the anchor-contention axis of the RQ-1 sweep (see trace-replay
+/// notes): `Append` contests only the base seam (~1 contested anchor);
+/// `SameRegion` prepends at a fixed base identity so every op contests the
+/// same anchor (O(n) concurrent siblings); `RandomPosition` is uniform in
+/// between. Ignored by the `MapPut` workload.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Locality {
+    /// Insert at the current end (`pos = len`). Default — the mostly-sequential
+    /// two-authors-at-the-end case and the sweep's low-contention floor.
+    #[default]
+    Append,
+    /// Insert at a uniformly-random position in `[0, len]`.
+    RandomPosition,
+    /// Insert at a fixed shared anchor (`pos = 0`, pure prepend) — maximal
+    /// contention, the predicted stressor corner.
+    SameRegion,
+}
+
+impl Locality {
+    /// Draw the splice position for the next op given the replica's current
+    /// text `len`, using `rng` for the random case. Always returns `<= len`,
+    /// so the position is a valid `splice_text` anchor.
+    pub fn draw_pos(self, rng: &mut SplitMix64, len: usize) -> usize {
+        match self {
+            Locality::Append => len,
+            Locality::SameRegion => 0,
+            Locality::RandomPosition => (rng.next_u64() % (len as u64 + 1)) as usize,
+        }
+    }
+}
+
+/// Minimal deterministic PRNG (SplitMix64) — hand-rolled so the workload is
+/// bit-reproducible without pinning an external RNG crate's algorithm across
+/// versions. Seeds are recorded in results metadata; the same seed replays the
+/// identical op stream against any adapter (Automerge, Yrs, …).
+pub struct SplitMix64 {
+    state: u64,
+}
+
+impl SplitMix64 {
+    /// Seed the generator. Distinct seeds give independent streams.
+    pub fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    /// Next 64-bit output (advances the state).
+    pub fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+}
+
 /// Post-heal wiring for a partition-heal scenario.
 ///
 /// Selects how the partition is repaired in phase 2. `FullMesh` reconnects
@@ -333,6 +392,10 @@ pub struct PartitionConfig {
     /// scenario TOMLs that omit the field are unchanged.
     #[serde(default)]
     pub workload: Workload,
+    /// Edit-locality rule for the `TextSplice` workload. Ignored for `MapPut`.
+    /// Defaults to `Append` so existing scenarios are unaffected.
+    #[serde(default)]
+    pub locality: Locality,
     /// Wiring added on heal. Defaults to `FullMesh` so pre-existing TOML
     /// scenarios that omit the field keep their original behaviour.
     #[serde(default)]
@@ -458,6 +521,7 @@ pub fn builtin_scenarios() -> Vec<ScenarioFile> {
                 ops_per_group: 4,
                 write_pattern: WritePattern::RoundRobin,
                 workload: Workload::MapPut,
+                locality: Locality::Append,
                 heal_topology: HealTopology::FullMesh,
             }),
         },
@@ -477,6 +541,7 @@ mod tests {
             ops_per_group: 1,
             write_pattern: WritePattern::RoundRobin,
             workload: Workload::MapPut,
+            locality: Locality::Append,
             heal_topology: HealTopology::FullMesh,
         }
     }
@@ -539,6 +604,7 @@ mod tests {
                 ops_per_group: 2,
                 write_pattern: WritePattern::RoundRobin,
                 workload: Workload::MapPut,
+                locality: Locality::Append,
                 heal_topology: HealTopology::FullMesh,
             }),
         };
@@ -1067,5 +1133,45 @@ mod tests {
         // the candidates rather than a single one — just confirm it failed.
         let msg = err.to_string();
         assert!(!msg.is_empty());
+    }
+
+    // ── divergence generator (SplitMix64 + Locality) ───────────────────────
+
+    #[test]
+    fn splitmix64_deterministic_and_seed_sensitive() {
+        let seq = |seed| {
+            let mut r = SplitMix64::new(seed);
+            [r.next_u64(), r.next_u64(), r.next_u64()]
+        };
+        assert_eq!(seq(42), seq(42), "same seed reproduces the stream");
+        assert_ne!(seq(42), seq(43), "different seed diverges");
+    }
+
+    #[test]
+    fn draw_pos_append_and_same_region_are_fixed() {
+        let mut r = SplitMix64::new(1);
+        assert_eq!(Locality::Append.draw_pos(&mut r, 0), 0);
+        assert_eq!(Locality::Append.draw_pos(&mut r, 57), 57);
+        assert_eq!(Locality::SameRegion.draw_pos(&mut r, 57), 0);
+    }
+
+    #[test]
+    fn draw_pos_random_is_valid_anchor_and_deterministic() {
+        // A drawn position must always be a valid splice_text anchor (<= len),
+        // including the empty-document case (len == 0 => only 0 is valid).
+        let mut r = SplitMix64::new(7);
+        for len in [0usize, 1, 2, 100, 100_000] {
+            for _ in 0..1000 {
+                assert!(Locality::RandomPosition.draw_pos(&mut r, len) <= len);
+            }
+        }
+        // Same seed reproduces the identical draw sequence (bit-identical replay).
+        let draws = |seed| {
+            let mut r = SplitMix64::new(seed);
+            (0..8)
+                .map(|_| Locality::RandomPosition.draw_pos(&mut r, 50))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(draws(9), draws(9));
     }
 }
