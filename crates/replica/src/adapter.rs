@@ -1,12 +1,20 @@
 use std::collections::HashMap;
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use automerge::{
-    AutoCommit, ObjId, ObjType, ROOT, ReadDoc, ScalarValue as AmScalarValue,
+    ActorId, AutoCommit, ObjId, ObjType, ROOT, ReadDoc, ScalarValue as AmScalarValue, Value,
     sync::{self, SyncDoc},
-    transaction::Transactable,
+    transaction::{CommitOptions, Transactable},
 };
 use common::{CrdtAdapter, Op, ScalarVal};
+
+/// Fixed actor id under which [`CrdtAdapter::ensure_text`] authors the
+/// bootstrap change. Every replica uses the same actor, the same single op,
+/// empty deps (the document must be empty), and commit time 0 — so the change
+/// bytes, its hash, and the created object's identity (`OpId(1, this actor)`)
+/// are identical everywhere without any sync. The adapter's own actor is
+/// restored immediately after, so all real ops remain attributed per replica.
+const BOOTSTRAP_ACTOR: &[u8] = b"replicant-bootstrap";
 
 /// [`common::CrdtAdapter`] implementation backed by `automerge::AutoCommit`.
 ///
@@ -76,12 +84,31 @@ impl AutomergeAdapter {
             );
             return Ok(id.clone());
         }
-        let id = self
-            .doc
-            .put_object(ROOT, obj, obj_type)
-            .with_context(|| format!("creating object '{obj}'"))?;
+        // An object under this name may already exist without being cached:
+        // created by a peer and received via sync, or by `ensure_text`.
+        // Creating a new one here would put a *concurrent* object at the same
+        // key, and the eventual merge would keep only one — silently dropping
+        // every op applied to the loser. Reuse before create.
+        let id = match self.lookup_obj(obj) {
+            Some((id, t)) if t == obj_type => id,
+            Some((_, t)) => {
+                bail!("object '{obj}' already exists with type {t:?}, not {obj_type:?}")
+            }
+            None => self
+                .doc
+                .put_object(ROOT, obj, obj_type)
+                .with_context(|| format!("creating object '{obj}'"))?,
+        };
         self.objects.insert(obj.to_owned(), id.clone());
         Ok(id)
+    }
+
+    /// Look up an existing object under `ROOT[obj]`, returning its id and type.
+    fn lookup_obj(&self, obj: &str) -> Option<(ObjId, ObjType)> {
+        match self.doc.get(ROOT, obj) {
+            Ok(Some((Value::Object(t), id))) => Some((id, t)),
+            _ => None,
+        }
     }
 }
 
@@ -173,6 +200,54 @@ impl CrdtAdapter for AutomergeAdapter {
 
     fn reset(&mut self) {
         *self = Self::new();
+    }
+
+    fn ensure_text(&mut self, obj: &str) -> anyhow::Result<()> {
+        if obj.is_empty() {
+            bail!("ensure_text: object name must not be empty (ROOT is a map)");
+        }
+        match self.lookup_obj(obj) {
+            Some((id, ObjType::Text)) => {
+                // Already present (bootstrapped earlier, or received via sync).
+                self.objects.insert(obj.to_owned(), id);
+                return Ok(());
+            }
+            Some((_, t)) => bail!("ensure_text: '{obj}' exists with type {t:?}"),
+            None => {}
+        }
+        // Authoring the bootstrap change is only deterministic from the empty
+        // document: any prior change would land in `deps`, and two replicas
+        // authoring different deps under the same (actor, seq) would corrupt
+        // the DAG rather than deduplicate.
+        if !self.doc.get_heads().is_empty() {
+            bail!("ensure_text: document already has changes; bootstrap must be the first change");
+        }
+        let own_actor = self.doc.get_actor().clone();
+        self.doc.set_actor(ActorId::from(BOOTSTRAP_ACTOR));
+        let id = self
+            .doc
+            .put_object(ROOT, obj, ObjType::Text)
+            .with_context(|| format!("bootstrapping text object '{obj}'"))?;
+        // Time 0 keeps the change bytes identical across replicas and runs;
+        // the default commit would also use 0, but the determinism guarantee
+        // is the whole point here, so pin it explicitly.
+        self.doc.commit_with(CommitOptions::default().with_time(0));
+        self.doc.set_actor(own_actor);
+        self.objects.insert(obj.to_owned(), id);
+        Ok(())
+    }
+
+    fn text_length(&mut self, obj: &str) -> anyhow::Result<usize> {
+        match self.lookup_obj(obj) {
+            Some((id, ObjType::Text)) => Ok(self
+                .doc
+                .text(&id)
+                .with_context(|| format!("reading text object '{obj}'"))?
+                .chars()
+                .count()),
+            Some((_, t)) => bail!("text_length: '{obj}' exists with type {t:?}, not Text"),
+            None => bail!("text_length: no object named '{obj}'"),
+        }
     }
 }
 
@@ -476,6 +551,172 @@ mod tests {
             baseline.doc_size_bytes(),
             "post-reset doc size differs from a from-scratch single-write doc"
         );
+    }
+
+    // ── ensure_text / text_length (shared-object bootstrap) ────────────────
+
+    /// The core determinism guarantee: two replicas that bootstrap
+    /// independently — no sync — produce the bit-identical change and
+    /// therefore the same heads. Everything else about the divergence
+    /// workload rests on this.
+    #[test]
+    fn ensure_text_is_deterministic_across_replicas() {
+        let mut a = AutomergeAdapter::new();
+        let mut b = AutomergeAdapter::new();
+        a.ensure_text("text").unwrap();
+        b.ensure_text("text").unwrap();
+
+        assert!(!a.get_heads().is_empty());
+        assert_eq!(
+            a.get_heads(),
+            b.get_heads(),
+            "independent bootstraps must produce the identical change"
+        );
+        assert_eq!(a.state_fingerprint(), b.state_fingerprint());
+    }
+
+    #[test]
+    fn ensure_text_is_idempotent() {
+        let mut a = AutomergeAdapter::new();
+        a.ensure_text("text").unwrap();
+        let heads = a.get_heads();
+        a.ensure_text("text").unwrap();
+        assert_eq!(a.get_heads(), heads, "second call must not author a change");
+    }
+
+    /// Regression for the divergence-sweep bug: two replicas that diverge
+    /// while partitioned must merge into ONE text containing both sides'
+    /// inserts. Without the shared bootstrap, each side lazily created its
+    /// own object, the merge kept one, and half the workload vanished —
+    /// while fingerprints happily converged.
+    #[test]
+    fn partitioned_text_edits_interleave_after_bootstrap() {
+        let mut a = AutomergeAdapter::new();
+        let mut b = AutomergeAdapter::new();
+        a.ensure_text("text").unwrap();
+        b.ensure_text("text").unwrap();
+
+        let splice = |pos: usize| Op::TextSplice {
+            obj: "text".into(),
+            pos,
+            del_count: 0,
+            insert: "x".into(),
+        };
+        // Simulate divergence: 10 prepends each side, no sync in between
+        // (the same_region shape — every op contests the shared HEAD anchor).
+        for _ in 0..10 {
+            a.apply_op(&splice(0)).unwrap();
+            b.apply_op(&splice(0)).unwrap();
+        }
+        assert_eq!(a.text_length("text").unwrap(), 10);
+
+        sync_until_quiescent(&mut a, "a", &mut b, "b");
+
+        assert_eq!(a.state_fingerprint(), b.state_fingerprint());
+        assert_eq!(
+            a.text_length("text").unwrap(),
+            20,
+            "merge must interleave both sides, not discard one"
+        );
+        assert_eq!(b.text_length("text").unwrap(), 20);
+    }
+
+    /// The counterpart guard: without bootstrap the lazy-creation collision
+    /// still exists, and text_length is exactly the check that exposes it.
+    /// Locks in WHY ensure_text is mandatory for partitioned text workloads —
+    /// if a future Automerge changes this behaviour, we want to know.
+    #[test]
+    fn without_bootstrap_partitioned_text_loses_a_side() {
+        let mut a = AutomergeAdapter::new();
+        let mut b = AutomergeAdapter::new();
+        let splice = Op::TextSplice {
+            obj: "text".into(),
+            pos: 0,
+            del_count: 0,
+            insert: "x".into(),
+        };
+        for _ in 0..10 {
+            a.apply_op(&splice).unwrap();
+            b.apply_op(&splice).unwrap();
+        }
+        sync_until_quiescent(&mut a, "a", &mut b, "b");
+
+        assert_eq!(a.state_fingerprint(), b.state_fingerprint());
+        assert_eq!(
+            a.text_length("text").unwrap(),
+            10,
+            "lazy creation collides: converged doc keeps only the winning object"
+        );
+    }
+
+    #[test]
+    fn ensure_text_rejects_non_empty_doc_without_the_object() {
+        let mut a = AutomergeAdapter::new();
+        a.apply_op(&map_put("doc", "k", "v")).unwrap();
+        let err = a.ensure_text("text").unwrap_err();
+        assert!(err.to_string().contains("first change"), "{err}");
+    }
+
+    /// A synced-in object satisfies ensure_text — the late replica adopts it
+    /// rather than authoring a bootstrap of its own.
+    #[test]
+    fn ensure_text_adopts_synced_in_object() {
+        let mut a = AutomergeAdapter::new();
+        let mut b = AutomergeAdapter::new();
+        a.ensure_text("text").unwrap();
+        a.apply_op(&Op::TextSplice {
+            obj: "text".into(),
+            pos: 0,
+            del_count: 0,
+            insert: "hi".into(),
+        })
+        .unwrap();
+        sync_until_quiescent(&mut a, "a", &mut b, "b");
+
+        b.ensure_text("text").unwrap();
+        assert_eq!(b.text_length("text").unwrap(), 2);
+        assert_eq!(a.get_heads(), b.get_heads(), "no extra change authored");
+    }
+
+    /// resolve_obj must reuse an object that arrived via sync instead of
+    /// creating a concurrent one — the connected-topology flavour of the
+    /// same collision (a round-robin writer's first op racing the sync of
+    /// another node's creation).
+    #[test]
+    fn first_local_write_reuses_synced_in_object() {
+        let mut a = AutomergeAdapter::new();
+        let mut b = AutomergeAdapter::new();
+        let splice = |insert: &str| Op::TextSplice {
+            obj: "text".into(),
+            pos: 0,
+            del_count: 0,
+            insert: insert.into(),
+        };
+        a.ensure_text("text").unwrap();
+        a.apply_op(&splice("aa")).unwrap();
+        sync_until_quiescent(&mut a, "a", &mut b, "b");
+
+        // b's first local write: the object exists in its doc but not its
+        // cache. It must splice into that object, not create a rival.
+        b.apply_op(&splice("bb")).unwrap();
+        sync_until_quiescent(&mut a, "a", &mut b, "b");
+
+        assert_eq!(a.text_length("text").unwrap(), 4, "all four chars survive");
+        assert_eq!(b.text_length("text").unwrap(), 4);
+    }
+
+    #[test]
+    fn text_length_errors_on_missing_or_wrong_type() {
+        let mut a = AutomergeAdapter::new();
+        assert!(a.text_length("nope").is_err());
+        a.apply_op(&Op::ListInsert {
+            obj: "l".into(),
+            index: 0,
+            value: ScalarVal::Uint(1),
+        })
+        .unwrap();
+        let err = a.text_length("l").unwrap_err();
+        assert!(err.to_string().contains("not Text"), "{err}");
     }
 
     #[test]

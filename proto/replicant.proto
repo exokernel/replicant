@@ -13,6 +13,21 @@ service Replica {
   // empty state. Used by the orchestrator to recycle externally-managed
   // replicas between trials and scenarios without bouncing the container.
   rpc Reset               (Empty)      returns (Empty);
+  // Deterministically create the named text object as the document's first
+  // change, so every replica that calls this on an empty document produces
+  // the bit-identical change — and therefore the *same* object identity —
+  // without any sync. Required before TextSplice workloads on partitioned
+  // replicas: without it each side lazily creates its own object and the
+  // heal resolves a map-key conflict (discarding one side's text) instead of
+  // interleaving sequences. Idempotent if the object already exists; errors
+  // if the document has other changes but no such object.
+  rpc EnsureText          (ObjRef)     returns (Empty);
+  // Character length of the named text object. Lets the orchestrator assert
+  // post-heal that no side's inserts were discarded (for insert-only
+  // workloads, final length must equal total ops) — fingerprint equality
+  // alone proves replicas agree, not that they agree on a document
+  // containing all the work.
+  rpc GetTextLength       (ObjRef)     returns (TextLengthResponse);
 }
 
 // ── Replica ↔ Replica ──────────────────────────────────────────────────────
@@ -97,3 +112,8 @@ message PeerRef {
   string peer_id = 1;
   string addr    = 2; // host:port of the peer's Sync service
 }
+
+// Names a top-level object under ROOT (same convention as OpRequest's obj).
+message ObjRef { string obj = 1; }
+
+message TextLengthResponse { uint64 length = 1; }

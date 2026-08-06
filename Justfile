@@ -76,6 +76,10 @@ bench-docker scenarios='scenarios/full-mesh-n5.toml' trials='10':
     scenarios='{{scenarios}}'
     trials='{{trials}}'
     out='results/results-docker.csv'
+    # Run provenance for $out — commit, host, build profile, seeds, cell params.
+    # `results/` is gitignored, so without this a stored CSV cannot be traced
+    # back to the code that produced it.
+    meta="${out%.csv}.meta.json"
 
     # Validate scenarios exist and bucket them by node_count.
     declare -A by_n
@@ -108,6 +112,7 @@ bench-docker scenarios='scenarios/full-mesh-n5.toml' trials='10':
     mkdir -p results
     : > "$out"  # start clean — bench runs are not additive across invocations
     header_written=0
+    metas=()  # per-group sidecar temp files, merged into "$meta" after the loop
 
     for n in "${ns[@]}"; do
         echo ">>> bench-docker: N=$n, scenarios:${by_n[$n]}" >&2
@@ -121,8 +126,10 @@ bench-docker scenarios='scenarios/full-mesh-n5.toml' trials='10':
         done
 
         tmpcsv=$(mktemp)
+        tmpmeta=$(mktemp)
+        metas+=("$tmpmeta")
         # ${by_n[$n]} intentionally unquoted so the shell splits on whitespace.
-        cargo run --release --bin orchestrator -- --trials "$trials" --replicas "$replicas" ${by_n[$n]} > "$tmpcsv"
+        cargo run --release --bin orchestrator -- --trials "$trials" --replicas "$replicas" --sidecar "$tmpmeta" ${by_n[$n]} > "$tmpcsv"
         if [ "$header_written" = "0" ]; then
             cat "$tmpcsv" >> "$out"
             header_written=1
@@ -134,7 +141,14 @@ bench-docker scenarios='scenarios/full-mesh-n5.toml' trials='10':
         $compose down --remove-orphans
     done
 
-    echo "wrote $out (${#ns[@]} node-count groups)"
+    # One sidecar per orchestrator invocation (i.e. per node-count group). Kept
+    # as a list rather than merged into one object: each invocation has its own
+    # replica wiring and scenario set, and flattening them would invent a single
+    # run that never happened.
+    jq -s '{invocations: .}' "${metas[@]}" > "$meta"
+    rm -f "${metas[@]}"
+
+    echo "wrote $out and $meta (${#ns[@]} node-count groups)"
 
 # End-to-end kind verification: parse N from the scenario's node_count, build the image, spin up the kind cluster (named `replicant`), apply manifests and scale the StatefulSet to N, port-forward N pods, run one trial of the scenario, tear the cluster down. Output goes to the terminal — this proves the deployment plumbing works, it is NOT for analysis. For multi-trial sweeps that produce a notebook-readable CSV, use `just bench-k8s`. Not in `just ci` (needs docker + kind). Set KEEP_KIND=1 to preserve the cluster after the run for debugging. If the cluster already exists (e.g. from `just k8s-up`), this recipe reuses it and does NOT delete it on exit — only clusters it created itself are torn down.
 smoke-k8s scenario='scenarios/full-mesh-n5.toml':
@@ -209,6 +223,8 @@ bench-k8s scenarios='scenarios/full-mesh-n5.toml' trials='10':
     scenarios='{{scenarios}}'
     trials='{{trials}}'
     out='results/results-k8s.csv'
+    # Run provenance for $out — see the note in `bench-docker`.
+    meta="${out%.csv}.meta.json"
     cluster=replicant
     img=replicant-replica:dev
 
@@ -249,6 +265,7 @@ bench-k8s scenarios='scenarios/full-mesh-n5.toml' trials='10':
     mkdir -p results
     : > "$out"  # start clean — bench runs are not additive across invocations
     header_written=0
+    metas=()  # per-group sidecar temp files, merged into "$meta" after the loop
 
     for n in "${ns[@]}"; do
         echo ">>> bench-k8s: N=$n, scenarios:${by_n[$n]}" >&2
@@ -282,8 +299,10 @@ bench-k8s scenarios='scenarios/full-mesh-n5.toml' trials='10':
         done
 
         tmpcsv=$(mktemp)
+        tmpmeta=$(mktemp)
+        metas+=("$tmpmeta")
         # ${by_n[$n]} intentionally unquoted so the shell splits on whitespace.
-        cargo run --release --bin orchestrator -- --trials "$trials" --replicas "$replicas" ${by_n[$n]} > "$tmpcsv"
+        cargo run --release --bin orchestrator -- --trials "$trials" --replicas "$replicas" --sidecar "$tmpmeta" ${by_n[$n]} > "$tmpcsv"
         if [ "$header_written" = "0" ]; then
             cat "$tmpcsv" >> "$out"
             header_written=1
@@ -293,7 +312,11 @@ bench-k8s scenarios='scenarios/full-mesh-n5.toml' trials='10':
         rm "$tmpcsv"
     done
 
-    echo "wrote $out (${#ns[@]} node-count groups)"
+    # One sidecar per orchestrator invocation — see the note in `bench-docker`.
+    jq -s '{invocations: .}' "${metas[@]}" > "$meta"
+    rm -f "${metas[@]}"
+
+    echo "wrote $out and $meta (${#ns[@]} node-count groups)"
 
 # Bring up the docker compose stack sized for the given scenario and leave it running. Use when you want to inspect Prometheus (http://localhost:9090) while iterating, or run many scenarios against the same stack. Pair with `just docker-down` to tear down. Idempotent: re-running regenerates the compose file from the new scenario and `docker compose up -d` reconciles.
 docker-up scenario='scenarios/full-mesh-n5.toml':
@@ -451,9 +474,28 @@ docs:
 bench scenario:
     cargo run --bin orchestrator -- {{scenario}}
 
-# Full CI gate: format check → lint → test → smoke
+# Regenerate the divergence-n2 scenario grid (ops-per-side x edit-locality) in
+# scenarios/. Idempotent — re-running over an unchanged grid rewrites identical
+# bytes. Stdlib-only, so the .venv is preferred but not required.
+gen-scenarios:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    py=$([ -x .venv/bin/python3 ] && echo .venv/bin/python3 || echo python3)
+    "$py" scenarios/gen-divergence-grid.py
+
+# Verify the on-disk divergence grid matches its generator. Guards against a
+# hand-edited cell whose filename no longer matches its ops_per_group — which
+# would look like a real sweep result rather than a typo. Part of `just ci`.
+check-scenarios:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    py=$([ -x .venv/bin/python3 ] && echo .venv/bin/python3 || echo python3)
+    "$py" scenarios/gen-divergence-grid.py --check
+
+# Full CI gate: format check → lint → test → smoke → scenario-grid check
 ci:
     cargo fmt --all --check
     just lint
     just test
     just smoke
+    just check-scenarios

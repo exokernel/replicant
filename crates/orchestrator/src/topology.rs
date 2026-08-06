@@ -1,7 +1,7 @@
 use std::collections::{HashSet, VecDeque};
 
 use anyhow::{Result, bail};
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Top-level scenario file — TOML format; exactly one of `[topology]` or
 /// `[partition_heal]` must be present.
@@ -63,7 +63,10 @@ impl<'de> Deserialize<'de> for ScenarioFile {
 }
 
 /// Write distribution for ops in a scenario run.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// `Serialize` is derived alongside `Deserialize` so the results sidecar
+/// records each parameter with the exact spelling the scenario TOML uses.
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WritePattern {
     /// All writes go to the first node in scope (node 0 or `group.nodes[0]`).
@@ -77,7 +80,7 @@ pub enum WritePattern {
 /// Defaults to `MapPut` so every pre-existing scenario TOML — which omits the
 /// field — keeps its original map-put behaviour. `TextSplice` exercises the
 /// sequence-CRDT path (Automerge `splice_text`), the workload RQ-1 measures.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Workload {
     /// Each write is a `MapPut` on the root map (historical behaviour).
@@ -90,12 +93,30 @@ pub enum Workload {
 /// Edit-locality rule for `TextSplice` workloads — the position each insert
 /// targets, drawn operationally against the issuing replica's own text length.
 ///
-/// This is the anchor-contention axis of the RQ-1 sweep (see trace-replay
-/// notes): `Append` contests only the base seam (~1 contested anchor);
-/// `SameRegion` prepends at a fixed base identity so every op contests the
-/// same anchor (O(n) concurrent siblings); `RandomPosition` is uniform in
-/// between. Ignored by the `MapPut` workload.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+/// Designed as the anchor-contention axis of the RQ-1 sweep (see trace-replay
+/// notes): `Append` contests only the base seam; `SameRegion` prepends at a
+/// fixed base identity so every op contests the same anchor (O(n) concurrent
+/// siblings); `RandomPosition` is uniform in between. Ignored by the `MapPut`
+/// workload.
+///
+/// # Precondition: the text object must be shared before the partition
+///
+/// [`crate::contention`] confirms the generator produces the intended
+/// contention (2 / ~18 / 20k concurrent siblings at 1e4 ops/side). But the
+/// axis only reaches the CRDT if both replicas splice into the *same* text
+/// object. The replica adapter creates objects lazily on first use, so
+/// replicas that diverge from an empty document each create their own
+/// `ROOT["text"]` — the heal then resolves a map-key conflict (one side's
+/// text is discarded wholesale) instead of interleaving sequences, and every
+/// locality measures the same. A standalone Automerge 0.9 probe shows the
+/// difference at 1e4 ops/side: with separate objects all three localities
+/// merge in ~70-78 ms; with a shared base object append / random_position /
+/// same_region merge in 73 / 90 / 208 ms — contention is a real cost driver
+/// once the experiment is wired correctly. Scenarios must therefore
+/// establish the text object on all replicas *before* partitioning, and
+/// post-heal checks should assert both sides' inserts survived (final length
+/// == total ops for insert-only workloads).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Locality {
     /// Insert at the current end (`pos = len`). Default — the mostly-sequential
@@ -105,7 +126,9 @@ pub enum Locality {
     /// Insert at a uniformly-random position in `[0, len]`.
     RandomPosition,
     /// Insert at a fixed shared anchor (`pos = 0`, pure prepend) — maximal
-    /// contention, the predicted stressor corner.
+    /// contention, the predicted stressor corner. Confirmed ~2.9× `Append`
+    /// merge cost in a standalone Automerge probe once the text object is
+    /// actually shared (see the type-level docs).
     SameRegion,
 }
 
@@ -152,7 +175,7 @@ impl SplitMix64 {
 /// every pair across groups (original behaviour); `Bridge` connects only
 /// `groups[0].nodes[0]` to `groups[1].nodes[0]`, forcing all cross-partition
 /// state through one edge. `Bridge` requires exactly 2 groups.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HealTopology {
     /// Connect every cross-group pair on heal (post-heal graph is a full mesh).

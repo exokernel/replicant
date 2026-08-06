@@ -9,7 +9,7 @@ use tonic::Request;
 use tonic::transport::{Channel, Server};
 
 use common::proto::{
-    Empty, MapPut, OpRequest, PeerRef, ScalarValue, TextSplice, op_request,
+    Empty, MapPut, ObjRef, OpRequest, PeerRef, ScalarValue, TextSplice, op_request,
     replica_client::ReplicaClient, replica_server::ReplicaServer, scalar_value,
     sync_server::SyncServer,
 };
@@ -232,10 +232,68 @@ async fn text_splice(
     Ok(())
 }
 
+/// Name of the shared text object every `TextSplice` workload writes to.
+const TEXT_OBJ: &str = "text";
+
+/// Bootstrap the shared text object on every node in `indices`.
+///
+/// Each replica authors the bit-identical bootstrap change (fixed actor,
+/// time 0) as its first change, so all replicas share one object identity
+/// with no sync required. Must run after `reset_all` and **before any edges
+/// are wired**: once sync is flowing, a peer's ops could land first and the
+/// replica-side determinism guard would reject the bootstrap.
+async fn ensure_text_all(
+    clients: &mut [ReplicaClient<Channel>],
+    indices: impl Iterator<Item = usize>,
+) -> Result<()> {
+    for i in indices {
+        clients[i]
+            .ensure_text(Request::new(ObjRef {
+                obj: TEXT_OBJ.to_owned(),
+            }))
+            .await
+            .with_context(|| format!("EnsureText on node {i}"))?;
+    }
+    Ok(())
+}
+
+/// Post-convergence validity check for insert-only text workloads: every
+/// node's text must hold exactly `expected` characters (one per op).
+///
+/// Fingerprint equality proves the replicas *agree*; this proves they agree
+/// on a document that contains **all** the work. The distinction is not
+/// theoretical — a shared-object bug once made every heal converge cleanly
+/// while silently discarding one side's entire text, and only a length check
+/// like this one could have caught it.
+async fn verify_text_length(
+    clients: &mut [ReplicaClient<Channel>],
+    indices: &[usize],
+    expected: usize,
+) -> Result<()> {
+    for &i in indices {
+        let got = clients[i]
+            .get_text_length(Request::new(ObjRef {
+                obj: TEXT_OBJ.to_owned(),
+            }))
+            .await
+            .with_context(|| format!("GetTextLength on node {i}"))?
+            .into_inner()
+            .length as usize;
+        if got != expected {
+            bail!(
+                "text-length check failed on node {i}: expected {expected} chars \
+                 (one per op), found {got} — some replicas' inserts were lost \
+                 in the merge"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Fixed base for divergence-sweep seeds. Recorded (as this constant) so a
 /// cell's op streams are reproducible; the per-replica seed folds in the cell
 /// parameters, the node index, and the repetition so every stream is distinct.
-const DIVERGENCE_SEED_BASE: u64 = 0x5EED_D1F5_0FF5_E7A1;
+pub(crate) const DIVERGENCE_SEED_BASE: u64 = 0x5EED_D1F5_0FF5_E7A1;
 
 /// Derive the deterministic per-replica PRNG seed for one repetition of a cell.
 ///
@@ -243,7 +301,7 @@ const DIVERGENCE_SEED_BASE: u64 = 0x5EED_D1F5_0FF5_E7A1;
 /// repetitions get independent streams, while identical inputs always replay
 /// the same stream (the reproducibility guarantee the sweep records). The
 /// mixed value is passed through one SplitMix64 round to avalanche the fields.
-fn seed_for(config: &PartitionConfig, node: usize, repetition: usize) -> u64 {
+pub(crate) fn seed_for(config: &PartitionConfig, node: usize, repetition: usize) -> u64 {
     let mixed = DIVERGENCE_SEED_BASE
         ^ (config.ops_per_group as u64).wrapping_mul(0x1_0000_0001)
         ^ ((config.locality as u64) << 3)
@@ -357,6 +415,14 @@ pub async fn run(config: &TopologyConfig, source: NodeSource) -> Result<RunResul
     // when the same external stack is reused across many scenarios/trials.
     reset_all(&mut clients).await?;
 
+    // Text workloads need the shared text object bootstrapped on every node
+    // before any edges exist (see `ensure_text_all`); otherwise each node
+    // lazily creates its own object on first write and concurrent creations
+    // collide as map-key conflicts.
+    if config.workload == Workload::TextSplice {
+        ensure_text_all(&mut clients, 0..n).await?;
+    }
+
     let edges = config.connections.edges(n);
     let edge_count = edges.len();
     let topology_kind = config.connections.kind();
@@ -394,6 +460,12 @@ pub async fn run(config: &TopologyConfig, source: NodeSource) -> Result<RunResul
     .await?;
     check_tasks(&mut tasks)?;
 
+    // Validity gate, outside the measurement window: the converged text must
+    // contain every op's insert (ops are insert-only, one char each).
+    if config.workload == Workload::TextSplice {
+        verify_text_length(&mut clients, &all_nodes, config.op_count).await?;
+    }
+
     Ok(RunResult {
         convergence_ms,
         total_ops: config.op_count,
@@ -422,6 +494,15 @@ pub async fn run_partition_heal(
     // Reset before wiring peers so each trial starts from a clean slate even
     // when the same external stack is reused across many scenarios/trials.
     reset_all(&mut clients).await?;
+
+    // Text workloads: bootstrap the shared text object on every node while the
+    // document is still empty and no edges exist. This is what makes the heal
+    // an *interleaving* of both sides' sequences — without a shared object
+    // identity, partitioned replicas each create their own and the heal is a
+    // map-key conflict that discards one side's text wholesale.
+    if config.workload == Workload::TextSplice {
+        ensure_text_all(&mut clients, 0..n).await?;
+    }
 
     // Wire each group internally and collect those edges for later subtraction.
     let intra: Vec<(usize, usize)> = config
@@ -508,6 +589,19 @@ pub async fn run_partition_heal(
     )
     .await?;
     check_tasks(&mut tasks)?;
+
+    // Validity gate, outside the measurement window: the healed text must
+    // contain *both* sides' inserts (ops are insert-only, one char each).
+    // This is the check that distinguishes a real sequence interleave from a
+    // heal that converged by discarding a replica's work.
+    if config.workload == Workload::TextSplice {
+        verify_text_length(
+            &mut clients,
+            &all_nodes,
+            config.groups.len() * config.ops_per_group,
+        )
+        .await?;
+    }
 
     // Report structural fields for the actual post-heal graph (intra-group
     // edges + heal edges). `topology_kind = "partition_heal"` flags the
@@ -880,6 +974,23 @@ mod tests {
         .await
         .unwrap();
         check_tasks(&mut tasks).unwrap();
+    }
+
+    /// End-to-end divergence cell through the real gRPC stack: partitioned
+    /// singleton groups, seeded text splices, heal, converge — and the
+    /// in-runner text-length gate must pass, proving the heal interleaved
+    /// both sides' sequences rather than discarding one (the shared-object
+    /// regression). Runs all three localities; same_region is the shape that
+    /// originally exposed the bug.
+    #[tokio::test]
+    async fn divergence_heal_preserves_both_sides_text() {
+        for locality in ["append", "random_position", "same_region"] {
+            let config = text_cfg(25, locality);
+            let result = run_partition_heal(&config, NodeSource::InProcess, 1)
+                .await
+                .unwrap_or_else(|e| panic!("locality={locality}: {e:#}"));
+            assert_eq!(result.total_ops, 50, "locality={locality}");
+        }
     }
 
     // ── seed_for (divergence generator) ────────────────────────────────────

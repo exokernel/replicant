@@ -227,6 +227,38 @@ pub trait CrdtAdapter: Send + 'static {
     /// Used by the replica's `Reset` RPC so externally-managed replicas can be
     /// recycled between trials without bouncing the container.
     fn reset(&mut self);
+
+    /// Deterministically create the named text object under ROOT so that every
+    /// replica calling this on an *empty* document ends up with the same
+    /// object identity, without any sync having happened.
+    ///
+    /// This is the precondition for text workloads on partitioned replicas:
+    /// if each side instead creates the object lazily on first write, the two
+    /// creations are concurrent map-key puts and the eventual merge keeps only
+    /// one — silently discarding the other side's entire text rather than
+    /// interleaving it.
+    ///
+    /// Must be idempotent when the object already exists (whether created
+    /// locally or received via sync). Must fail rather than guess when the
+    /// document has prior changes but no such object — how an implementation
+    /// achieves cross-replica identity from a later state is adapter-specific
+    /// and generally unsafe.
+    ///
+    /// Adapters whose library names root objects globally (e.g. Yrs, where
+    /// `get_or_insert_text` is identity-stable by name) may implement this as
+    /// a no-op lookup.
+    fn ensure_text(&mut self, obj: &str) -> anyhow::Result<()>;
+
+    /// Character length of the named text object.
+    ///
+    /// The orchestrator uses this as a post-convergence validity check: for
+    /// insert-only workloads the final length must equal the total op count,
+    /// proving no replica's inserts were discarded on merge. Fingerprint
+    /// equality alone cannot distinguish "converged on everything" from
+    /// "converged after throwing half the work away".
+    ///
+    /// Errors if no such text object exists.
+    fn text_length(&mut self, obj: &str) -> anyhow::Result<usize>;
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────

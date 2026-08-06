@@ -119,6 +119,20 @@ impl ReplicaState {
             .sync_receive(peer, msg)
     }
 
+    fn ensure_text(&self, obj: &str) -> anyhow::Result<()> {
+        self.adapter
+            .lock()
+            .expect("adapter mutex poisoned")
+            .ensure_text(obj)
+    }
+
+    fn text_length(&self, obj: &str) -> anyhow::Result<usize> {
+        self.adapter
+            .lock()
+            .expect("adapter mutex poisoned")
+            .text_length(obj)
+    }
+
     pub fn actor_id(&self) -> &str {
         &self.actor_id
     }
@@ -342,6 +356,34 @@ impl Replica for ReplicaService {
     async fn reset(&self, _: Request<proto::Empty>) -> Result<Response<proto::Empty>, Status> {
         self.state.reset().await;
         Ok(Response::new(proto::Empty {}))
+    }
+
+    async fn ensure_text(
+        &self,
+        request: Request<proto::ObjRef>,
+    ) -> Result<Response<proto::Empty>, Status> {
+        let obj = request.into_inner().obj;
+        self.state
+            .ensure_text(&obj)
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        // No flush_to_peers: the bootstrap change is bit-identical on every
+        // replica, so peers either already have it or will author it
+        // themselves; regular post-op flushes reconcile the DAG regardless.
+        Ok(Response::new(proto::Empty {}))
+    }
+
+    async fn get_text_length(
+        &self,
+        request: Request<proto::ObjRef>,
+    ) -> Result<Response<proto::TextLengthResponse>, Status> {
+        let obj = request.into_inner().obj;
+        let length = self
+            .state
+            .text_length(&obj)
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        Ok(Response::new(proto::TextLengthResponse {
+            length: length as u64,
+        }))
     }
 }
 

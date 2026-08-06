@@ -2,18 +2,18 @@
 # the generator to refresh. One cell of the RQ-1 offline-divergence grid
 # (ops-per-side x edit-locality).
 #
-# 2 replicas partition into singleton groups, each applies 100 text-splice
+# 2 replicas partition into singleton groups, each applies 1,000 text-splice
 # ops, then heal and measure convergence.
 #
-# locality = append: each op inserts at the current end -- the low-contention floor.
-name = "divergence-n2-append-1e2"
+# locality = same_region: every op prepends at the same anchor -- maximal contention.
+name = "divergence-n2-same_region-1e3"
 
 [partition_heal]
 node_count = 2
 write_pattern = "concentrated"
 workload = "text_splice"
-locality = "append"
-ops_per_group = 100
+locality = "same_region"
+ops_per_group = 1000
 
 [[partition_heal.groups]]
 nodes = [0]
