@@ -90,20 +90,32 @@ See [`crates/orchestrator/src/runner.rs`](../crates/orchestrator/src/runner.rs)
 for the measurement protocol — fingerprint-poll loop after the workload
 burst until all replicas report identical `GetStateFingerprint`.
 
-### `wiring_ms`: the part of the window that isn't merge cost
+### `wiring_ms`: the residual setup inside the window
 
-Partition-heal runs cannot wire their cross-group edges before starting the
-clock — "time to heal" is measured *from* the moment the heal is triggered — so
-opening those sync streams happens inside the measured window. The companion
-`wiring_ms` column reports how much of `convergence_ms` went on that setup
-(`mean_wiring_ms` on summary rows); `connect_edges` issues the edges
-concurrently so the cost stays roughly flat in edge count rather than growing
-with it.
+Partition-heal runs simulate the partition at the application layer rather than
+by withholding connections. The orchestrator wires the *entire* post-heal
+topology during setup, blocks every cross-group link via `SetPeerLinks`, runs
+the divergence phase, and heals by unblocking. So no connection is established
+inside the timed window; `wiring_ms` is the one concurrent round of unblock RPCs
+that starts the heal, and it does not scale with the number of healed edges.
+`mean_wiring_ms` is the per-scenario mean. Topology runs report `wiring_ms = 0`.
 
-**Subtract it before comparing heal topologies.** `Bridge` opens one stream and
-`FullMesh` opens every cross-group pair, so any comparison of the two that uses
-raw `convergence_ms` is partly comparing connection setup. Topology runs wire
-everything before the timer starts and report `wiring_ms = 0`.
+**This was not always true, and the difference mattered.** When the heal *was*
+the wiring, opening streams was up to 70% of the measured window on the docker
+lane — and it scaled with edge count, so a `FullMesh` heal paid it on every
+cross-group pair while a `Bridge` heal paid it once. Comparing the two compared
+connection setup as much as merge cost. Any partition-heal measurement taken
+before commit `d77d3f6` carries that bias; see the retraction in the analysis
+notes.
+
+A blocked link is enforced on both endpoints: outbound flushes skip the peer
+(never consuming sync protocol state toward it) and inbound messages are dropped
+unprocessed. Unblocking discards the per-peer sync protocol state, so the heal
+starts from a fresh handshake rather than trusting beliefs formed while the link
+was down. The runner asserts the partition actually held — no two groups may
+share a fingerprint at the end of the divergence phase — for the same reason the
+text-length gate exists: a silently-leaking partition reports a fast heal that
+looks like a result rather than a broken experiment.
 
 ---
 

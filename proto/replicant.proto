@@ -28,6 +28,28 @@ service Replica {
   // alone proves replicas agree, not that they agree on a document
   // containing all the work.
   rpc GetTextLength       (ObjRef)     returns (TextLengthResponse);
+  // Block or unblock sync traffic with the named peers while keeping any
+  // streams open. This is the app-layer partition primitive: the orchestrator
+  // wires the FULL post-heal topology up front (stream setup outside every
+  // timed window), blocks the cross-partition links during the divergence
+  // phase, and heals by unblocking — so heal cost is a flag flip plus the
+  // sync protocol itself, not TCP/HTTP2 connection establishment.
+  //
+  // While blocked: outbound flushes skip the peer (never consuming sync
+  // protocol state toward it) and inbound messages from it are dropped
+  // unprocessed. Unblocking also discards the per-peer sync protocol state,
+  // so the post-heal exchange restarts from a fresh handshake rather than
+  // trusting beliefs formed before or during the partition.
+  //
+  // Unblocking does NOT initiate any sync traffic. The orchestrator must
+  // unblock BOTH endpoints of every healed link before calling KickSync —
+  // a kick that raced a still-blocked peer would be dropped by it.
+  rpc SetPeerLinks        (PeerLinkUpdate) returns (Empty);
+  // Generate and send a fresh sync message to each named connected peer —
+  // the heal-phase handshake starter, called after SetPeerLinks has
+  // unblocked both endpoints of every healed link. Peers with nothing to
+  // exchange or no open stream are skipped silently.
+  rpc KickSync            (PeerIds)    returns (Empty);
 }
 
 // ── Replica ↔ Replica ──────────────────────────────────────────────────────
@@ -112,6 +134,16 @@ message PeerRef {
   string peer_id = 1;
   string addr    = 2; // host:port of the peer's Sync service
 }
+
+// Peers to block or unblock. Blocking is by stable peer ID, not by stream:
+// a peer may be blocked before its stream exists, and the block survives
+// stream churn.
+message PeerLinkUpdate {
+  repeated string peer_ids = 1;
+  bool blocked             = 2;
+}
+
+message PeerIds { repeated string peer_ids = 1; }
 
 // Names a top-level object under ROOT (same convention as OpRequest's obj).
 message ObjRef { string obj = 1; }

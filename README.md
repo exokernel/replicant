@@ -243,11 +243,17 @@ graph LR
 ### Partition-heal topology
 
 Nodes are split into groups that are fully connected internally. Each group
-writes independently, accumulating divergent history. The heal step adds
-cross-group edges; `convergence_ms` is measured from that point — which means
-it necessarily includes opening those sync streams. The `wiring_ms` column
-reports that portion so it can be subtracted; see
-[`docs/metrics.md`](docs/metrics.md#wiring_ms-the-part-of-the-window-that-isnt-merge-cost).
+writes independently, accumulating divergent history. The heal step reconnects
+the groups; `convergence_ms` is measured from that point.
+
+The partition is simulated at the application layer. The orchestrator wires the
+**entire post-heal topology up front**, then blocks the cross-group links —
+blocked links drop traffic in both directions despite the open streams. Healing
+unblocks them and kicks the sync handshake. This keeps connection setup out of
+the measured window, which matters because opening streams scales with edge
+count and would otherwise make a sparse heal look faster than a dense one for
+reasons unrelated to merging. See
+[`docs/metrics.md`](docs/metrics.md#wiring_ms-the-residual-setup-inside-the-window).
 
 The `heal_topology` field in `[partition_heal]` selects what gets reconnected:
 

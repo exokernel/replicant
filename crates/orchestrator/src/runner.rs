@@ -9,8 +9,8 @@ use tonic::Request;
 use tonic::transport::{Channel, Server};
 
 use common::proto::{
-    Empty, MapPut, ObjRef, OpRequest, PeerRef, ScalarValue, TextSplice, op_request,
-    replica_client::ReplicaClient, replica_server::ReplicaServer, scalar_value,
+    Empty, MapPut, ObjRef, OpRequest, PeerIds, PeerLinkUpdate, PeerRef, ScalarValue, TextSplice,
+    op_request, replica_client::ReplicaClient, replica_server::ReplicaServer, scalar_value,
     sync_server::SyncServer,
 };
 use replica::adapter::AutomergeAdapter;
@@ -177,11 +177,9 @@ async fn reset_all(clients: &mut [ReplicaClient<Channel>]) -> Result<()> {
 /// orchestrator's `client_addr` for the same replica — see [`ReplicaEndpoint`]).
 ///
 /// Edges are wired concurrently, so the wall time is one connection setup
-/// rather than `edges.len()` of them. That matters for the partition-heal
-/// measurement, where the heal wiring falls *inside* the timed window: issuing
-/// serially would have charged `FullMesh` heals for their extra edges' setup
-/// round-trips and made them look slower than `Bridge` heals for reasons that
-/// have nothing to do with merge cost.
+/// rather than `edges.len()` of them. Every caller now wires outside a timed
+/// window — [`run_partition_heal`] pre-wires its whole post-heal graph — so
+/// this is about keeping setup cheap, not about measurement validity.
 async fn connect_edges(
     clients: &[ReplicaClient<Channel>],
     endpoints: &[ReplicaEndpoint],
@@ -204,6 +202,118 @@ async fn connect_edges(
     }
     while let Some(joined) = set.join_next().await {
         joined.context("ConnectPeer task panicked")??;
+    }
+    Ok(())
+}
+
+/// Block or unblock the sync links for `edges`, on both endpoints of each.
+///
+/// Both endpoints matter. A link blocked on one side only still carries
+/// traffic the other way, so the partition would leak; and on heal, a peer
+/// unblocked before its counterpart would have its kick dropped as
+/// still-blocked inbound. Grouping by node means one RPC per replica rather
+/// than one per edge, so the heal-side cost stays flat in edge count.
+///
+/// Issued concurrently — for the unblock this is inside the measured heal
+/// window, and serial RPCs would reintroduce exactly the edge-count-scaled
+/// cost this design removes.
+async fn set_links_blocked(
+    clients: &[ReplicaClient<Channel>],
+    edges: &[(usize, usize)],
+    blocked: bool,
+) -> Result<()> {
+    let mut by_node: HashMap<usize, Vec<String>> = HashMap::new();
+    for &(i, j) in edges {
+        by_node.entry(i).or_default().push(format!("node-{j}"));
+        by_node.entry(j).or_default().push(format!("node-{i}"));
+    }
+
+    let mut set: JoinSet<Result<()>> = JoinSet::new();
+    for (node, peer_ids) in by_node {
+        let mut client = clients[node].clone();
+        set.spawn(async move {
+            client
+                .set_peer_links(Request::new(PeerLinkUpdate { peer_ids, blocked }))
+                .await
+                .with_context(|| format!("SetPeerLinks(blocked={blocked}) on node {node}"))?;
+            Ok(())
+        });
+    }
+    while let Some(joined) = set.join_next().await {
+        joined.context("SetPeerLinks task panicked")??;
+    }
+    Ok(())
+}
+
+/// Start the post-heal sync handshake across `edges`.
+///
+/// Only one endpoint of each edge needs kicking — the sync protocol is
+/// bidirectional once a message lands — so this kicks the lower-numbered node
+/// of each pair. Concurrent for the same reason as [`set_links_blocked`].
+///
+/// Must run only after every endpoint is unblocked.
+async fn kick_sync_edges(
+    clients: &[ReplicaClient<Channel>],
+    edges: &[(usize, usize)],
+) -> Result<()> {
+    let mut by_node: HashMap<usize, Vec<String>> = HashMap::new();
+    for &(i, j) in edges {
+        let (from, to) = if i < j { (i, j) } else { (j, i) };
+        by_node.entry(from).or_default().push(format!("node-{to}"));
+    }
+
+    let mut set: JoinSet<Result<()>> = JoinSet::new();
+    for (node, peer_ids) in by_node {
+        let mut client = clients[node].clone();
+        set.spawn(async move {
+            client
+                .kick_sync(Request::new(PeerIds { peer_ids }))
+                .await
+                .with_context(|| format!("KickSync on node {node}"))?;
+            Ok(())
+        });
+    }
+    while let Some(joined) = set.join_next().await {
+        joined.context("KickSync task panicked")??;
+    }
+    Ok(())
+}
+
+/// Assert that the partition actually held: no two groups may share a
+/// fingerprint at the end of the divergence phase.
+///
+/// With the topology fully wired and the partition enforced only by the
+/// blocked-link flags, a bug in that enforcement would quietly turn the
+/// scenario into "already converged, then heal" — which reports a fast heal
+/// and looks like a result rather than a broken experiment. The same class of
+/// failure as the shared-object bug the text-length gate catches, so it gets
+/// the same treatment: check it, in-runner, every trial.
+///
+/// Groups that wrote no ops are skipped — they are legitimately empty and
+/// would match each other.
+async fn verify_groups_diverged(
+    clients: &mut [ReplicaClient<Channel>],
+    groups: &[Group],
+) -> Result<()> {
+    let mut seen: Vec<(usize, Vec<u8>)> = Vec::with_capacity(groups.len());
+    for (gi, group) in groups.iter().enumerate() {
+        let node = group.nodes[0];
+        let fp = clients[node]
+            .get_state_fingerprint(Request::new(Empty {}))
+            .await
+            .with_context(|| format!("GetStateFingerprint on node {node}"))?
+            .into_inner()
+            .fingerprint;
+        if fp.is_empty() {
+            continue;
+        }
+        if let Some((other, _)) = seen.iter().find(|(_, other_fp)| *other_fp == fp) {
+            bail!(
+                "partition leaked: groups {other} and {gi} already agree before the heal — \
+                 the divergence phase measured nothing"
+            );
+        }
+        seen.push((gi, fp));
     }
     Ok(())
 }
@@ -497,9 +607,28 @@ pub async fn run(config: &TopologyConfig, source: NodeSource) -> Result<RunResul
 
 /// Run a partition-then-heal scenario.
 ///
-/// Phase 1: each group connects internally and writes independently.
-/// Phase 2 (heal): remaining cross-group edges are added; time from heal
-/// trigger to global convergence is returned.
+/// The partition is simulated at the application layer, not by withholding
+/// connections:
+///
+/// 1. **Setup** — the *entire* post-heal topology (intra-group edges plus the
+///    heal edges) is wired, then every cross-group link is blocked on both
+///    endpoints. Blocked links carry nothing: outbound flushes skip them and
+///    inbound messages are dropped unprocessed.
+/// 2. **Divergence** — each group writes independently. The blocks make the
+///    groups mutually invisible despite the open streams.
+/// 3. **Heal** — the blocks are cleared on both endpoints of every healed
+///    link and a `KickSync` starts the handshake. Time from the first unblock
+///    to global convergence is the measurement.
+///
+/// Wiring the graph up front is what makes the heal measurement mean
+/// something. Opening a sync stream costs a TCP connect plus an HTTP/2
+/// handshake, and that cost scales with the number of edges being opened; when
+/// the heal *was* the wiring, a `FullMesh` heal paid it on every cross-group
+/// pair while a `Bridge` heal paid it once. Comparing the two then compared
+/// connection setup as much as merge cost — on the docker lane it was up to
+/// 70% of the measured window. Now setup happens before the clock starts and
+/// the heal is a flag flip, so `convergence_ms` is the sync protocol and the
+/// CRDT merge, which is what the scenario claims to measure.
 pub async fn run_partition_heal(
     config: &PartitionConfig,
     source: NodeSource,
@@ -524,13 +653,26 @@ pub async fn run_partition_heal(
         ensure_text_all(&mut clients, 0..n).await?;
     }
 
-    // Wire each group internally and collect those edges for later subtraction.
+    // Intra-group edges, plus the cross-group edges the heal will open.
     let intra: Vec<(usize, usize)> = config
         .groups
         .iter()
         .flat_map(|g| intra_group_edges(&g.nodes))
         .collect();
-    connect_edges(&clients, &endpoints, &intra).await?;
+    let intra_set: HashSet<(usize, usize)> = intra.iter().copied().collect();
+    let heal_edges = heal_edges(&config.heal_topology, &config.groups, n, &intra_set);
+
+    // Block every cross-group link BEFORE wiring it, so the streams open
+    // silently — `connect_to_peer`'s opening handshake is itself skipped on a
+    // blocked link. Blocking is by peer ID and does not require the stream to
+    // exist yet, which is what makes this ordering safe.
+    set_links_blocked(&clients, &heal_edges, true).await?;
+
+    // Wire the full post-heal topology. All of this is outside every timed
+    // window; the heal below only flips flags.
+    let mut all_edges = intra.clone();
+    all_edges.extend(heal_edges.iter().copied());
+    connect_edges(&clients, &endpoints, &all_edges).await?;
     check_tasks(&mut tasks)?;
 
     // Apply ops to each group independently (the offline-divergence phase).
@@ -590,21 +732,24 @@ pub async fn run_partition_heal(
     }
     check_tasks(&mut tasks)?;
 
-    // Heal: pick the cross-group edges per heal_topology.
-    //   FullMesh — every cross-group pair; post-heal graph is K_n
-    //   Bridge   — only `groups[0].nodes[0] ↔ groups[1].nodes[0]` (validated
-    //              to require exactly 2 groups)
-    let intra_set: HashSet<(usize, usize)> = intra.iter().copied().collect();
-    let heal_edges = heal_edges(&config.heal_topology, &config.groups, n, &intra_set);
+    // The partition must actually have held: if any cross-group state leaked
+    // during the divergence phase, the groups already agree and the heal
+    // measures nothing. Cheaper and more direct than inferring it downstream
+    // from a suspiciously fast convergence.
+    verify_groups_diverged(&mut clients, &config.groups).await?;
 
-    // The heal timer has to start before the cross-group streams exist — that
-    // is what "time to heal" means — so stream setup is unavoidably inside the
-    // window. `connect_edges` issues the edges concurrently to keep that cost
-    // flat in edge count, and what remains is reported as `wiring_ms` so an
-    // analysis can subtract it rather than attribute it to merge cost.
+    // Heal: unblock both endpoints of every healed link, then kick the
+    // handshake. Both steps are inside the window — they are the heal — but
+    // both are flag flips and one round of message generation, not connection
+    // setup, and neither scales the way opening N streams did.
+    //
+    // The unblock must complete on ALL endpoints before any kick: a kick that
+    // reached a still-blocked peer would be dropped inbound, and the sender's
+    // protocol state would then be waiting on a reply that never comes.
     let heal_start = Instant::now();
-    connect_edges(&clients, &endpoints, &heal_edges).await?;
+    set_links_blocked(&clients, &heal_edges, false).await?;
     let wiring_ms = heal_start.elapsed().as_secs_f64() * 1000.0;
+    kick_sync_edges(&clients, &heal_edges).await?;
 
     let all_nodes: Vec<usize> = (0..n).collect();
     let convergence_ms = wait_for_nodes(
@@ -634,8 +779,7 @@ pub async fn run_partition_heal(
     // scenario shape so analyses can separate heal-driven convergence from
     // steady-state runs; edge_count and diameter let downstream plots tell
     // the FullMesh-heal and Bridge-heal variants apart on structural axes.
-    let mut final_edges = intra;
-    final_edges.extend(heal_edges.iter().copied());
+    let final_edges = all_edges;
     let final_graph = Connections::Custom {
         edges: final_edges.clone(),
     };
@@ -1014,6 +1158,151 @@ mod tests {
         }
     }
 
+    // ── app-layer partition ────────────────────────────────────────────────
+
+    async fn fingerprint_of(client: &mut ReplicaClient<Channel>) -> Vec<u8> {
+        client
+            .get_state_fingerprint(Request::new(Empty {}))
+            .await
+            .unwrap()
+            .into_inner()
+            .fingerprint
+    }
+
+    /// The core guarantee of the app-layer partition: a blocked link carries
+    /// nothing, even though the stream is fully open and both replicas are
+    /// writing. Without this, wiring the heal edges up front would simply
+    /// merge the groups immediately and the scenario would measure nothing.
+    #[tokio::test]
+    async fn blocked_link_carries_no_state_while_open() {
+        let mut tasks = JoinSet::new();
+        let (endpoints, mut clients) = spawn_nodes(2, &mut tasks).await.unwrap();
+        let edges = vec![(0, 1)];
+
+        // Block first, then wire: the stream opens without a handshake.
+        set_links_blocked(&clients, &edges, true).await.unwrap();
+        connect_edges(&clients, &endpoints, &edges).await.unwrap();
+
+        map_put(&mut clients[0], "from_a", "1").await.unwrap();
+        map_put(&mut clients[1], "from_b", "2").await.unwrap();
+
+        // Give any leak a generous chance to land before asserting.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        let fp_a = fingerprint_of(&mut clients[0]).await;
+        let fp_b = fingerprint_of(&mut clients[1]).await;
+        assert!(
+            !fp_a.is_empty() && !fp_b.is_empty(),
+            "both must have written"
+        );
+        assert_ne!(fp_a, fp_b, "blocked link leaked state across the partition");
+
+        check_tasks(&mut tasks).unwrap();
+    }
+
+    /// Unblocking plus a kick must converge an already-wired link. This is the
+    /// heal path end-to-end through the real gRPC stack: no new connection is
+    /// made, so convergence here is the sync protocol alone.
+    #[tokio::test]
+    async fn unblock_and_kick_heals_without_reconnecting() {
+        let mut tasks = JoinSet::new();
+        let (endpoints, mut clients) = spawn_nodes(2, &mut tasks).await.unwrap();
+        let edges = vec![(0, 1)];
+
+        set_links_blocked(&clients, &edges, true).await.unwrap();
+        connect_edges(&clients, &endpoints, &edges).await.unwrap();
+        map_put(&mut clients[0], "from_a", "1").await.unwrap();
+        map_put(&mut clients[1], "from_b", "2").await.unwrap();
+
+        set_links_blocked(&clients, &edges, false).await.unwrap();
+        kick_sync_edges(&clients, &edges).await.unwrap();
+
+        wait_for_nodes(
+            &mut clients,
+            &[0, 1],
+            Instant::now(),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        check_tasks(&mut tasks).unwrap();
+    }
+
+    /// The leak gate must fire when the groups already agree. Simulated by
+    /// running the check on two nodes that were never partitioned at all.
+    #[tokio::test]
+    async fn diverged_gate_rejects_groups_that_already_agree() {
+        let mut tasks = JoinSet::new();
+        let (endpoints, mut clients) = spawn_nodes(2, &mut tasks).await.unwrap();
+        connect_edges(&clients, &endpoints, &[(0, 1)])
+            .await
+            .unwrap();
+        map_put(&mut clients[0], "k", "v").await.unwrap();
+        wait_for_nodes(
+            &mut clients,
+            &[0, 1],
+            Instant::now(),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+
+        let groups = two_groups(vec![0], vec![1]);
+        let err = verify_groups_diverged(&mut clients, &groups)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("partition leaked"), "{err}");
+    }
+
+    /// ...and must pass when they genuinely differ.
+    #[tokio::test]
+    async fn diverged_gate_accepts_genuinely_divergent_groups() {
+        let mut tasks = JoinSet::new();
+        let (_endpoints, mut clients) = spawn_nodes(2, &mut tasks).await.unwrap();
+        map_put(&mut clients[0], "a", "1").await.unwrap();
+        map_put(&mut clients[1], "b", "2").await.unwrap();
+
+        let groups = two_groups(vec![0], vec![1]);
+        assert!(verify_groups_diverged(&mut clients, &groups).await.is_ok());
+    }
+
+    /// A heal that opens no new connections should cost far less than one
+    /// that does, and — the point of the change — should not scale with the
+    /// number of healed edges. Full-mesh heal on n=6 opens 9 cross-group
+    /// links; the reported `wiring_ms` is now flag flips only.
+    #[tokio::test]
+    async fn full_mesh_heal_wiring_does_not_scale_with_edge_count() {
+        let cfg = |n: usize, per_group: usize| -> PartitionConfig {
+            let half = n / 2;
+            let a: Vec<usize> = (0..half).collect();
+            let b: Vec<usize> = (half..n).collect();
+            toml::from_str(&format!(
+                "node_count = {n}\n\
+                 write_pattern = \"round_robin\"\n\
+                 ops_per_group = {per_group}\n\
+                 groups = [{{ nodes = {a:?} }}, {{ nodes = {b:?} }}]"
+            ))
+            .expect("valid partition config")
+        };
+
+        let small = run_partition_heal(&cfg(2, 4), NodeSource::InProcess, 1)
+            .await
+            .unwrap();
+        let large = run_partition_heal(&cfg(6, 4), NodeSource::InProcess, 1)
+            .await
+            .unwrap();
+
+        // n=6 full-mesh heal opens 9 cross-group links vs n=2's 1. Wiring is
+        // now two concurrent RPC rounds either way, so allow a wide factor
+        // and still catch a return to per-edge connection setup.
+        assert!(
+            large.wiring_ms < small.wiring_ms.max(1.0) * 10.0,
+            "heal wiring scaled with edge count: n2={:.3}ms n6={:.3}ms",
+            small.wiring_ms,
+            large.wiring_ms
+        );
+    }
+
     // ── wiring_ms ──────────────────────────────────────────────────────────
 
     /// A topology run wires every edge before starting the clock, so none of
@@ -1031,10 +1320,10 @@ mod tests {
         assert_eq!(result.wiring_ms, 0.0);
     }
 
-    /// A partition-heal run cannot wire the heal edges before starting its
-    /// clock, so it reports how much of the window went on stream setup. That
-    /// number must be a real part of the measured window — otherwise an
-    /// analysis subtracting it would produce a negative merge time.
+    /// The heal's unblock round is inside the window, so it is still reported
+    /// as `wiring_ms` — it just no longer contains connection setup. It must
+    /// remain a real part of the measured window, or an analysis subtracting
+    /// it would produce a negative merge time.
     #[tokio::test]
     async fn partition_heal_reports_wiring_within_the_convergence_window() {
         let config: PartitionConfig = toml::from_str(

@@ -198,6 +198,13 @@ impl CrdtAdapter for AutomergeAdapter {
         Ok(())
     }
 
+    fn sync_reset(&mut self, peer: &str) {
+        // Dropping the entry is the whole reset: the next generate/receive
+        // lazily creates a fresh `sync::State`, which starts the protocol
+        // from the full handshake.
+        self.sync_states.remove(peer);
+    }
+
     fn reset(&mut self) {
         *self = Self::new();
     }
@@ -703,6 +710,65 @@ mod tests {
 
         assert_eq!(a.text_length("text").unwrap(), 4, "all four chars survive");
         assert_eq!(b.text_length("text").unwrap(), 4);
+    }
+
+    // ── sync_reset (partition-heal support) ────────────────────────────────
+
+    /// After quiescence, generate returns `None` — the state believes the
+    /// peer is caught up. `sync_reset` must forget that, so the next generate
+    /// restarts the handshake. This is what lets a healed link re-establish
+    /// sync without reconnecting the stream.
+    #[test]
+    fn sync_reset_forgets_quiescence() {
+        let mut a = AutomergeAdapter::new();
+        let mut b = AutomergeAdapter::new();
+        a.apply_op(&map_put("doc", "k", "v")).unwrap();
+        sync_until_quiescent(&mut a, "a", &mut b, "b");
+        assert!(a.sync_generate("b").is_none(), "quiesced before reset");
+
+        a.sync_reset("b");
+        assert!(
+            a.sync_generate("b").is_some(),
+            "reset must restart the handshake"
+        );
+        // Document state is untouched by the protocol reset.
+        assert!(!a.get_heads().is_empty());
+    }
+
+    /// The heal scenario end-to-end at the adapter layer: a message is
+    /// generated and then lost (the block races the flush), leaving `a`'s
+    /// protocol state believing `b` received data it never saw. Resetting
+    /// both sides' states — what unblocking does — must let a fresh exchange
+    /// converge anyway.
+    #[test]
+    fn sync_reset_recovers_from_a_lost_message() {
+        let mut a = AutomergeAdapter::new();
+        let mut b = AutomergeAdapter::new();
+        a.apply_op(&map_put("doc", "k", "v")).unwrap();
+
+        // Generated but never delivered: a's sync::State records these heads
+        // as sent.
+        let lost = a.sync_generate("b");
+        assert!(lost.is_some(), "there was a change to send");
+        drop(lost);
+
+        // Heal: both sides discard protocol state, then sync normally.
+        a.sync_reset("b");
+        b.sync_reset("a");
+        sync_until_quiescent(&mut a, "a", &mut b, "b");
+
+        assert_eq!(a.state_fingerprint(), b.state_fingerprint());
+        assert_eq!(a.get_heads(), b.get_heads());
+        assert!(!b.get_heads().is_empty(), "b must have received the change");
+    }
+
+    /// Resetting a peer that has no state must be a no-op, not a panic —
+    /// unblock fires for peers that never exchanged a message.
+    #[test]
+    fn sync_reset_unknown_peer_is_noop() {
+        let mut a = AutomergeAdapter::new();
+        a.sync_reset("never-seen");
+        assert!(a.get_heads().is_empty());
     }
 
     #[test]

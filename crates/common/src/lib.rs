@@ -233,6 +233,22 @@ pub trait CrdtAdapter: Send + 'static {
     /// Process an inbound sync message from `peer`.
     fn sync_receive(&mut self, peer: &str, msg: Vec<u8>) -> anyhow::Result<()>;
 
+    /// Discard the per-peer sync protocol state for `peer`, so the next
+    /// [`Self::sync_generate`] starts a fresh handshake. Document state is
+    /// untouched.
+    ///
+    /// Used when healing a simulated partition: while a link is blocked,
+    /// messages may have been generated and then dropped (e.g. one racing the
+    /// block's onset), leaving this side's protocol state believing the peer
+    /// received data it never saw. Sync protocols cache that belief — for
+    /// Automerge, `sync::State` tracks sent hashes and shared heads — and a
+    /// stale cache can stall the exchange indefinitely. Dropping the state is
+    /// always safe: the handshake re-derives what the peer has from scratch,
+    /// at worst re-sending data the peer already holds.
+    ///
+    /// Must be a no-op if no state exists for `peer`.
+    fn sync_reset(&mut self, peer: &str);
+
     /// Discard all document and per-peer sync state, returning the adapter
     /// to its initial empty state.
     ///

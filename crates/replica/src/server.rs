@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
@@ -42,6 +42,19 @@ pub struct ReplicaState {
     /// wiping the adapter, ruling out a race where an in-flight `sync_receive`
     /// from an old peer connection pollutes the freshly-reset document.
     peer_tasks: tokio::sync::Mutex<Vec<JoinHandle<()>>>,
+    /// Peers whose sync links are administratively blocked — the app-layer
+    /// partition primitive behind the `SetPeerLinks` RPC.
+    ///
+    /// While a peer is here, no sync message is generated toward it (which
+    /// would consume protocol state for a message that cannot be delivered)
+    /// and inbound messages from it are dropped unprocessed (which would leak
+    /// document state across the simulated partition). Keyed by stable peer
+    /// ID rather than stream so a peer can be blocked before its stream even
+    /// exists.
+    ///
+    /// `std::sync::Mutex`: held only for set membership operations, never
+    /// across an `.await`.
+    blocked_peers: Mutex<HashSet<String>>,
     metrics: Metrics,
 }
 
@@ -68,6 +81,7 @@ impl ReplicaState {
             adapter: Mutex::new(Box::new(adapter)),
             peer_txs: tokio::sync::Mutex::new(HashMap::new()),
             peer_tasks: tokio::sync::Mutex::new(Vec::new()),
+            blocked_peers: Mutex::new(HashSet::new()),
             metrics: Metrics::new(&meter),
         })
     }
@@ -121,6 +135,56 @@ impl ReplicaState {
 
     fn text_length(&self, obj: &str) -> anyhow::Result<usize> {
         self.adapter().text_length(obj)
+    }
+
+    fn is_blocked(&self, peer: &str) -> bool {
+        self.blocked_peers
+            .lock()
+            .expect("blocked_peers mutex poisoned")
+            .contains(peer)
+    }
+
+    /// Block or unblock sync traffic with `peers` (see [`Self::blocked_peers`]).
+    ///
+    /// Unblocking also discards the per-peer sync protocol state: a message
+    /// generated just before the block engaged may have been dropped by the
+    /// receiver, leaving this side's `sync::State` believing data was
+    /// delivered that never was — the exact stall mode the flush-permit fix
+    /// guards against elsewhere. Restarting from a fresh handshake makes the
+    /// heal correct regardless of what was in flight when the partition began.
+    ///
+    /// Deliberately generates no sync traffic. The orchestrator kicks the
+    /// heal handshake separately (`KickSync`) once BOTH endpoints of every
+    /// healed link are unblocked; kicking from here would race the peer's own
+    /// unblock and the kick would be dropped as still-blocked inbound.
+    fn set_peer_links(&self, peers: &[String], blocked: bool) {
+        {
+            let mut set = self
+                .blocked_peers
+                .lock()
+                .expect("blocked_peers mutex poisoned");
+            for peer in peers {
+                if blocked {
+                    set.insert(peer.clone());
+                } else {
+                    set.remove(peer);
+                }
+            }
+            // Scope ends: never hold this lock while taking the adapter lock,
+            // so there is no ordering to get wrong elsewhere.
+        }
+        if !blocked {
+            let mut adapter = self.adapter();
+            for peer in peers {
+                adapter.sync_reset(peer);
+            }
+        }
+        tracing::info!(
+            actor = %self.actor_id,
+            ?peers,
+            blocked,
+            "peer links updated"
+        );
     }
 
     pub fn actor_id(&self) -> &str {
@@ -217,6 +281,10 @@ impl ReplicaState {
             }
         }
         self.peer_txs.lock().await.clear();
+        self.blocked_peers
+            .lock()
+            .expect("blocked_peers mutex poisoned")
+            .clear();
         self.adapter.lock().expect("adapter mutex poisoned").reset();
     }
 
@@ -241,23 +309,55 @@ impl ReplicaState {
             .collect();
 
         for (peer_id, tx) in &peers {
-            // Reserve capacity BEFORE generating. `sync_generate` advances the
-            // per-peer `sync::State` to "these heads have been sent", so a
-            // message that is generated and then dropped is lost from the
-            // protocol's point of view: the next generate returns `None` and
-            // the peer never learns about the change. Holding a permit first
-            // means we only ever generate a message we can actually enqueue,
-            // leaving the change pending for a later flush instead.
-            let Ok(permit) = tx.try_reserve() else {
-                self.record_sync_deferred(peer_id);
-                tracing::debug!(peer = %peer_id, "outbound channel full; deferring sync flush");
-                continue;
-            };
-            if let Some(msg) = self.sync_generate(peer_id) {
-                permit.send(msg);
-                self.record_sync_tx(peer_id);
-            }
-            // Nothing to send: dropping the permit returns the slot.
+            self.try_flush_peer(peer_id, tx);
+        }
+    }
+
+    /// Generate and enqueue one pending sync message for `peer_id`, if the
+    /// link permits it.
+    ///
+    /// Two guards, both about never consuming protocol state for a message
+    /// that will not arrive:
+    /// - A blocked peer is skipped entirely — generating toward it would both
+    ///   leak state across a simulated partition and strand the protocol.
+    /// - Capacity is reserved BEFORE generating. `sync_generate` advances the
+    ///   per-peer `sync::State` to "these heads have been sent", so a message
+    ///   generated and then dropped on a full channel is lost from the
+    ///   protocol's point of view: the next generate returns `None` and the
+    ///   peer never learns about the change. Holding a permit first leaves
+    ///   the change pending for a later flush instead.
+    fn try_flush_peer(&self, peer_id: &str, tx: &mpsc::Sender<Vec<u8>>) {
+        if self.is_blocked(peer_id) {
+            tracing::trace!(peer = %peer_id, "link blocked; skipping sync flush");
+            return;
+        }
+        let Ok(permit) = tx.try_reserve() else {
+            self.record_sync_deferred(peer_id);
+            tracing::debug!(peer = %peer_id, "outbound channel full; deferring sync flush");
+            return;
+        };
+        if let Some(msg) = self.sync_generate(peer_id) {
+            permit.send(msg);
+            self.record_sync_tx(peer_id);
+        }
+        // Nothing to send: dropping the permit returns the slot.
+    }
+
+    /// Generate and send a fresh sync message to each of `peers` — the
+    /// heal-phase handshake starter behind the `KickSync` RPC.
+    ///
+    /// Peers without an open stream are skipped silently: on non-mesh heal
+    /// graphs only the healed edges have streams, and a kick names peers, not
+    /// edges.
+    async fn kick_sync(&self, peers: &[String]) {
+        let txs = self.peer_txs.lock().await;
+        let targets: Vec<(String, mpsc::Sender<Vec<u8>>)> = peers
+            .iter()
+            .filter_map(|p| txs.get(p).map(|tx| (p.clone(), tx.clone())))
+            .collect();
+        drop(txs);
+        for (peer_id, tx) in &targets {
+            self.try_flush_peer(peer_id, tx);
         }
     }
 }
@@ -395,6 +495,24 @@ impl Replica for ReplicaService {
             length: length as u64,
         }))
     }
+
+    async fn set_peer_links(
+        &self,
+        request: Request<proto::PeerLinkUpdate>,
+    ) -> Result<Response<proto::Empty>, Status> {
+        let proto::PeerLinkUpdate { peer_ids, blocked } = request.into_inner();
+        self.state.set_peer_links(&peer_ids, blocked);
+        Ok(Response::new(proto::Empty {}))
+    }
+
+    async fn kick_sync(
+        &self,
+        request: Request<proto::PeerIds>,
+    ) -> Result<Response<proto::Empty>, Status> {
+        let peer_ids = request.into_inner().peer_ids;
+        self.state.kick_sync(&peer_ids).await;
+        Ok(Response::new(proto::Empty {}))
+    }
 }
 
 // ── Sync service ───────────────────────────────────────────────────────────
@@ -460,6 +578,17 @@ async fn recv_loop(
     while let Some(result) = inbound.next().await {
         match result {
             Ok(msg) => {
+                // A blocked link drops inbound traffic unprocessed. Applying
+                // it would carry document changes across the simulated
+                // partition; even generating a reply would consume sync
+                // protocol state toward a peer that will drop it. The sender's
+                // own stale state (it believes this message arrived) is
+                // discarded when the link is unblocked — see
+                // `ReplicaState::set_peer_links`.
+                if state.is_blocked(&peer_id) {
+                    tracing::trace!(peer = %peer_id, "link blocked; dropping inbound sync message");
+                    continue;
+                }
                 if let Err(e) = state.sync_receive(&peer_id, msg.payload) {
                     tracing::error!(peer = %peer_id, "sync_receive failed: {e:#}");
                     break;
@@ -532,9 +661,10 @@ async fn connect_to_peer(
 
     // Kick off the protocol from our side before signalling ready, so the
     // Automerge handshake is already in flight when the caller proceeds.
-    if let Some(msg) = state.sync_generate(&peer_id) {
-        raw_tx.send(msg).await?;
-    }
+    // `try_flush_peer` skips the kick when the link is blocked — a stream
+    // wired during a simulated partition opens silently, and the heal-phase
+    // `KickSync` starts the handshake later.
+    state.try_flush_peer(&peer_id, &raw_tx);
 
     // Unblock the ConnectPeer RPC — stream is open and initial message sent.
     let _ = ready_tx.send(());
@@ -657,5 +787,75 @@ mod tests {
         );
         // Capacity is intact: both slots are still usable.
         assert!(tx.try_reserve().is_ok());
+    }
+
+    // ── Peer-link blocking (partition primitive) ───────────────────────────
+
+    /// A blocked peer must receive nothing from a flush — not even a
+    /// handshake — while an unblocked peer on the same replica still does.
+    /// This is the outbound half of the partition primitive.
+    #[tokio::test]
+    async fn flush_skips_blocked_peers_and_serves_the_rest() {
+        let state = ReplicaState::new("node-0".to_owned(), AutomergeAdapter::new());
+        let (tx_b, mut rx_blocked) = mpsc::channel::<Vec<u8>>(8);
+        let (tx_o, mut rx_open) = mpsc::channel::<Vec<u8>>(8);
+        state.register_peer("node-1".to_owned(), tx_b).await;
+        state.register_peer("node-2".to_owned(), tx_o).await;
+        state.set_peer_links(&["node-1".to_owned()], true);
+
+        state.apply_op_timed(&map_put("k")).unwrap();
+        state.flush_to_peers().await;
+
+        assert!(
+            rx_blocked.try_recv().is_err(),
+            "blocked peer must receive nothing"
+        );
+        assert!(
+            rx_open.try_recv().is_ok(),
+            "open peer must still be flushed"
+        );
+    }
+
+    /// Blocking must not consume sync protocol state: after unblocking, a
+    /// flush must deliver everything the peer missed. The unblock resets the
+    /// per-peer state, so this holds even if the block raced an in-flight
+    /// generate.
+    #[tokio::test]
+    async fn unblock_delivers_changes_made_during_the_block() {
+        let state = ReplicaState::new("node-0".to_owned(), AutomergeAdapter::new());
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(8);
+        state.register_peer("node-1".to_owned(), tx).await;
+        state.set_peer_links(&["node-1".to_owned()], true);
+
+        state.apply_op_timed(&map_put("during-block")).unwrap();
+        state.flush_to_peers().await;
+        assert!(rx.try_recv().is_err(), "nothing crosses a blocked link");
+
+        state.set_peer_links(&["node-1".to_owned()], false);
+        state.kick_sync(&["node-1".to_owned()]).await;
+        assert!(
+            rx.try_recv().is_ok(),
+            "post-unblock kick must start the handshake"
+        );
+    }
+
+    /// Kicking a peer with no open stream must be a silent no-op — kicks name
+    /// peers, and on sparse heal graphs not every peer has an edge.
+    #[tokio::test]
+    async fn kick_sync_ignores_unknown_peers() {
+        let state = ReplicaState::new("node-0".to_owned(), AutomergeAdapter::new());
+        state.kick_sync(&["node-9".to_owned()]).await;
+    }
+
+    /// Trial reset must clear the blocked set: a fresh trial's links start
+    /// open, whatever the previous scenario left behind.
+    #[tokio::test]
+    async fn reset_clears_blocked_peers() {
+        let state = ReplicaState::new("node-0".to_owned(), AutomergeAdapter::new());
+        state.set_peer_links(&["node-1".to_owned()], true);
+        assert!(state.is_blocked("node-1"));
+
+        state.reset().await;
+        assert!(!state.is_blocked("node-1"), "reset must unblock all links");
     }
 }
