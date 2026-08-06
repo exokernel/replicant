@@ -1,9 +1,32 @@
 name: CI
 
+# paths-ignore: skip runs when a push touches ONLY documentation or
+# analysis-side artifacts — nothing the gate or docker smoke reads. A push
+# mixing docs with any code change still runs (the filter skips only when
+# every changed file matches). Deliberately a blacklist rather than a code
+# whitelist so newly-added source directories trigger CI by default.
+#
+# In the ignore set: markdown anywhere; archived measurement data (data/ is
+# CSVs + JSON + a README, consumed by notebooks, not by CI); the notebooks
+# and their requirements (CI installs its own pyyaml directly); repo-meta
+# dotfiles. NOT ignored: scenarios/ (just check-scenarios), Justfile,
+# Dockerfile, deploy/, proto/, rust-toolchain.toml, and this file itself.
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'data/**'
+      - 'analysis/**'
+      - '.gitignore'
+      - '.gitattributes'
   pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'data/**'
+      - 'analysis/**'
+      - '.gitignore'
+      - '.gitattributes'
 
 env:
   CARGO_TERM_COLOR: always
