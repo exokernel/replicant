@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Superseded runs on the same ref are wasted compute — cancel them.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The same gate as local development: `just ci` (fmt check → clippy
+  # -D warnings → test → smoke → scenario-grid check). Running the recipe
+  # verbatim instead of re-encoding its steps as YAML keeps CI and the
+  # local gate from drifting apart. The toolchain (1.95.0 + rustfmt +
+  # clippy) comes from rust-toolchain.toml, which rustup honors
+  # automatically — no version pin in this file to fall out of sync.
+  gate:
+    name: just ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+      - name: Run the gate
+        run: just ci
+
+  # End-to-end deployment check that the local gate deliberately excludes
+  # (needs a docker daemon): build the replica image, bring up an
+  # N-replica compose stack + observability, run one trial against it,
+  # tear down. This is the "deployment plumbing works" claim — a real part
+  # of the framework contribution — exercised on every push instead of
+  # only when someone remembers to run it. The in-docker cargo build is
+  # cold each run, so this job is the slow one.
+  smoke-docker:
+    name: just smoke-docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      # gen-compose.py needs pyyaml; the runner's system python3 may not
+      # ship it.
+      - name: Install pyyaml
+        run: pip install pyyaml
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+      # The text scenario is the strongest cheap smoke: beyond the sync
+      # plumbing it exercises the EnsureText shared-object bootstrap and
+      # the post-convergence text-length gate through the real stack.
+      - name: Run docker smoke
+        run: just smoke-docker scenarios/full-mesh-n2-text.toml
