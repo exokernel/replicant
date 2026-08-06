@@ -19,7 +19,7 @@ The `CrdtAdapter` trait is the thesis contribution; it has exactly one implement
 The notebook reports CV and p50/p95 but does no confidence intervals, hypothesis tests, or warm-up handling. The "edges drive convergence, not diameter" observation is the most prominent pattern in the data so far — if we ever do want to elevate it from a description to a defensible claim, that would need a methodology paragraph and CI bands on the convergence-vs-N plots.
 
 ### ~~Reproducibility metadata in the CSV~~ — DONE 2026-08-06
-Landed as the proposed sidecar: `--sidecar PATH` on the orchestrator (plus `--dry-run`) writes commit hash + dirty flag, host, build profile, node source, per-cell parameters, per-(trial, node) PRNG seeds, and achieved contention; `bench-docker`/`bench-k8s` emit `results-{source}.meta.json` automatically. Citable sweeps are archived with their sidecars under tracked `data/`. Remaining sliver: host OS/kernel + container-runtime versions aren't captured yet — folded into the statistical-rigor item's methodology work if needed.
+Landed as the proposed provenance file: `--provenance PATH` on the orchestrator (plus `--dry-run`) writes commit hash + dirty flag, host, build profile, node source, per-cell parameters, per-(trial, node) PRNG seeds, and achieved contention; `bench-docker`/`bench-k8s` emit `results-{source}.meta.json` automatically. Citable sweeps are archived with their provenance files under tracked `data/`. Remaining sliver: host OS/kernel + container-runtime versions aren't captured yet — folded into the statistical-rigor item's methodology work if needed.
 
 ## Medium-impact — broadens the empirical surface
 

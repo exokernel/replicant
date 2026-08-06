@@ -43,7 +43,7 @@ The orchestrator can drive a stack of containerized replicas wired to a real OTe
 
 `--replicas` accepts comma-separated `client_addr[=peer_addr]` entries — the first is what the orchestrator dials, the second (defaults to the first when omitted) is what each replica passes to its peers in `ConnectPeer`. The two diverge whenever replicas live in a different network namespace from the orchestrator.
 
-Replica state is cleared between trials and between scenarios via a `Replica.Reset` RPC, so a single orchestrator invocation against an externally-managed stack can sweep multiple scenarios with `--trials N` — no need to bounce containers/pods between runs. The `just bench-docker` and `just bench-k8s` recipes wrap this: one stack per distinct `node_count` bucket, Reset between trials within a bucket, output to `results/results-{docker,k8s}.csv` for the analysis notebooks plus a `results-{docker,k8s}.meta.json` provenance sidecar (see [Results provenance sidecar](#results-provenance-sidecar)).
+Replica state is cleared between trials and between scenarios via a `Replica.Reset` RPC, so a single orchestrator invocation against an externally-managed stack can sweep multiple scenarios with `--trials N` — no need to bounce containers/pods between runs. The `just bench-docker` and `just bench-k8s` recipes wrap this: one stack per distinct `node_count` bucket, Reset between trials within a bucket, output to `results/results-{docker,k8s}.csv` for the analysis notebooks plus a `results-{docker,k8s}.meta.json` provenance file (see [Run provenance](#run-provenance)).
 
 ### docker compose
 
@@ -359,7 +359,7 @@ insert lands, drawn per-op against the issuing replica's own text length:
 
 Positions come from a per-replica seeded PRNG (`seed = f(cell, replica,
 trial)`, hand-rolled SplitMix64), so the op stream is bit-identical across
-runs and across CRDT adapters — the seeds are recorded in the results sidecar
+runs and across CRDT adapters — the seeds are recorded in the run-provenance file
 (below). The `divergence-n2-*` scenario family is a 12-cell grid of
 {1e2..1e5} ops-per-side × the three localities, modeling two replicas editing
 offline and then merging: partition-heal with singleton groups, so
@@ -381,15 +381,15 @@ one side's entire text — while fingerprints converged):
   outside the measurement window. Fingerprint equality proves the replicas
   agree; only this proves they agree on a document containing all the work.
 
-### Results provenance sidecar
+### Run provenance
 
-`--sidecar PATH` writes a JSON provenance record next to the results: git
+`--provenance PATH` writes a JSON run-provenance record next to the results: git
 commit + dirty flag, host, build profile, node source (in-process vs
 external), per-cell parameters, every per-(trial, node) PRNG seed, and the
 cell's achieved contention (concurrent-siblings-per-anchor, simulated from
-the same seeded draws the runner uses). `--dry-run` emits the sidecar without
+the same seeded draws the runner uses). `--dry-run` emits the provenance file without
 running trials. The `bench-docker` / `bench-k8s` recipes write it
 automatically as `results/results-{docker,k8s}.meta.json`. Sweeps worth
-citing are archived with their sidecars under the tracked [`data/`](data/)
+citing are archived with their provenance files under the tracked [`data/`](data/)
 directory (e.g. [`data/divergence-pilot-2026-08-06/`](data/divergence-pilot-2026-08-06/));
 `results/` remains gitignored scratch.

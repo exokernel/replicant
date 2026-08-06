@@ -64,7 +64,7 @@ impl<'de> Deserialize<'de> for ScenarioFile {
 
 /// Write distribution for ops in a scenario run.
 ///
-/// `Serialize` is derived alongside `Deserialize` so the results sidecar
+/// `Serialize` is derived alongside `Deserialize` so the run-provenance file
 /// records each parameter with the exact spelling the scenario TOML uses.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]

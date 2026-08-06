@@ -76,7 +76,7 @@ bench-docker scenarios='scenarios/full-mesh-n5.toml' trials='10':
     scenarios='{{scenarios}}'
     trials='{{trials}}'
     out='results/results-docker.csv'
-    # Run provenance for $out — commit, host, build profile, seeds, cell params.
+    # Run-provenance file for $out — commit, host, build profile, seeds, cell params.
     # `results/` is gitignored, so without this a stored CSV cannot be traced
     # back to the code that produced it.
     meta="${out%.csv}.meta.json"
@@ -112,7 +112,7 @@ bench-docker scenarios='scenarios/full-mesh-n5.toml' trials='10':
     mkdir -p results
     : > "$out"  # start clean — bench runs are not additive across invocations
     header_written=0
-    metas=()  # per-group sidecar temp files, merged into "$meta" after the loop
+    metas=()  # per-group provenance temp files, merged into "$meta" after the loop
 
     for n in "${ns[@]}"; do
         echo ">>> bench-docker: N=$n, scenarios:${by_n[$n]}" >&2
@@ -129,7 +129,7 @@ bench-docker scenarios='scenarios/full-mesh-n5.toml' trials='10':
         tmpmeta=$(mktemp)
         metas+=("$tmpmeta")
         # ${by_n[$n]} intentionally unquoted so the shell splits on whitespace.
-        cargo run --release --bin orchestrator -- --trials "$trials" --replicas "$replicas" --sidecar "$tmpmeta" ${by_n[$n]} > "$tmpcsv"
+        cargo run --release --bin orchestrator -- --trials "$trials" --replicas "$replicas" --provenance "$tmpmeta" ${by_n[$n]} > "$tmpcsv"
         if [ "$header_written" = "0" ]; then
             cat "$tmpcsv" >> "$out"
             header_written=1
@@ -141,7 +141,7 @@ bench-docker scenarios='scenarios/full-mesh-n5.toml' trials='10':
         $compose down --remove-orphans
     done
 
-    # One sidecar per orchestrator invocation (i.e. per node-count group). Kept
+    # One provenance record per orchestrator invocation (i.e. per node-count group). Kept
     # as a list rather than merged into one object: each invocation has its own
     # replica wiring and scenario set, and flattening them would invent a single
     # run that never happened.
@@ -265,7 +265,7 @@ bench-k8s scenarios='scenarios/full-mesh-n5.toml' trials='10':
     mkdir -p results
     : > "$out"  # start clean — bench runs are not additive across invocations
     header_written=0
-    metas=()  # per-group sidecar temp files, merged into "$meta" after the loop
+    metas=()  # per-group provenance temp files, merged into "$meta" after the loop
 
     for n in "${ns[@]}"; do
         echo ">>> bench-k8s: N=$n, scenarios:${by_n[$n]}" >&2
@@ -302,7 +302,7 @@ bench-k8s scenarios='scenarios/full-mesh-n5.toml' trials='10':
         tmpmeta=$(mktemp)
         metas+=("$tmpmeta")
         # ${by_n[$n]} intentionally unquoted so the shell splits on whitespace.
-        cargo run --release --bin orchestrator -- --trials "$trials" --replicas "$replicas" --sidecar "$tmpmeta" ${by_n[$n]} > "$tmpcsv"
+        cargo run --release --bin orchestrator -- --trials "$trials" --replicas "$replicas" --provenance "$tmpmeta" ${by_n[$n]} > "$tmpcsv"
         if [ "$header_written" = "0" ]; then
             cat "$tmpcsv" >> "$out"
             header_written=1
@@ -312,7 +312,7 @@ bench-k8s scenarios='scenarios/full-mesh-n5.toml' trials='10':
         rm "$tmpcsv"
     done
 
-    # One sidecar per orchestrator invocation — see the note in `bench-docker`.
+    # One provenance record per orchestrator invocation — see the note in `bench-docker`.
     jq -s '{invocations: .}' "${metas[@]}" > "$meta"
     rm -f "${metas[@]}"
 

@@ -22,8 +22,8 @@ use opentelemetry_sdk::metrics::exporter::PushMetricExporter;
 use opentelemetry_sdk::metrics::{SdkMeterProvider, Temporality};
 
 mod contention;
+mod provenance;
 mod runner;
-mod sidecar;
 mod topology;
 
 use runner::{NodeSource, ReplicaEndpoint};
@@ -47,18 +47,18 @@ struct Args {
     #[arg(long)]
     metrics_file: Option<PathBuf>,
 
-    /// Write a run-provenance sidecar (commit, host, build profile, seeds, cell
-    /// parameters) as JSON to this file. Pair it with the result CSV, which
-    /// records none of that; `results/` is gitignored, so without a sidecar a
-    /// stored CSV cannot be traced back to the code that produced it.
+    /// Write a run-provenance file (commit, host, build profile, seeds, cell
+    /// parameters) as JSON to this path. Pair it with the result CSV, which
+    /// records none of that; `results/` is gitignored, so without a provenance
+    /// file a stored CSV cannot be traced back to the code that produced it.
     ///
     /// Written before the first trial, so an interrupted sweep still leaves a
     /// record of what it was configured to run.
     #[arg(long)]
-    sidecar: Option<PathBuf>,
+    provenance: Option<PathBuf>,
 
-    /// Parse the scenarios and write the sidecar, then exit without running any
-    /// trials. Everything in the sidecar is derived from the config and the
+    /// Parse the scenarios and write the provenance file, then exit without
+    /// running any trials. Everything in it is derived from the config and the
     /// seeds, so cell metadata — including achieved contention — is available
     /// without spending the CPU a sweep would cost.
     #[arg(long)]
@@ -145,17 +145,17 @@ async fn main() -> Result<()> {
             .collect::<Result<_>>()?
     };
 
-    if let Some(path) = &args.sidecar {
-        sidecar::write(
+    if let Some(path) = &args.provenance {
+        provenance::write(
             path,
-            &sidecar::RunMeta {
+            &provenance::RunMeta {
                 scenarios: &scenarios,
                 paths: &args.scenarios,
                 trials: args.trials,
                 replicas: &args.replicas,
             },
         )?;
-        tracing::info!(path = %path.display(), "run provenance sidecar written");
+        tracing::info!(path = %path.display(), "run provenance written");
     }
 
     if args.dry_run {

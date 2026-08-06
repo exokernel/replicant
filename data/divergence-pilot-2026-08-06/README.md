@@ -3,9 +3,9 @@
 Archived measurement runs for the RQ-1 offline-divergence pilot: divergence-n2
 cells ({1e2,1e3,1e4} ops-per-side × {append, random_position, same_region}
 edit locality), 20 trials per cell, Automerge adapter. Each `.csv` has a
-matching `.meta.json` provenance sidecar (commit, host, build profile, node
+matching `.meta.json` provenance file (commit, host, build profile, node
 source, per-cell parameters, per-(repetition,node) PRNG seeds, achieved
-contention) written by the orchestrator's `--sidecar` flag.
+contention) written by the orchestrator's `--provenance` flag.
 
 Unlike the gitignored `results/` scratch directory, this folder is tracked:
 these are the runs the analysis and writeup refer back to.
@@ -16,7 +16,7 @@ these are the runs the analysis and writeup refer back to.
   Produced with the shared-text-object bootstrap (`EnsureText`) and the
   per-trial text-length gate; all 540 heals verified to contain both sides'
   inserts. Headline: same_region ≈ 1.9× append at 1e3/1e4 (Welch t = 14–30),
-  random_position +8–14%. Note the sidecar records `dirty: true` against
+  random_position +8–14%. Note the provenance file records `dirty: true` against
   commit `48921029` — the fix was authored but not yet committed when the
   sweep ran; the code state is the commit that introduced this directory's
   parent tree (see repo history: "divergence sweep: shared-text-object fix,

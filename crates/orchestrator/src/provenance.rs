@@ -1,4 +1,4 @@
-//! Results sidecar — run provenance written alongside a benchmark CSV.
+//! Run-provenance file written alongside a benchmark CSV.
 //!
 //! The CSV carries measurements and nothing else: reading one months later
 //! cannot tell you which commit produced it, on which host, in which build
@@ -6,7 +6,7 @@
 //! commit history to fall back on either. This module writes that context to a
 //! JSON file next to the CSV at the moment the run starts.
 //!
-//! Scope: the sidecar describes the run's *configuration*, not its outcome. It
+//! Scope: the provenance file describes the run's *configuration*, not its outcome. It
 //! is written before the first trial, so a sweep that dies halfway still leaves
 //! a record of what was attempted — pair it with the CSV to see how far the run
 //! actually got.
@@ -44,19 +44,19 @@ pub struct RunMeta<'a> {
     pub replicas: &'a [ReplicaEndpoint],
 }
 
-/// Write the sidecar for `meta` to `path`, creating parent directories.
+/// Write the provenance file for `meta` to `path`, creating parent directories.
 pub fn write(path: &Path, meta: &RunMeta<'_>) -> Result<()> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating sidecar directory {}", parent.display()))?;
+            .with_context(|| format!("creating provenance directory {}", parent.display()))?;
     }
     let body = serde_json::to_string_pretty(&document(meta))
         .expect("serde_json::Value serialization is infallible");
     std::fs::write(path, format!("{body}\n"))
-        .with_context(|| format!("writing sidecar {}", path.display()))
+        .with_context(|| format!("writing provenance file {}", path.display()))
 }
 
-/// Build the sidecar document.
+/// Build the provenance document.
 fn document(meta: &RunMeta<'_>) -> Value {
     let scenarios: Vec<Value> = meta
         .scenarios
@@ -213,8 +213,8 @@ fn unix_millis() -> u64 {
 /// Shells out to `git` rather than `jj` because the repo is jj-colocated (so
 /// `git` sees the same history) and `git` is the one that is present on any
 /// measurement host. Both fields are `null` if the command is unavailable or
-/// the run happens outside a repository — a sidecar without provenance is
-/// still worth more than no sidecar.
+/// the run happens outside a repository — a provenance file without git identity is
+/// still worth more than none.
 fn git_provenance() -> Value {
     let commit = capture(&["rev-parse", "HEAD"]);
     // `--porcelain` prints one line per modified path; empty output == clean.
@@ -311,7 +311,7 @@ mod tests {
     }
 
     /// A recorded seed must be the one the runner actually seeds with —
-    /// otherwise the sidecar documents a replay that does not reproduce.
+    /// otherwise the provenance file documents a replay that does not reproduce.
     #[test]
     fn recorded_seed_matches_runner_seed_fn() {
         let scenarios = [text_cell(100, Locality::RandomPosition)];
@@ -359,7 +359,7 @@ mod tests {
 
     #[test]
     fn writes_file_and_creates_parent_dir() {
-        let dir = std::env::temp_dir().join(format!("replicant-sidecar-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("replicant-provenance-{}", std::process::id()));
         let path = dir.join("nested").join("meta.json");
         let scenarios = [text_cell(100, Locality::Append)];
         write(&path, &meta_for(&scenarios, 1)).unwrap();
