@@ -18,13 +18,13 @@ The `CrdtAdapter` trait is the thesis contribution; it has exactly one implement
 ### Statistical rigor in the analysis
 The notebook reports CV and p50/p95 but does no confidence intervals, hypothesis tests, or warm-up handling. The "edges drive convergence, not diameter" observation is the most prominent pattern in the data so far — if we ever do want to elevate it from a description to a defensible claim, that would need a methodology paragraph and CI bands on the convergence-vs-N plots.
 
-### Reproducibility metadata in the CSV
-Results CSV records `convergence_ms` but not the replicant commit hash, host OS/kernel, container runtime, or hardware. Six months on, "what produced figure 4.3?" should be answerable from the artifact alone. Easiest path: extend the orchestrator to emit a leading comment row or a sidecar `results-{source}.meta.json`.
+### ~~Reproducibility metadata in the CSV~~ — DONE 2026-08-06
+Landed as the proposed sidecar: `--sidecar PATH` on the orchestrator (plus `--dry-run`) writes commit hash + dirty flag, host, build profile, node source, per-cell parameters, per-(trial, node) PRNG seeds, and achieved contention; `bench-docker`/`bench-k8s` emit `results-{source}.meta.json` automatically. Citable sweeps are archived with their sidecars under tracked `data/`. Remaining sliver: host OS/kernel + container-runtime versions aren't captured yet — folded into the statistical-rigor item's methodology work if needed.
 
 ## Medium-impact — broadens the empirical surface
 
 ### Workload diversity beyond `MapPut`
-All scenarios use `MapPut`. The `Op` enum supports list/text/splice, but no scenarios exercise them. A "CRDT benchmarking framework" that only writes scalar map keys is a narrower claim than the framework can support. Add at least one text-editing scenario and one list-splice scenario.
+**Text: DONE 2026-08-05/06** — `workload = "text_splice"` with the seeded `locality` axis (append / random_position / same_region) and the 12-cell `divergence-n2-*` grid; backed by the `EnsureText` shared-object bootstrap and the post-convergence text-length gate. **Remaining:** no scenario exercises list insert/splice yet — one list-splice scenario would complete the `Op` enum's coverage.
 
 ### In-process vs docker/k8s metrics consistency gap
 Per-actor OTel metrics (`replicant.sync.messages.tx/rx`, `replicant.doc.size_bytes`, `replicant.op.duration`) only flow into the analysis pipeline for in-process runs. But [[finding_inprocess_artifact_roundrobin]] shows in-process round_robin numbers are artifactually inflated. So trusted convergence numbers (docker/k8s) and trusted per-actor metrics live in different runs. Options:

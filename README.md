@@ -16,7 +16,7 @@
 A CRDT benchmarking framework built on [Automerge](https://automerge.org/) and gRPC. Replicant spins up replica nodes, drives sync workloads between them, and collects latency/throughput metrics via OpenTelemetry.
 
 > [!IMPORTANT]
-> **Work in progress.** Replicant is an early-stage research framework. Any specific numbers or patterns surfaced by the notebooks are descriptions of what one or two sweeps produced on a single host — not claims about CRDT performance in general. Treat figures as illustrative; see [TODO.md](TODO.md) for the framework gaps (second CRDT backend, statistical rigor, reproducibility metadata, multi-host) that need to land before any of it would be defensible as more than that.
+> **Work in progress.** Replicant is an early-stage research framework. Any specific numbers or patterns surfaced by the notebooks are descriptions of what one or two sweeps produced on a single host — not claims about CRDT performance in general. Treat figures as illustrative; see [TODO.md](TODO.md) for the framework gaps (second CRDT backend, statistical rigor, multi-host) that need to land before any of it would be defensible as more than that.
 
 ## Crates
 
@@ -33,7 +33,7 @@ In-process (no Docker needed; the fastest path for local development):
 ```sh
 just          # list all available recipes
 just smoke    # run the three built-in regression scenarios (2, 3, and 4 nodes)
-just ci       # full gate: fmt check → lint → test → smoke
+just ci       # full gate: fmt check → lint → test → smoke → scenario-grid check
 just docs     # build and open rustdoc
 ```
 
@@ -43,7 +43,7 @@ The orchestrator can drive a stack of containerized replicas wired to a real OTe
 
 `--replicas` accepts comma-separated `client_addr[=peer_addr]` entries — the first is what the orchestrator dials, the second (defaults to the first when omitted) is what each replica passes to its peers in `ConnectPeer`. The two diverge whenever replicas live in a different network namespace from the orchestrator.
 
-Replica state is cleared between trials and between scenarios via a `Replica.Reset` RPC, so a single orchestrator invocation against an externally-managed stack can sweep multiple scenarios with `--trials N` — no need to bounce containers/pods between runs. The `just bench-docker` and `just bench-k8s` recipes wrap this: one stack per distinct `node_count` bucket, Reset between trials within a bucket, output to `results/results-{docker,k8s}.csv` for the analysis notebooks.
+Replica state is cleared between trials and between scenarios via a `Replica.Reset` RPC, so a single orchestrator invocation against an externally-managed stack can sweep multiple scenarios with `--trials N` — no need to bounce containers/pods between runs. The `just bench-docker` and `just bench-k8s` recipes wrap this: one stack per distinct `node_count` bucket, Reset between trials within a bucket, output to `results/results-{docker,k8s}.csv` for the analysis notebooks plus a `results-{docker,k8s}.meta.json` provenance sidecar (see [Results provenance sidecar](#results-provenance-sidecar)).
 
 ### docker compose
 
@@ -344,3 +344,52 @@ graph LR
 ```
 
 > **Orange** = write op (orchestrator → node) &nbsp; **Blue** = Automerge sync connection (node ↔ node)
+
+### Text workloads and the divergence grid
+
+The `workload` field selects what each write does: `map_put` (default — every
+pre-existing scenario) or `text_splice`, which exercises the sequence-CRDT
+path. For partition-heal text scenarios the `locality` field sets where each
+insert lands, drawn per-op against the issuing replica's own text length:
+
+- **`append`** — insert at the end (`pos = len`). Low-contention floor.
+- **`random_position`** — uniform in `[0, len]`. Exercises positional access.
+- **`same_region`** — always `pos = 0`, so every op contests the same anchor.
+  Maximal contention.
+
+Positions come from a per-replica seeded PRNG (`seed = f(cell, replica,
+trial)`, hand-rolled SplitMix64), so the op stream is bit-identical across
+runs and across CRDT adapters — the seeds are recorded in the results sidecar
+(below). The `divergence-n2-*` scenario family is a 12-cell grid of
+{1e2..1e5} ops-per-side × the three localities, modeling two replicas editing
+offline and then merging: partition-heal with singleton groups, so
+`convergence_ms` is the heal-to-merge time. The cells are generated, not
+hand-written — `just gen-scenarios` writes them and `just check-scenarios`
+(part of `just ci`) fails if a file drifts from its generator.
+
+Two correctness mechanisms back text workloads, both born of a real bug
+(replicas that diverge from an empty document each lazily created a *private*
+text object; the heal then resolved a map-key conflict and silently discarded
+one side's entire text — while fingerprints converged):
+
+- **Shared-object bootstrap** (`Replica.EnsureText`): before any edges are
+  wired, every replica authors a bit-identical bootstrap change (fixed actor,
+  time 0) creating the text object, so all replicas share one object identity
+  without any sync.
+- **Post-convergence validity gate** (`Replica.GetTextLength`): after every
+  text trial the runner asserts final text length == total ops on every node,
+  outside the measurement window. Fingerprint equality proves the replicas
+  agree; only this proves they agree on a document containing all the work.
+
+### Results provenance sidecar
+
+`--sidecar PATH` writes a JSON provenance record next to the results: git
+commit + dirty flag, host, build profile, node source (in-process vs
+external), per-cell parameters, every per-(trial, node) PRNG seed, and the
+cell's achieved contention (concurrent-siblings-per-anchor, simulated from
+the same seeded draws the runner uses). `--dry-run` emits the sidecar without
+running trials. The `bench-docker` / `bench-k8s` recipes write it
+automatically as `results/results-{docker,k8s}.meta.json`. Sweeps worth
+citing are archived with their sidecars under the tracked [`data/`](data/)
+directory (e.g. [`data/divergence-pilot-2026-08-06/`](data/divergence-pilot-2026-08-06/));
+`results/` remains gitignored scratch.
