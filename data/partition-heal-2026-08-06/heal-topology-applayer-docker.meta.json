@@ -1,0 +1,466 @@
+{
+  "invocations": [
+    {
+      "build": {
+        "arch": "x86_64",
+        "orchestrator_version": "0.1.0",
+        "os": "linux",
+        "profile": "release"
+      },
+      "generated_at_unix_ms": 1785997256467,
+      "git": {
+        "commit": "eab73112ee006bc018173c5ca25728174584fc46",
+        "dirty": false
+      },
+      "host": {
+        "cpus": 8,
+        "hostname": "forge"
+      },
+      "run": {
+        "node_source": "external",
+        "replicas": [
+          {
+            "client_addr": "localhost:50051",
+            "peer_addr": "replica-0:50051"
+          },
+          {
+            "client_addr": "localhost:50052",
+            "peer_addr": "replica-1:50051"
+          },
+          {
+            "client_addr": "localhost:50053",
+            "peer_addr": "replica-2:50051"
+          },
+          {
+            "client_addr": "localhost:50054",
+            "peer_addr": "replica-3:50051"
+          }
+        ],
+        "trials": 10
+      },
+      "scenarios": [
+        {
+          "kind": "partition_heal",
+          "name": "partition-heal-n4-bridge-concentrated",
+          "node_count": 4,
+          "op_count": 8,
+          "params": {
+            "groups": [
+              [
+                0,
+                1
+              ],
+              [
+                2,
+                3
+              ]
+            ],
+            "heal_topology": "bridge",
+            "locality": "append",
+            "ops_per_group": 4,
+            "workload": "map_put",
+            "write_pattern": "concentrated"
+          },
+          "path": "scenarios/partition-heal-n4-bridge-concentrated.toml"
+        },
+        {
+          "kind": "partition_heal",
+          "name": "partition-heal-n4-bridge",
+          "node_count": 4,
+          "op_count": 8,
+          "params": {
+            "groups": [
+              [
+                0,
+                1
+              ],
+              [
+                2,
+                3
+              ]
+            ],
+            "heal_topology": "bridge",
+            "locality": "append",
+            "ops_per_group": 4,
+            "workload": "map_put",
+            "write_pattern": "round_robin"
+          },
+          "path": "scenarios/partition-heal-n4-bridge.toml"
+        },
+        {
+          "kind": "partition_heal",
+          "name": "partition-heal-n4-concentrated",
+          "node_count": 4,
+          "op_count": 8,
+          "params": {
+            "groups": [
+              [
+                0,
+                1
+              ],
+              [
+                2,
+                3
+              ]
+            ],
+            "heal_topology": "full_mesh",
+            "locality": "append",
+            "ops_per_group": 4,
+            "workload": "map_put",
+            "write_pattern": "concentrated"
+          },
+          "path": "scenarios/partition-heal-n4-concentrated.toml"
+        },
+        {
+          "kind": "partition_heal",
+          "name": "partition-heal-n4",
+          "node_count": 4,
+          "op_count": 8,
+          "params": {
+            "groups": [
+              [
+                0,
+                1
+              ],
+              [
+                2,
+                3
+              ]
+            ],
+            "heal_topology": "full_mesh",
+            "locality": "append",
+            "ops_per_group": 4,
+            "workload": "map_put",
+            "write_pattern": "round_robin"
+          },
+          "path": "scenarios/partition-heal-n4.toml"
+        }
+      ],
+      "schema_version": 1
+    },
+    {
+      "build": {
+        "arch": "x86_64",
+        "orchestrator_version": "0.1.0",
+        "os": "linux",
+        "profile": "release"
+      },
+      "generated_at_unix_ms": 1785997270666,
+      "git": {
+        "commit": "eab73112ee006bc018173c5ca25728174584fc46",
+        "dirty": false
+      },
+      "host": {
+        "cpus": 8,
+        "hostname": "forge"
+      },
+      "run": {
+        "node_source": "external",
+        "replicas": [
+          {
+            "client_addr": "localhost:50051",
+            "peer_addr": "replica-0:50051"
+          },
+          {
+            "client_addr": "localhost:50052",
+            "peer_addr": "replica-1:50051"
+          },
+          {
+            "client_addr": "localhost:50053",
+            "peer_addr": "replica-2:50051"
+          },
+          {
+            "client_addr": "localhost:50054",
+            "peer_addr": "replica-3:50051"
+          },
+          {
+            "client_addr": "localhost:50055",
+            "peer_addr": "replica-4:50051"
+          },
+          {
+            "client_addr": "localhost:50056",
+            "peer_addr": "replica-5:50051"
+          }
+        ],
+        "trials": 10
+      },
+      "scenarios": [
+        {
+          "kind": "partition_heal",
+          "name": "partition-heal-n6-bridge-concentrated",
+          "node_count": 6,
+          "op_count": 12,
+          "params": {
+            "groups": [
+              [
+                0,
+                1,
+                2
+              ],
+              [
+                3,
+                4,
+                5
+              ]
+            ],
+            "heal_topology": "bridge",
+            "locality": "append",
+            "ops_per_group": 6,
+            "workload": "map_put",
+            "write_pattern": "concentrated"
+          },
+          "path": "scenarios/partition-heal-n6-bridge-concentrated.toml"
+        },
+        {
+          "kind": "partition_heal",
+          "name": "partition-heal-n6-bridge",
+          "node_count": 6,
+          "op_count": 12,
+          "params": {
+            "groups": [
+              [
+                0,
+                1,
+                2
+              ],
+              [
+                3,
+                4,
+                5
+              ]
+            ],
+            "heal_topology": "bridge",
+            "locality": "append",
+            "ops_per_group": 6,
+            "workload": "map_put",
+            "write_pattern": "round_robin"
+          },
+          "path": "scenarios/partition-heal-n6-bridge.toml"
+        },
+        {
+          "kind": "partition_heal",
+          "name": "partition-heal-n6-concentrated",
+          "node_count": 6,
+          "op_count": 12,
+          "params": {
+            "groups": [
+              [
+                0,
+                1,
+                2
+              ],
+              [
+                3,
+                4,
+                5
+              ]
+            ],
+            "heal_topology": "full_mesh",
+            "locality": "append",
+            "ops_per_group": 6,
+            "workload": "map_put",
+            "write_pattern": "concentrated"
+          },
+          "path": "scenarios/partition-heal-n6-concentrated.toml"
+        },
+        {
+          "kind": "partition_heal",
+          "name": "partition-heal-n6",
+          "node_count": 6,
+          "op_count": 12,
+          "params": {
+            "groups": [
+              [
+                0,
+                1,
+                2
+              ],
+              [
+                3,
+                4,
+                5
+              ]
+            ],
+            "heal_topology": "full_mesh",
+            "locality": "append",
+            "ops_per_group": 6,
+            "workload": "map_put",
+            "write_pattern": "round_robin"
+          },
+          "path": "scenarios/partition-heal-n6.toml"
+        }
+      ],
+      "schema_version": 1
+    },
+    {
+      "build": {
+        "arch": "x86_64",
+        "orchestrator_version": "0.1.0",
+        "os": "linux",
+        "profile": "release"
+      },
+      "generated_at_unix_ms": 1785997285452,
+      "git": {
+        "commit": "eab73112ee006bc018173c5ca25728174584fc46",
+        "dirty": false
+      },
+      "host": {
+        "cpus": 8,
+        "hostname": "forge"
+      },
+      "run": {
+        "node_source": "external",
+        "replicas": [
+          {
+            "client_addr": "localhost:50051",
+            "peer_addr": "replica-0:50051"
+          },
+          {
+            "client_addr": "localhost:50052",
+            "peer_addr": "replica-1:50051"
+          },
+          {
+            "client_addr": "localhost:50053",
+            "peer_addr": "replica-2:50051"
+          },
+          {
+            "client_addr": "localhost:50054",
+            "peer_addr": "replica-3:50051"
+          },
+          {
+            "client_addr": "localhost:50055",
+            "peer_addr": "replica-4:50051"
+          },
+          {
+            "client_addr": "localhost:50056",
+            "peer_addr": "replica-5:50051"
+          },
+          {
+            "client_addr": "localhost:50057",
+            "peer_addr": "replica-6:50051"
+          },
+          {
+            "client_addr": "localhost:50058",
+            "peer_addr": "replica-7:50051"
+          }
+        ],
+        "trials": 10
+      },
+      "scenarios": [
+        {
+          "kind": "partition_heal",
+          "name": "partition-heal-n8-bridge-concentrated",
+          "node_count": 8,
+          "op_count": 16,
+          "params": {
+            "groups": [
+              [
+                0,
+                1,
+                2,
+                3
+              ],
+              [
+                4,
+                5,
+                6,
+                7
+              ]
+            ],
+            "heal_topology": "bridge",
+            "locality": "append",
+            "ops_per_group": 8,
+            "workload": "map_put",
+            "write_pattern": "concentrated"
+          },
+          "path": "scenarios/partition-heal-n8-bridge-concentrated.toml"
+        },
+        {
+          "kind": "partition_heal",
+          "name": "partition-heal-n8-bridge",
+          "node_count": 8,
+          "op_count": 16,
+          "params": {
+            "groups": [
+              [
+                0,
+                1,
+                2,
+                3
+              ],
+              [
+                4,
+                5,
+                6,
+                7
+              ]
+            ],
+            "heal_topology": "bridge",
+            "locality": "append",
+            "ops_per_group": 8,
+            "workload": "map_put",
+            "write_pattern": "round_robin"
+          },
+          "path": "scenarios/partition-heal-n8-bridge.toml"
+        },
+        {
+          "kind": "partition_heal",
+          "name": "partition-heal-n8-concentrated",
+          "node_count": 8,
+          "op_count": 16,
+          "params": {
+            "groups": [
+              [
+                0,
+                1,
+                2,
+                3
+              ],
+              [
+                4,
+                5,
+                6,
+                7
+              ]
+            ],
+            "heal_topology": "full_mesh",
+            "locality": "append",
+            "ops_per_group": 8,
+            "workload": "map_put",
+            "write_pattern": "concentrated"
+          },
+          "path": "scenarios/partition-heal-n8-concentrated.toml"
+        },
+        {
+          "kind": "partition_heal",
+          "name": "partition-heal-n8",
+          "node_count": 8,
+          "op_count": 16,
+          "params": {
+            "groups": [
+              [
+                0,
+                1,
+                2,
+                3
+              ],
+              [
+                4,
+                5,
+                6,
+                7
+              ]
+            ],
+            "heal_topology": "full_mesh",
+            "locality": "append",
+            "ops_per_group": 8,
+            "workload": "map_put",
+            "write_pattern": "round_robin"
+          },
+          "path": "scenarios/partition-heal-n8.toml"
+        }
+      ],
+      "schema_version": 1
+    }
+  ]
+}
