@@ -395,3 +395,15 @@ automatically as `results/results-{docker,k8s}.meta.json`. Sweeps worth
 citing are archived with their provenance files under the tracked [`data/`](data/)
 directory (e.g. [`data/divergence-pilot-2026-08-06/`](data/divergence-pilot-2026-08-06/));
 `results/` remains gitignored scratch.
+
+## AI assistance
+
+This project is developed with substantial AI assistance (Anthropic's Claude),
+used for code, experiment tooling, and analysis. The author reviews the work
+produced this way with the goal of understanding and being able to defend every
+line, and treats AI output with the same skepticism as any other untrusted
+input: design decisions are questioned rather than accepted, measurements are
+cross-checked (see the validity gates and [run provenance](#run-provenance)
+above), and results that look plausible are still verified against the
+underlying systems before being believed. Responsibility for the code, the
+methodology, and any claims made from the data rests with the author.
