@@ -80,7 +80,8 @@ impl TryFrom<proto::ScalarValue> for ScalarVal {
 /// access.
 ///
 /// Indices use `usize` to match the Automerge API; the proto layer converts
-/// from `u64` on ingress.
+/// from `u64` on ingress, rejecting values that do not fit rather than
+/// truncating them.
 #[derive(Debug, Clone)]
 pub enum Op {
     MapPut {
@@ -131,6 +132,15 @@ impl Op {
     }
 }
 
+/// Convert a proto `u64` index to `usize`.
+///
+/// Fails rather than truncating on targets where `usize` is narrower than 64
+/// bits: a silently wrapped index would address the wrong element instead of
+/// reporting a bad request.
+fn to_index(v: u64, field: &str) -> anyhow::Result<usize> {
+    usize::try_from(v).with_context(|| format!("{field} ({v}) does not fit in usize"))
+}
+
 impl TryFrom<proto::OpRequest> for Op {
     type Error = anyhow::Error;
 
@@ -149,12 +159,12 @@ impl TryFrom<proto::OpRequest> for Op {
             }),
             P::ListInsert(p) => Ok(Op::ListInsert {
                 obj: p.obj,
-                index: p.index as usize,
+                index: to_index(p.index, "ListInsert.index")?,
                 value: p.value.context("ListInsert missing value")?.try_into()?,
             }),
             P::ListDelete(p) => Ok(Op::ListDelete {
                 obj: p.obj,
-                index: p.index as usize,
+                index: to_index(p.index, "ListDelete.index")?,
             }),
             P::ListSplice(p) => {
                 let values = p
@@ -164,15 +174,17 @@ impl TryFrom<proto::OpRequest> for Op {
                     .collect::<anyhow::Result<Vec<_>>>()?;
                 Ok(Op::ListSplice {
                     obj: p.obj,
-                    pos: p.pos as usize,
-                    del_count: p.del_count as usize,
+                    pos: to_index(p.pos, "ListSplice.pos")?,
+                    // `del_count` is a proto uint32; widen before the check so
+                    // one conversion helper covers every index-like field.
+                    del_count: to_index(p.del_count.into(), "ListSplice.del_count")?,
                     values,
                 })
             }
             P::TextSplice(p) => Ok(Op::TextSplice {
                 obj: p.obj,
-                pos: p.pos as usize,
-                del_count: p.del_count as usize,
+                pos: to_index(p.pos, "TextSplice.pos")?,
+                del_count: to_index(p.del_count.into(), "TextSplice.del_count")?,
                 insert: p.insert,
             }),
         }

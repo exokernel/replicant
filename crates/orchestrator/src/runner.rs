@@ -175,18 +175,35 @@ async fn reset_all(clients: &mut [ReplicaClient<Channel>]) -> Result<()> {
 /// address passed in `PeerRef.addr` is `peer_addr`, which is what the *target*
 /// replica `i` will dial to reach replica `j` (may differ from the
 /// orchestrator's `client_addr` for the same replica — see [`ReplicaEndpoint`]).
+///
+/// Edges are wired concurrently, so the wall time is one connection setup
+/// rather than `edges.len()` of them. That matters for the partition-heal
+/// measurement, where the heal wiring falls *inside* the timed window: issuing
+/// serially would have charged `FullMesh` heals for their extra edges' setup
+/// round-trips and made them look slower than `Bridge` heals for reasons that
+/// have nothing to do with merge cost.
 async fn connect_edges(
-    clients: &mut [ReplicaClient<Channel>],
+    clients: &[ReplicaClient<Channel>],
     endpoints: &[ReplicaEndpoint],
     edges: &[(usize, usize)],
 ) -> Result<()> {
+    let mut set: JoinSet<Result<()>> = JoinSet::new();
     for &(i, j) in edges {
-        clients[i]
-            .connect_peer(Request::new(PeerRef {
-                peer_id: format!("node-{j}"),
-                addr: endpoints[j].peer_addr.clone(),
-            }))
-            .await?;
+        let mut client = clients[i].clone();
+        let peer = PeerRef {
+            peer_id: format!("node-{j}"),
+            addr: endpoints[j].peer_addr.clone(),
+        };
+        set.spawn(async move {
+            client
+                .connect_peer(Request::new(peer))
+                .await
+                .with_context(|| format!("ConnectPeer node-{i} -> node-{j}"))?;
+            Ok(())
+        });
+    }
+    while let Some(joined) = set.join_next().await {
+        joined.context("ConnectPeer task panicked")??;
     }
     Ok(())
 }
@@ -322,7 +339,7 @@ async fn apply_write(
 ) -> Result<()> {
     match workload {
         Workload::MapPut => map_put(client, &format!("k{seq}"), &format!("v{seq}")).await,
-        Workload::TextSplice => text_splice(client, "text", 0, "x").await,
+        Workload::TextSplice => text_splice(client, TEXT_OBJ, 0, "x").await,
     }
 }
 
@@ -427,7 +444,7 @@ pub async fn run(config: &TopologyConfig, source: NodeSource) -> Result<RunResul
     let edge_count = edges.len();
     let topology_kind = config.connections.kind();
     let diameter = config.connections.diameter(n);
-    connect_edges(&mut clients, &endpoints, &edges).await?;
+    connect_edges(&clients, &endpoints, &edges).await?;
     check_tasks(&mut tasks)?;
 
     // Start timing before the first write so the measurement includes write
@@ -468,6 +485,9 @@ pub async fn run(config: &TopologyConfig, source: NodeSource) -> Result<RunResul
 
     Ok(RunResult {
         convergence_ms,
+        // All wiring happens before `measure_start`, so none of it is inside
+        // the reported window.
+        wiring_ms: 0.0,
         total_ops: config.op_count,
         topology_kind,
         edge_count,
@@ -510,7 +530,7 @@ pub async fn run_partition_heal(
         .iter()
         .flat_map(|g| intra_group_edges(&g.nodes))
         .collect();
-    connect_edges(&mut clients, &endpoints, &intra).await?;
+    connect_edges(&clients, &endpoints, &intra).await?;
     check_tasks(&mut tasks)?;
 
     // Apply ops to each group independently (the offline-divergence phase).
@@ -546,7 +566,7 @@ pub async fn run_partition_heal(
                     });
                     let pos = config.locality.draw_pos(&mut state.0, state.1);
                     state.1 += 1;
-                    text_splice(&mut clients[target], "text", pos, "x").await?;
+                    text_splice(&mut clients[target], TEXT_OBJ, pos, "x").await?;
                 }
             }
             op_idx += 1;
@@ -577,8 +597,14 @@ pub async fn run_partition_heal(
     let intra_set: HashSet<(usize, usize)> = intra.iter().copied().collect();
     let heal_edges = heal_edges(&config.heal_topology, &config.groups, n, &intra_set);
 
+    // The heal timer has to start before the cross-group streams exist — that
+    // is what "time to heal" means — so stream setup is unavoidably inside the
+    // window. `connect_edges` issues the edges concurrently to keep that cost
+    // flat in edge count, and what remains is reported as `wiring_ms` so an
+    // analysis can subtract it rather than attribute it to merge cost.
     let heal_start = Instant::now();
-    connect_edges(&mut clients, &endpoints, &heal_edges).await?;
+    connect_edges(&clients, &endpoints, &heal_edges).await?;
+    let wiring_ms = heal_start.elapsed().as_secs_f64() * 1000.0;
 
     let all_nodes: Vec<usize> = (0..n).collect();
     let convergence_ms = wait_for_nodes(
@@ -615,6 +641,7 @@ pub async fn run_partition_heal(
     };
     Ok(RunResult {
         convergence_ms,
+        wiring_ms,
         total_ops: config.groups.len() * config.ops_per_group,
         topology_kind: "partition_heal",
         edge_count: final_edges.len(),
@@ -835,9 +862,7 @@ mod tests {
         let edges = vec![(0, 1)];
 
         // Trial 1: write something and converge.
-        connect_edges(&mut clients, &endpoints, &edges)
-            .await
-            .unwrap();
+        connect_edges(&clients, &endpoints, &edges).await.unwrap();
         for i in 0..5 {
             map_put(&mut clients[0], &format!("trial1_k{i}"), &format!("v{i}"))
                 .await
@@ -883,9 +908,7 @@ mod tests {
         // data. Convergence here only succeeds if the previous trial's sync
         // state was fully discarded — a stale per-peer sync::State would leave
         // the new handshake stuck or produce a divergent fingerprint.
-        connect_edges(&mut clients, &endpoints, &edges)
-            .await
-            .unwrap();
+        connect_edges(&clients, &endpoints, &edges).await.unwrap();
         for i in 0..3 {
             map_put(&mut clients[0], &format!("trial2_k{i}"), &format!("w{i}"))
                 .await
@@ -952,9 +975,7 @@ mod tests {
         let (endpoints, mut clients) = spawn_nodes(4, &mut tasks).await.unwrap();
 
         let edges = vec![(0, 1), (1, 2), (2, 3)];
-        connect_edges(&mut clients, &endpoints, &edges)
-            .await
-            .unwrap();
+        connect_edges(&clients, &endpoints, &edges).await.unwrap();
         check_tasks(&mut tasks).unwrap();
 
         let measure_start = Instant::now();
@@ -991,6 +1012,48 @@ mod tests {
                 .unwrap_or_else(|e| panic!("locality={locality}: {e:#}"));
             assert_eq!(result.total_ops, 50, "locality={locality}");
         }
+    }
+
+    // ── wiring_ms ──────────────────────────────────────────────────────────
+
+    /// A topology run wires every edge before starting the clock, so none of
+    /// its `convergence_ms` is stream setup.
+    #[tokio::test]
+    async fn topology_run_reports_no_wiring_inside_the_window() {
+        let config: TopologyConfig = toml::from_str(
+            "node_count = 3\n\
+             connections = \"full_mesh\"\n\
+             write_pattern = \"round_robin\"\n\
+             op_count = 3",
+        )
+        .expect("valid topology config");
+        let result = run(&config, NodeSource::InProcess).await.unwrap();
+        assert_eq!(result.wiring_ms, 0.0);
+    }
+
+    /// A partition-heal run cannot wire the heal edges before starting its
+    /// clock, so it reports how much of the window went on stream setup. That
+    /// number must be a real part of the measured window — otherwise an
+    /// analysis subtracting it would produce a negative merge time.
+    #[tokio::test]
+    async fn partition_heal_reports_wiring_within_the_convergence_window() {
+        let config: PartitionConfig = toml::from_str(
+            "node_count = 4\n\
+             write_pattern = \"round_robin\"\n\
+             ops_per_group = 4\n\
+             groups = [{ nodes = [0, 1] }, { nodes = [2, 3] }]",
+        )
+        .expect("valid partition config");
+        let result = run_partition_heal(&config, NodeSource::InProcess, 1)
+            .await
+            .unwrap();
+        assert!(result.wiring_ms > 0.0, "heal wiring is inside the window");
+        assert!(
+            result.wiring_ms <= result.convergence_ms,
+            "wiring {} exceeds the window it is measured inside ({})",
+            result.wiring_ms,
+            result.convergence_ms
+        );
     }
 
     // ── seed_for (divergence generator) ────────────────────────────────────

@@ -244,7 +244,10 @@ graph LR
 
 Nodes are split into groups that are fully connected internally. Each group
 writes independently, accumulating divergent history. The heal step adds
-cross-group edges; `convergence_ms` is measured from that point.
+cross-group edges; `convergence_ms` is measured from that point — which means
+it necessarily includes opening those sync streams. The `wiring_ms` column
+reports that portion so it can be subtracted; see
+[`docs/metrics.md`](docs/metrics.md#wiring_ms-the-part-of-the-window-that-isnt-merge-cost).
 
 The `heal_topology` field in `[partition_heal]` selects what gets reconnected:
 

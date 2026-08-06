@@ -189,10 +189,12 @@ pub enum HealTopology {
 ///
 /// Named variants (`FullMesh`, `Ring`, `Line`, `Star`) are derived
 /// programmatically from `n`. `Custom` carries an explicit undirected edge
-/// list for arbitrary graphs. `#[non_exhaustive]` keeps `match` arms
-/// forwards-compatible.
+/// list for arbitrary graphs.
+///
+/// Adding a variant is a breaking change for every `match` in the crate, which
+/// is the intent: `kind`, `edges`, and `diameter` all need a new arm, and the
+/// compiler should say so.
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub enum Connections {
     /// Connect every pair — n*(n-1)/2 bidi sync streams. Diameter 1.
     FullMesh,
@@ -431,6 +433,15 @@ pub struct RunResult {
     /// Fractional milliseconds from write-start (full-mesh) or heal-start
     /// (partition-heal) until all node fingerprints agree.
     pub convergence_ms: f64,
+    /// The part of `convergence_ms` spent opening sync streams rather than
+    /// merging state.
+    ///
+    /// `0.0` for topology runs, where every edge is wired before the timer
+    /// starts. For partition-heal runs the heal edges are necessarily wired
+    /// inside the timed window, so this is the cost of establishing them —
+    /// subtract it when comparing heal topologies whose edge counts differ
+    /// (`Bridge` opens one stream, `FullMesh` opens every cross-group pair).
+    pub wiring_ms: f64,
     /// Total ops applied across all nodes.
     pub total_ops: usize,
     /// Stable identifier for the topology that produced this run, e.g.

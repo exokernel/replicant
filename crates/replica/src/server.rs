@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
 use anyhow::Context as _;
@@ -72,65 +72,55 @@ impl ReplicaState {
         })
     }
 
-    // Each method below takes the adapter lock just long enough to call one
-    // trait method; the lock is never held across an `.await`. Panics if the
-    // mutex is poisoned (another thread panicked while holding it — the
-    // document state is no longer trustworthy).
+    /// Lock the adapter for the duration of one trait call.
+    ///
+    /// The guard is never held across an `.await` point — that is what makes a
+    /// `std::sync::Mutex` sound here. Panics if the mutex is poisoned (another
+    /// thread panicked while holding it, so the document is no longer
+    /// trustworthy).
+    fn adapter(&self) -> MutexGuard<'_, Box<dyn CrdtAdapter>> {
+        self.adapter.lock().expect("adapter mutex poisoned")
+    }
 
-    fn apply_op(&self, op: &Op) -> anyhow::Result<()> {
-        self.adapter
-            .lock()
-            .expect("adapter mutex poisoned")
-            .apply_op(op)
+    /// Apply `op` and return how long the adapter took, in fractional ms.
+    ///
+    /// The timer starts *after* the lock is acquired: `replicant.op.duration`
+    /// is meant to measure CRDT work, and including lock acquisition would fold
+    /// in waiting on a concurrent `sync_receive` — contention in the harness,
+    /// not cost in the CRDT under test.
+    fn apply_op_timed(&self, op: &Op) -> anyhow::Result<f64> {
+        let mut adapter = self.adapter();
+        let t0 = Instant::now();
+        adapter.apply_op(op)?;
+        Ok(t0.elapsed().as_secs_f64() * 1000.0)
     }
 
     fn get_heads(&self) -> Vec<Vec<u8>> {
-        self.adapter
-            .lock()
-            .expect("adapter mutex poisoned")
-            .get_heads()
+        self.adapter().get_heads()
     }
 
     fn state_fingerprint(&self) -> Vec<u8> {
-        self.adapter
-            .lock()
-            .expect("adapter mutex poisoned")
-            .state_fingerprint()
+        self.adapter().state_fingerprint()
     }
 
     fn doc_size_bytes(&self) -> usize {
-        self.adapter
-            .lock()
-            .expect("adapter mutex poisoned")
-            .doc_size_bytes()
+        self.adapter().doc_size_bytes()
     }
 
     fn sync_generate(&self, peer: &str) -> Option<Vec<u8>> {
-        self.adapter
-            .lock()
-            .expect("adapter mutex poisoned")
-            .sync_generate(peer)
+        self.adapter().sync_generate(peer)
     }
 
     fn sync_receive(&self, peer: &str, msg: Vec<u8>) -> anyhow::Result<()> {
-        self.adapter
-            .lock()
-            .expect("adapter mutex poisoned")
-            .sync_receive(peer, msg)
+        self.adapter().sync_receive(peer, msg)
     }
 
     fn ensure_text(&self, obj: &str) -> anyhow::Result<()> {
-        self.adapter
-            .lock()
-            .expect("adapter mutex poisoned")
-            .ensure_text(obj)
+        self.adapter().ensure_text(obj)
     }
 
     fn text_length(&self, obj: &str) -> anyhow::Result<usize> {
-        self.adapter
-            .lock()
-            .expect("adapter mutex poisoned")
-            .text_length(obj)
+        self.adapter().text_length(obj)
     }
 
     pub fn actor_id(&self) -> &str {
@@ -168,6 +158,10 @@ impl ReplicaState {
 
     fn record_sync_rx(&self, peer_id: &str) {
         self.metrics.sync_rx.add(1, &self.peer_attrs(peer_id));
+    }
+
+    fn record_sync_deferred(&self, peer_id: &str) {
+        self.metrics.sync_deferred.add(1, &self.peer_attrs(peer_id));
     }
 
     fn peer_attrs(&self, peer_id: &str) -> [KeyValue; 2] {
@@ -230,6 +224,11 @@ impl ReplicaState {
     ///
     /// Called immediately after every local op so peers hear about changes
     /// without waiting for the next inbound message.
+    ///
+    /// Never blocks on a slow peer: a full outbound channel defers the flush
+    /// instead of applying backpressure. Backpressure here would deadlock —
+    /// this is called from `recv_loop`, so two replicas whose channels are both
+    /// full would each stop draining the other's inbound stream.
     async fn flush_to_peers(&self) {
         // Collect (peer_id, sender) in one lock acquisition; no lock is held
         // across the subsequent async sends.
@@ -242,11 +241,23 @@ impl ReplicaState {
             .collect();
 
         for (peer_id, tx) in &peers {
-            if let Some(msg) = self.sync_generate(peer_id)
-                && tx.try_send(msg).is_ok()
-            {
+            // Reserve capacity BEFORE generating. `sync_generate` advances the
+            // per-peer `sync::State` to "these heads have been sent", so a
+            // message that is generated and then dropped is lost from the
+            // protocol's point of view: the next generate returns `None` and
+            // the peer never learns about the change. Holding a permit first
+            // means we only ever generate a message we can actually enqueue,
+            // leaving the change pending for a later flush instead.
+            let Ok(permit) = tx.try_reserve() else {
+                self.record_sync_deferred(peer_id);
+                tracing::debug!(peer = %peer_id, "outbound channel full; deferring sync flush");
+                continue;
+            };
+            if let Some(msg) = self.sync_generate(peer_id) {
+                permit.send(msg);
                 self.record_sync_tx(peer_id);
             }
+            // Nothing to send: dropping the permit returns the slot.
         }
     }
 }
@@ -289,11 +300,10 @@ impl Replica for ReplicaService {
         let op = Op::try_from(request.into_inner())
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
-        let t0 = Instant::now();
-        self.state
-            .apply_op(&op)
+        let elapsed_ms = self
+            .state
+            .apply_op_timed(&op)
             .map_err(|e| Status::internal(e.to_string()))?;
-        let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         self.state.record_op_duration(op.name(), elapsed_ms);
         self.state.record_doc_size();
@@ -559,4 +569,93 @@ fn spawn_payload_forwarder<T, F>(
             }
         }
     });
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapter::AutomergeAdapter;
+    use common::ScalarVal;
+
+    fn map_put(key: &str) -> Op {
+        Op::MapPut {
+            obj: String::new(),
+            key: key.to_owned(),
+            value: ScalarVal::Str("v".to_owned()),
+        }
+    }
+
+    /// A momentarily-full outbound channel must not consume the change.
+    ///
+    /// `sync_generate` advances the per-peer `sync::State`, so generating a
+    /// message and then failing to enqueue it used to lose it outright: the
+    /// next generate returned `None` because the state already believed those
+    /// heads had been sent, and the peer never heard about the write until some
+    /// unrelated traffic perturbed the state. Here the peer's channel is
+    /// saturated across one flush; once drained, a later flush must still
+    /// deliver the pending change.
+    #[tokio::test]
+    async fn full_peer_channel_defers_rather_than_dropping_a_change() {
+        let state = ReplicaState::new("node-0".to_owned(), AutomergeAdapter::new());
+        // Capacity 1, so a single un-drained message saturates the channel.
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(1);
+        state.register_peer("node-1".to_owned(), tx).await;
+
+        // Fills the only slot with the sync handshake — left undrained, so the
+        // channel is full for the next flush.
+        state.flush_to_peers().await;
+
+        // The write's flush finds no room. The change must stay pending.
+        state.apply_op_timed(&map_put("k")).unwrap();
+        state.flush_to_peers().await;
+
+        // Drain everything queued, then flush once more. The write is still
+        // owed to the peer, so this must produce a message.
+        while rx.try_recv().is_ok() {}
+        state.flush_to_peers().await;
+        assert!(
+            rx.try_recv().is_ok(),
+            "change was lost while the peer channel was momentarily full"
+        );
+    }
+
+    /// The happy path still sends on every flush that has something to say.
+    #[tokio::test]
+    async fn flush_delivers_when_the_peer_channel_has_room() {
+        let state = ReplicaState::new("node-0".to_owned(), AutomergeAdapter::new());
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(8);
+        state.register_peer("node-1".to_owned(), tx).await;
+
+        state.flush_to_peers().await;
+        state.apply_op_timed(&map_put("k")).unwrap();
+        state.flush_to_peers().await;
+
+        // Handshake plus the post-write message.
+        assert!(rx.try_recv().is_ok());
+        assert!(rx.try_recv().is_ok());
+    }
+
+    /// A flush with nothing to send must release the permit it reserved,
+    /// otherwise repeated no-op flushes would drain the channel's capacity.
+    #[tokio::test]
+    async fn idle_flush_does_not_consume_channel_capacity() {
+        let state = ReplicaState::new("node-0".to_owned(), AutomergeAdapter::new());
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(2);
+        state.register_peer("node-1".to_owned(), tx.clone()).await;
+
+        // First flush queues the handshake; subsequent ones have nothing new.
+        state.flush_to_peers().await;
+        for _ in 0..10 {
+            state.flush_to_peers().await;
+        }
+        assert!(rx.try_recv().is_ok(), "handshake");
+        assert!(
+            rx.try_recv().is_err(),
+            "idle flushes must not enqueue anything"
+        );
+        // Capacity is intact: both slots are still usable.
+        assert!(tx.try_reserve().is_ok());
+    }
 }

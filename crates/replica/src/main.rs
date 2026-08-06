@@ -25,6 +25,10 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Parse first: `--help`, `--version`, and bad arguments should exit before
+    // any exporter or subscriber is built.
+    let args = Args::parse();
+
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
@@ -32,7 +36,6 @@ async fn main() -> anyhow::Result<()> {
     let provider = init_metrics()?;
     opentelemetry::global::set_meter_provider(provider.clone());
 
-    let args = Args::parse();
     let addr = format!("0.0.0.0:{}", args.port).parse()?;
     let state = ReplicaState::new(args.actor.clone(), AutomergeAdapter::new());
 

@@ -25,7 +25,7 @@ so consumers don't need to infer them from names.
 
 ## Emitted metrics
 
-All four are emitted by the **replica** binary; the orchestrator emits no
+All five are emitted by the **replica** binary; the orchestrator emits no
 OTel metrics of its own (it consumes them via the file exporter or
 Prometheus). Defined in [`crates/replica/src/metrics.rs`](../crates/replica/src/metrics.rs);
 recorded at call sites in [`crates/replica/src/server.rs`](../crates/replica/src/server.rs).
@@ -43,10 +43,20 @@ counter with a `direction` attribute. This keeps Prometheus queries simple
 (`sum(replicant_sync_messages_tx_total) by (actor)` without needing a
 filter) and matches what the analysis notebook expects.
 
-| Name                            | Type            | Unit | Attributes        | Description                                  |
-|---------------------------------|-----------------|------|-------------------|----------------------------------------------|
-| `replicant.sync.messages.tx`    | Counter<u64>    | —    | `actor`, `peer`   | Outbound sync messages sent to a peer.       |
-| `replicant.sync.messages.rx`    | Counter<u64>    | —    | `actor`, `peer`   | Inbound sync messages received from a peer.  |
+| Name                              | Type            | Unit | Attributes        | Description                                  |
+|-----------------------------------|-----------------|------|-------------------|----------------------------------------------|
+| `replicant.sync.messages.tx`      | Counter<u64>    | —    | `actor`, `peer`   | Outbound sync messages sent to a peer.       |
+| `replicant.sync.messages.rx`      | Counter<u64>    | —    | `actor`, `peer`   | Inbound sync messages received from a peer.  |
+| `replicant.sync.messages.deferred`| Counter<u64>    | —    | `actor`, `peer`   | Flushes skipped because the peer's outbound channel was full. |
+
+`deferred` should normally be zero. A flush cannot apply backpressure —
+`flush_to_peers` runs inside `recv_loop`, so blocking on a full channel would
+deadlock two replicas that are each waiting on the other — so it reserves
+channel capacity before generating and skips the flush when there is none. The
+change stays pending for the next flush rather than being lost, but a non-zero
+count means a peer was not draining fast enough and that run's convergence
+timings include the resulting stalls. Treat it as a validity check on a sweep,
+alongside the text-length gate.
 
 ### Document state metrics
 
@@ -79,6 +89,21 @@ column. Reasons:
 See [`crates/orchestrator/src/runner.rs`](../crates/orchestrator/src/runner.rs)
 for the measurement protocol — fingerprint-poll loop after the workload
 burst until all replicas report identical `GetStateFingerprint`.
+
+### `wiring_ms`: the part of the window that isn't merge cost
+
+Partition-heal runs cannot wire their cross-group edges before starting the
+clock — "time to heal" is measured *from* the moment the heal is triggered — so
+opening those sync streams happens inside the measured window. The companion
+`wiring_ms` column reports how much of `convergence_ms` went on that setup
+(`mean_wiring_ms` on summary rows); `connect_edges` issues the edges
+concurrently so the cost stays roughly flat in edge count rather than growing
+with it.
+
+**Subtract it before comparing heal topologies.** `Bridge` opens one stream and
+`FullMesh` opens every cross-group pair, so any comparison of the two that uses
+raw `convergence_ms` is partly comparing connection setup. Topology runs wire
+everything before the timer starts and report `wiring_ms = 0`.
 
 ---
 
