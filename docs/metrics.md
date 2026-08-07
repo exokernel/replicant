@@ -58,6 +58,37 @@ count means a peer was not draining fast enough and that run's convergence
 timings include the resulting stalls. Treat it as a validity check on a sweep,
 alongside the text-length gate.
 
+**Reading the check on a docker sweep.** `just bench-docker` queries Prometheus
+for this counter before it tears each node-count group down, and writes the
+result to the group's record in `results-docker.meta.json`:
+
+```json
+"deferred": {
+  "window": {"start": 1754538000, "end": 1754539500},
+  "tx_total": 4820,
+  "deferred_total": 0,
+  "deferred_series": []
+}
+```
+
+An OTel counter emits no data points until its first increment. A clean run
+therefore has **no deferred series at all**, and `deferred_total: 0` is derived
+from an empty result — not from a series that reads zero. Absence alone cannot
+be told apart from a metrics pipeline that never delivered, so `tx_total` rides
+along as the liveness proof. Read the pair together:
+
+| `tx_total` | `deferred_total` | Meaning                                            |
+|------------|------------------|----------------------------------------------------|
+| `> 0`      | `0`              | Verified clean. Timings contain no deferral stalls. |
+| `> 0`      | `> 0`            | Timings include stalls. `deferred_series` holds the per-2s samples, so the burst can be placed in time. |
+| `0`        | `0`              | Nothing was collected. The check did not run — do not read it as clean. |
+| absent, or `error` key | — | Prometheus was unreachable. The sweep still completed; the validity signal did not. |
+
+The counter is scoped to a whole node-count group, not to one trial, because
+the group is one orchestrator invocation against one stack. Use
+`deferred_series` timestamps, not the total, to attribute a spike to a cell.
+`just bench-k8s` does not capture this yet.
+
 ### Document state metrics
 
 Sampled on every local op application AND on every received sync message,
