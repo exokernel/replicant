@@ -264,12 +264,7 @@ mod tests {
 
     /// Pump sync messages between two adapters until both return `None`,
     /// meaning each side believes the other is caught up.
-    fn sync_until_quiescent(
-        a: &mut AutomergeAdapter,
-        a_id: &str,
-        b: &mut AutomergeAdapter,
-        b_id: &str,
-    ) {
+    fn sync_until_quiescent<A: CrdtAdapter>(a: &mut A, a_id: &str, b: &mut A, b_id: &str) {
         // Bounded to prevent a buggy adapter from looping forever; well above
         // any reasonable handshake length for these tiny docs.
         for _ in 0..64 {
@@ -296,13 +291,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn identical_ops_yield_equal_fingerprints() {
+    fn identical_ops_yield_equal_fingerprints<A: CrdtAdapter + Default>() {
         // Two fresh adapters that apply the exact same op sequence should
         // produce the same heads and the same fingerprint — no sync involved.
-        let mut a = AutomergeAdapter::new();
-        let mut b = AutomergeAdapter::new();
-        // Automerge change hashes depend on actor id, which is random per
+        let mut a = A::default();
+        let mut b = A::default();
+        // ACCOMODATION: Automerge
+        // Change identifiers may depend on per-instance actor id, which is random per
         // adapter, so we have to drive convergence through sync rather than
         // assuming identical ops produce identical hashes. Apply on `a`, sync
         // to `b`, then check.
@@ -318,9 +313,13 @@ mod tests {
     }
 
     #[test]
-    fn disjoint_edits_converge_after_sync() {
-        let mut a = AutomergeAdapter::new();
-        let mut b = AutomergeAdapter::new();
+    fn automerge_identical_ops_yield_equal_fingerprints() {
+        identical_ops_yield_equal_fingerprints::<AutomergeAdapter>();
+    }
+
+    fn disjoint_edits_converge_after_sync<A: CrdtAdapter + Default>() {
+        let mut a = A::default();
+        let mut b = A::default();
         a.apply_op(&map_put("doc", "a_key", 1u64)).unwrap();
         b.apply_op(&map_put("doc", "b_key", 2u64)).unwrap();
 
@@ -337,12 +336,16 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_edits_to_same_key_converge() {
+    fn automerge_disjoint_edits_converge_after_sync() {
+        disjoint_edits_converge_after_sync::<AutomergeAdapter>();
+    }
+
+    fn concurrent_edits_to_same_key_converge<A: CrdtAdapter + Default>() {
         // Both replicas write to the same key with no prior sync. The DAG
         // ends up with two heads; get_heads must sort them so byte-equal
         // fingerprint comparison still works.
-        let mut a = AutomergeAdapter::new();
-        let mut b = AutomergeAdapter::new();
+        let mut a = A::default();
+        let mut b = A::default();
         a.apply_op(&map_put("doc", "k", "from-a")).unwrap();
         b.apply_op(&map_put("doc", "k", "from-b")).unwrap();
 
@@ -356,12 +359,16 @@ mod tests {
     }
 
     #[test]
-    fn post_sync_divergence_is_detected() {
+    fn automerge_concurrent_edits_to_same_key_converge() {
+        concurrent_edits_to_same_key_converge::<AutomergeAdapter>();
+    }
+
+    fn post_sync_divergence_is_detected<A: CrdtAdapter + Default>() {
         // Negative case: if a writes after sync without re-syncing, the
         // fingerprints must differ. Without this, a buggy fingerprint that
         // returns a constant value would still pass the convergence tests.
-        let mut a = AutomergeAdapter::new();
-        let mut b = AutomergeAdapter::new();
+        let mut a = A::default();
+        let mut b = A::default();
         a.apply_op(&map_put("doc", "k", "v0")).unwrap();
         sync_until_quiescent(&mut a, "a", &mut b, "b");
         assert_eq!(a.state_fingerprint(), b.state_fingerprint());
@@ -372,14 +379,18 @@ mod tests {
     }
 
     #[test]
-    fn each_op_variant_mutates_the_doc() {
+    fn automerge_post_sync_divergence_is_detected() {
+        post_sync_divergence_is_detected::<AutomergeAdapter>();
+    }
+
+    fn each_op_variant_mutates_the_doc<A: CrdtAdapter + Default>() {
         // Apply one of each Op variant in dependency order (deletes need
         // something to delete) and assert the fingerprint changes and the
         // doc size grows on every step. Guards against a new Op variant
         // being added to the enum but not wired up in apply_op — the match
         // is exhaustive so the compiler catches a missing arm, but it would
         // not catch an arm that silently no-ops.
-        let mut a = AutomergeAdapter::new();
+        let mut a = A::default();
         let mut prev_fp = a.state_fingerprint();
         let mut prev_size = a.doc_size_bytes();
 
@@ -428,14 +439,18 @@ mod tests {
     }
 
     #[test]
-    fn reads_are_stable_without_writes() {
+    fn automerge_each_op_variant_mutates_the_doc() {
+        each_op_variant_mutates_the_doc::<AutomergeAdapter>();
+    }
+
+    fn reads_are_stable_without_writes<A: CrdtAdapter + Default>() {
         // state_fingerprint() and get_heads() must be pure with respect to
         // document state: repeated calls without intervening writes return
         // identical bytes. Guards against the fingerprint accidentally
         // including incidental state (a counter, a transaction id, etc.)
         // that the orchestrator's convergence check would mistake for a
         // real divergence.
-        let mut a = AutomergeAdapter::new();
+        let mut a = A::default();
         a.apply_op(&map_put("doc", "k", "v")).unwrap();
 
         let fp1 = a.state_fingerprint();
@@ -452,13 +467,17 @@ mod tests {
     }
 
     #[test]
-    fn sync_is_idempotent_once_converged() {
+    fn automerge_reads_are_stable_without_writes() {
+        reads_are_stable_without_writes::<AutomergeAdapter>();
+    }
+
+    fn sync_is_idempotent_once_converged<A: CrdtAdapter + Default>() {
         // After sync_until_quiescent, both sides should immediately report
         // "nothing to send." The orchestrator's convergence-detection loop
         // depends on this; a regression that makes sync chatty would only
         // show up downstream as a flaky integration test.
-        let mut a = AutomergeAdapter::new();
-        let mut b = AutomergeAdapter::new();
+        let mut a = A::default();
+        let mut b = A::default();
         a.apply_op(&map_put("doc", "k", "v")).unwrap();
         sync_until_quiescent(&mut a, "a", &mut b, "b");
 
@@ -467,13 +486,17 @@ mod tests {
     }
 
     #[test]
-    fn three_replicas_converge_through_a_hub() {
+    fn automerge_sync_is_idempotent_once_converged() {
+        sync_is_idempotent_once_converged::<AutomergeAdapter>();
+    }
+
+    fn three_replicas_converge_through_a_hub<A: CrdtAdapter + Default>() {
         // Line topology: a <-> b <-> c, then a <-> c directly. Each pair
-        // uses its own sync::State, so this catches cross-talk bugs in the
-        // per-peer state map.
-        let mut a = AutomergeAdapter::new();
-        let mut b = AutomergeAdapter::new();
-        let mut c = AutomergeAdapter::new();
+        // uses its own per-peer sync state, so this catches cross-talk bugs in
+        // the per-peer state map.
+        let mut a = A::default();
+        let mut b = A::default();
+        let mut c = A::default();
         a.apply_op(&map_put("doc", "from_a", 1u64)).unwrap();
         b.apply_op(&map_put("doc", "from_b", 2u64)).unwrap();
         c.apply_op(&map_put("doc", "from_c", 3u64)).unwrap();
@@ -487,21 +510,25 @@ mod tests {
     }
 
     #[test]
-    fn reset_clears_doc_and_sync_state() {
+    fn automerge_three_replicas_converge_through_a_hub() {
+        three_replicas_converge_through_a_hub::<AutomergeAdapter>();
+    }
+
+    fn reset_clears_doc_and_sync_state<A: CrdtAdapter + Default>() {
         // Reset returns the adapter to its initial empty state: heads/
         // fingerprint go back to empty, doc_size matches a fresh adapter,
-        // and any per-peer sync::State entries are dropped (so sync_generate
+        // and any per-peer sync state entries are dropped (so sync_generate
         // produces a fresh handshake message rather than continuing an
         // already-quiesced conversation).
-        let mut a = AutomergeAdapter::new();
+        let mut a = A::default();
         a.apply_op(&map_put("doc", "k", "v")).unwrap();
-        // Populate sync_states for a peer so the reset has something to clear.
+        // Populate per-peer sync state so the reset has something to clear.
         let initial_msg = a.sync_generate("peer-x");
         assert!(
             initial_msg.is_some(),
             "fresh adapter should send a handshake"
         );
-        let fresh_size = AutomergeAdapter::new().doc_size_bytes();
+        let fresh_size = A::default().doc_size_bytes();
         assert!(!a.get_heads().is_empty());
         assert!(
             a.doc_size_bytes() > fresh_size,
@@ -521,8 +548,8 @@ mod tests {
             "doc not reset to empty size"
         );
         // A new sync conversation against the same peer-id should start from
-        // scratch — if sync_states leaked across reset, the second call would
-        // observe quiescence and return None.
+        // scratch — if per-peer sync state leaked across reset, the second call
+        // would observe quiescence and return None.
         assert!(
             a.sync_generate("peer-x").is_some(),
             "reset must drop per-peer sync state"
@@ -530,12 +557,16 @@ mod tests {
     }
 
     #[test]
-    fn reset_allows_clean_re_sync_to_another_replica() {
+    fn automerge_reset_clears_doc_and_sync_state() {
+        reset_clears_doc_and_sync_state::<AutomergeAdapter>();
+    }
+
+    fn reset_allows_clean_re_sync_to_another_replica<A: CrdtAdapter + Default>() {
         // End-to-end at the adapter layer: a writes, syncs with b, reset both,
         // a writes different data, sync, and both converge on the new state
-        // alone — proving the old DAG is gone, not merely hidden.
-        let mut a = AutomergeAdapter::new();
-        let mut b = AutomergeAdapter::new();
+        // alone — proving the old history is gone, not merely hidden.
+        let mut a = A::default();
+        let mut b = A::default();
         a.apply_op(&map_put("doc", "before", "old")).unwrap();
         sync_until_quiescent(&mut a, "a", &mut b, "b");
         assert_eq!(a.state_fingerprint(), b.state_fingerprint());
@@ -551,7 +582,7 @@ mod tests {
         // The fresh post-reset doc must match a from-scratch baseline that
         // only ever saw the "after" write — i.e. the size profile is that
         // of a one-write document, not a two-write one.
-        let mut baseline = AutomergeAdapter::new();
+        let mut baseline = A::default();
         baseline.apply_op(&map_put("doc", "after", "new")).unwrap();
         assert_eq!(
             a.doc_size_bytes(),
@@ -560,16 +591,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn automerge_reset_allows_clean_re_sync_to_another_replica() {
+        reset_allows_clean_re_sync_to_another_replica::<AutomergeAdapter>();
+    }
+
     // ── ensure_text / text_length (shared-object bootstrap) ────────────────
 
     /// The core determinism guarantee: two replicas that bootstrap
     /// independently — no sync — produce the bit-identical change and
     /// therefore the same heads. Everything else about the divergence
     /// workload rests on this.
-    #[test]
-    fn ensure_text_is_deterministic_across_replicas() {
-        let mut a = AutomergeAdapter::new();
-        let mut b = AutomergeAdapter::new();
+    fn ensure_text_is_deterministic_across_replicas<A: CrdtAdapter + Default>() {
+        let mut a = A::default();
+        let mut b = A::default();
         a.ensure_text("text").unwrap();
         b.ensure_text("text").unwrap();
 
@@ -583,12 +618,21 @@ mod tests {
     }
 
     #[test]
-    fn ensure_text_is_idempotent() {
-        let mut a = AutomergeAdapter::new();
+    fn automerge_ensure_text_is_deterministic_across_replicas() {
+        ensure_text_is_deterministic_across_replicas::<AutomergeAdapter>();
+    }
+
+    fn ensure_text_is_idempotent<A: CrdtAdapter + Default>() {
+        let mut a = A::default();
         a.ensure_text("text").unwrap();
         let heads = a.get_heads();
         a.ensure_text("text").unwrap();
         assert_eq!(a.get_heads(), heads, "second call must not author a change");
+    }
+
+    #[test]
+    fn automerge_ensure_text_is_idempotent() {
+        ensure_text_is_idempotent::<AutomergeAdapter>();
     }
 
     /// Regression for the divergence-sweep bug: two replicas that diverge
@@ -596,10 +640,9 @@ mod tests {
     /// inserts. Without the shared bootstrap, each side lazily created its
     /// own object, the merge kept one, and half the workload vanished —
     /// while fingerprints happily converged.
-    #[test]
-    fn partitioned_text_edits_interleave_after_bootstrap() {
-        let mut a = AutomergeAdapter::new();
-        let mut b = AutomergeAdapter::new();
+    fn partitioned_text_edits_interleave_after_bootstrap<A: CrdtAdapter + Default>() {
+        let mut a = A::default();
+        let mut b = A::default();
         a.ensure_text("text").unwrap();
         b.ensure_text("text").unwrap();
 
@@ -628,14 +671,18 @@ mod tests {
         assert_eq!(b.text_length("text").unwrap(), 20);
     }
 
+    #[test]
+    fn automerge_partitioned_text_edits_interleave_after_bootstrap() {
+        partitioned_text_edits_interleave_after_bootstrap::<AutomergeAdapter>();
+    }
+
     /// The counterpart guard: without bootstrap the lazy-creation collision
     /// still exists, and text_length is exactly the check that exposes it.
     /// Locks in WHY ensure_text is mandatory for partitioned text workloads —
     /// if a future Automerge changes this behaviour, we want to know.
-    #[test]
-    fn without_bootstrap_partitioned_text_loses_a_side() {
-        let mut a = AutomergeAdapter::new();
-        let mut b = AutomergeAdapter::new();
+    fn without_bootstrap_partitioned_text_loses_a_side<A: CrdtAdapter + Default>() {
+        let mut a = A::default();
+        let mut b = A::default();
         let splice = Op::TextSplice {
             obj: "text".into(),
             pos: 0,
@@ -657,19 +704,27 @@ mod tests {
     }
 
     #[test]
-    fn ensure_text_rejects_non_empty_doc_without_the_object() {
-        let mut a = AutomergeAdapter::new();
+    fn automerge_without_bootstrap_partitioned_text_loses_a_side() {
+        without_bootstrap_partitioned_text_loses_a_side::<AutomergeAdapter>();
+    }
+
+    fn ensure_text_rejects_non_empty_doc_without_the_object<A: CrdtAdapter + Default>() {
+        let mut a = A::default();
         a.apply_op(&map_put("doc", "k", "v")).unwrap();
         let err = a.ensure_text("text").unwrap_err();
         assert!(err.to_string().contains("first change"), "{err}");
     }
 
+    #[test]
+    fn automerge_ensure_text_rejects_non_empty_doc_without_the_object() {
+        ensure_text_rejects_non_empty_doc_without_the_object::<AutomergeAdapter>();
+    }
+
     /// A synced-in object satisfies ensure_text — the late replica adopts it
     /// rather than authoring a bootstrap of its own.
-    #[test]
-    fn ensure_text_adopts_synced_in_object() {
-        let mut a = AutomergeAdapter::new();
-        let mut b = AutomergeAdapter::new();
+    fn ensure_text_adopts_synced_in_object<A: CrdtAdapter + Default>() {
+        let mut a = A::default();
+        let mut b = A::default();
         a.ensure_text("text").unwrap();
         a.apply_op(&Op::TextSplice {
             obj: "text".into(),
@@ -685,14 +740,18 @@ mod tests {
         assert_eq!(a.get_heads(), b.get_heads(), "no extra change authored");
     }
 
-    /// resolve_obj must reuse an object that arrived via sync instead of
-    /// creating a concurrent one — the connected-topology flavour of the
-    /// same collision (a round-robin writer's first op racing the sync of
-    /// another node's creation).
     #[test]
-    fn first_local_write_reuses_synced_in_object() {
-        let mut a = AutomergeAdapter::new();
-        let mut b = AutomergeAdapter::new();
+    fn automerge_ensure_text_adopts_synced_in_object() {
+        ensure_text_adopts_synced_in_object::<AutomergeAdapter>();
+    }
+
+    /// The adapter's object resolution must reuse an object that arrived via
+    /// sync instead of creating a concurrent one — the connected-topology
+    /// flavour of the same collision (a round-robin writer's first op racing
+    /// the sync of another node's creation).
+    fn first_local_write_reuses_synced_in_object<A: CrdtAdapter + Default>() {
+        let mut a = A::default();
+        let mut b = A::default();
         let splice = |insert: &str| Op::TextSplice {
             obj: "text".into(),
             pos: 0,
@@ -712,16 +771,21 @@ mod tests {
         assert_eq!(b.text_length("text").unwrap(), 4);
     }
 
+    #[test]
+    fn automerge_first_local_write_reuses_synced_in_object() {
+        first_local_write_reuses_synced_in_object::<AutomergeAdapter>();
+    }
+
     // ── sync_reset (partition-heal support) ────────────────────────────────
 
+    /// ACCOMODATION: Automerge
     /// After quiescence, generate returns `None` — the state believes the
     /// peer is caught up. `sync_reset` must forget that, so the next generate
     /// restarts the handshake. This is what lets a healed link re-establish
     /// sync without reconnecting the stream.
-    #[test]
-    fn sync_reset_forgets_quiescence() {
-        let mut a = AutomergeAdapter::new();
-        let mut b = AutomergeAdapter::new();
+    fn sync_reset_forgets_quiescence<A: CrdtAdapter + Default>() {
+        let mut a = A::default();
+        let mut b = A::default();
         a.apply_op(&map_put("doc", "k", "v")).unwrap();
         sync_until_quiescent(&mut a, "a", &mut b, "b");
         assert!(a.sync_generate("b").is_none(), "quiesced before reset");
@@ -735,19 +799,23 @@ mod tests {
         assert!(!a.get_heads().is_empty());
     }
 
+    #[test]
+    fn automerge_sync_reset_forgets_quiescence() {
+        sync_reset_forgets_quiescence::<AutomergeAdapter>();
+    }
+
     /// The heal scenario end-to-end at the adapter layer: a message is
     /// generated and then lost (the block races the flush), leaving `a`'s
     /// protocol state believing `b` received data it never saw. Resetting
     /// both sides' states — what unblocking does — must let a fresh exchange
     /// converge anyway.
-    #[test]
-    fn sync_reset_recovers_from_a_lost_message() {
-        let mut a = AutomergeAdapter::new();
-        let mut b = AutomergeAdapter::new();
+    fn sync_reset_recovers_from_a_lost_message<A: CrdtAdapter + Default>() {
+        let mut a = A::default();
+        let mut b = A::default();
         a.apply_op(&map_put("doc", "k", "v")).unwrap();
 
-        // Generated but never delivered: a's sync::State records these heads
-        // as sent.
+        // Generated but never delivered: a's per-peer sync state records these
+        // heads as sent.
         let lost = a.sync_generate("b");
         assert!(lost.is_some(), "there was a change to send");
         drop(lost);
@@ -762,18 +830,26 @@ mod tests {
         assert!(!b.get_heads().is_empty(), "b must have received the change");
     }
 
+    #[test]
+    fn automerge_sync_reset_recovers_from_a_lost_message() {
+        sync_reset_recovers_from_a_lost_message::<AutomergeAdapter>();
+    }
+
     /// Resetting a peer that has no state must be a no-op, not a panic —
     /// unblock fires for peers that never exchanged a message.
-    #[test]
-    fn sync_reset_unknown_peer_is_noop() {
-        let mut a = AutomergeAdapter::new();
+    fn sync_reset_unknown_peer_is_noop<A: CrdtAdapter + Default>() {
+        let mut a = A::default();
         a.sync_reset("never-seen");
         assert!(a.get_heads().is_empty());
     }
 
     #[test]
-    fn text_length_errors_on_missing_or_wrong_type() {
-        let mut a = AutomergeAdapter::new();
+    fn automerge_sync_reset_unknown_peer_is_noop() {
+        sync_reset_unknown_peer_is_noop::<AutomergeAdapter>();
+    }
+
+    fn text_length_errors_on_missing_or_wrong_type<A: CrdtAdapter + Default>() {
+        let mut a = A::default();
         assert!(a.text_length("nope").is_err());
         a.apply_op(&Op::ListInsert {
             obj: "l".into(),
@@ -786,7 +862,12 @@ mod tests {
     }
 
     #[test]
-    fn save_bytes_not_canonical_across_converged_replicas() {
+    fn automerge_text_length_errors_on_missing_or_wrong_type() {
+        text_length_errors_on_missing_or_wrong_type::<AutomergeAdapter>();
+    }
+
+    fn save_bytes_not_canonical_across_converged_replicas<A: CrdtAdapter + Default>() {
+        // ACCOMODATION: Automerge
         // Locks in a known Automerge property: two replicas with identical
         // logical state (same heads, same fingerprint, same readable values)
         // can produce *different* save() byte streams. The encoding preserves
@@ -801,7 +882,7 @@ mod tests {
         // equality.
         let n = 5;
         let op_count = 10;
-        let mut replicas: Vec<AutomergeAdapter> = (0..n).map(|_| AutomergeAdapter::new()).collect();
+        let mut replicas: Vec<A> = (0..n).map(|_| A::default()).collect();
         let id = |i: usize| format!("node-{i}");
 
         for i in 0..op_count {
@@ -857,5 +938,10 @@ mod tests {
             "save() became canonical across line replicas — sizes: {sizes:?}. \
              Tighten the notebook doc-size table to strict equality.",
         );
+    }
+
+    #[test]
+    fn automerge_save_bytes_not_canonical_across_converged_replicas() {
+        save_bytes_not_canonical_across_converged_replicas::<AutomergeAdapter>();
     }
 }
