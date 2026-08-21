@@ -63,12 +63,17 @@ impl ReplicaState {
     ///
     /// Instruments are obtained from the global OTel meter provider, so the
     /// provider must be initialized before calling this.
-    ///
-    /// Panics if `actor_id` is not a valid HTTP-header value — it is sent as
-    /// the `x-peer-id` metadata header on every outbound sync stream, and
-    /// failing here makes the misconfiguration obvious at startup rather than
-    /// on first peer connect.
     pub fn new(actor_id: String, adapter: impl CrdtAdapter) -> Arc<Self> {
+        Self::from_boxed_adapter(actor_id, Box::new(adapter))
+    }
+
+    /// Same as [`Self::new`], for a caller that has already chosen the
+    /// adapter dynamically.
+    ///
+    /// Exists so a `match` over a CRDT-selection flag can produce one
+    /// `Box<dyn CrdtAdapter>` and share a single server-setup path, instead
+    /// of repeating that path once per variant — see the replica binary.
+    pub fn from_boxed_adapter(actor_id: String, adapter: Box<dyn CrdtAdapter>) -> Arc<Self> {
         assert!(
             actor_id
                 .parse::<tonic::metadata::AsciiMetadataValue>()
@@ -78,7 +83,7 @@ impl ReplicaState {
         let meter = opentelemetry::global::meter("replicant");
         Arc::new(Self {
             actor_id,
-            adapter: Mutex::new(Box::new(adapter)),
+            adapter: Mutex::new(adapter),
             peer_txs: tokio::sync::Mutex::new(HashMap::new()),
             peer_tasks: tokio::sync::Mutex::new(Vec::new()),
             blocked_peers: Mutex::new(HashSet::new()),

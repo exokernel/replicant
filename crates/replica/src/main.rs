@@ -12,15 +12,33 @@ use replica::adapter::{AutomergeAdapter, LoroAdapter, YrsAdapter};
 use replica::server::{ReplicaService, ReplicaState, SyncService};
 use tonic::transport::Server;
 
-/// Which [`common::CrdtAdapter`] backs this replica process. A new variant
-/// only needs a matching arm in `main`'s `match args.crdt` below — the
-/// `ReplicaState`/gRPC scaffolding is already generic over `CrdtAdapter`
-/// (`ReplicaState::new` takes `impl CrdtAdapter` and boxes it internally).
+/// Which [`common::CrdtAdapter`] backs this replica process.
+///
+/// A new variant needs one arm in [`Crdt::build`] and nothing else: the
+/// `ReplicaState`/gRPC scaffolding is already generic over `CrdtAdapter`, and
+/// the server-setup path below is shared across every variant.
 #[derive(Copy, Clone, Debug, clap::ValueEnum)]
 enum Crdt {
     Automerge,
     Yrs,
     Loro,
+}
+
+impl Crdt {
+    /// Construct the selected adapter.
+    ///
+    /// Boxing here is what lets the caller keep one server-setup path: the
+    /// three adapters are different concrete types, so a `match` that also
+    /// built the server would have to repeat it three times. `ReplicaState`
+    /// stores a `Box<dyn CrdtAdapter>` regardless, so this costs nothing it
+    /// was not already paying.
+    fn build(self) -> Box<dyn common::CrdtAdapter> {
+        match self {
+            Crdt::Automerge => Box::new(AutomergeAdapter::new()),
+            Crdt::Yrs => Box::new(YrsAdapter::new()),
+            Crdt::Loro => Box::new(LoroAdapter::new()),
+        }
+    }
 }
 
 #[derive(clap::Parser)]
@@ -56,35 +74,12 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(actor = %args.actor, %addr, crdt = ?args.crdt, "replica starting");
 
-    // `ReplicaState::new` takes `impl CrdtAdapter` and boxes it internally
-    // (`Mutex<Box<dyn CrdtAdapter>>`), so each arm just needs to construct
-    // its concrete adapter — no further generic plumbing per variant.
-    match args.crdt {
-        Crdt::Automerge => {
-            let state = ReplicaState::new(args.actor.clone(), AutomergeAdapter::new());
-            Server::builder()
-                .add_service(ReplicaServer::new(ReplicaService::new(state.clone())))
-                .add_service(SyncServer::new(SyncService::new(state)))
-                .serve(addr)
-                .await?;
-        }
-        Crdt::Yrs => {
-            let state = ReplicaState::new(args.actor.clone(), YrsAdapter::new());
-            Server::builder()
-                .add_service(ReplicaServer::new(ReplicaService::new(state.clone())))
-                .add_service(SyncServer::new(SyncService::new(state)))
-                .serve(addr)
-                .await?;
-        }
-        Crdt::Loro => {
-            let state = ReplicaState::new(args.actor.clone(), LoroAdapter::new());
-            Server::builder()
-                .add_service(ReplicaServer::new(ReplicaService::new(state.clone())))
-                .add_service(SyncServer::new(SyncService::new(state)))
-                .serve(addr)
-                .await?;
-        }
-    }
+    let state = ReplicaState::from_boxed_adapter(args.actor.clone(), args.crdt.build());
+    Server::builder()
+        .add_service(ReplicaServer::new(ReplicaService::new(state.clone())))
+        .add_service(SyncServer::new(SyncService::new(state)))
+        .serve(addr)
+        .await?;
 
     // Flush any buffered metrics before exit.
     provider.shutdown()?;
