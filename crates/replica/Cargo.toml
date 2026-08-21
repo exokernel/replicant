@@ -7,6 +7,7 @@ edition = "2024"
 common               = { path = "../common" }
 automerge            = "0.11"
 yrs                  = "0.27"
+loro                 = "1.13"
 anyhow               = { workspace = true }
 clap                 = { workspace = true }
 tokio                = { workspace = true }
