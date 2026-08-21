@@ -33,12 +33,10 @@ Doing that wiring immediately found two real bugs that no amount of adapter-leve
 
 Also outstanding: `YrsAdapter`'s `TextSplice` is byte-indexed and unvalidated for non-ASCII content (NEXT_SESSION.md task 4); `LoroAdapter` has no such gap — `LoroText::splice` is natively Unicode-indexed, locked in by `loro_text_splice_is_unicode_indexed_not_byte_indexed`.
 
-### Extract the two bench recipes from the Justfile
-`Justfile` is 643 lines and `bench-docker` (176) plus `bench-k8s` (116) are 45% of it. They are past what belongs inline in a task runner, and they already duplicate logic (node_count bucketing, the per-group loop, provenance merging) in a form where the duplication is invisible.
+### ~~Extract the two bench recipes from the Justfile~~ — DONE 2026-08-21
+`bench-docker` (176 lines) and `bench-k8s` (116) moved to `scripts/bench-docker.sh` and `scripts/bench-k8s.sh` over a shared `scripts/lib/bench-common.sh`; the recipes are now one-line wrappers and the `Justfile` is 357 lines, down from 643. Everything smaller stayed inline — `smoke-docker` at 24 lines reads fine and extracting it would only add indirection. Recipe doc comments stayed in the `Justfile`, since `just --list` is the discovery surface.
 
-Extract exactly those two to `scripts/bench-docker.sh` and `scripts/bench-k8s.sh` over a shared `scripts/lib/bench-common.sh`; leave everything else inline (`smoke-docker` at 24 lines and `k8s-reset` at 23 read fine, and extracting them would only add indirection). Keep the recipe doc comments in the `Justfile` regardless — `just --list` is the discovery surface.
-
-The concrete payoff is that real `.sh` files can be shellcheck'd in `just ci`; today a shell bug in a bench recipe surfaces only mid-sweep, after the stack is already up. Just's `{{var}}` interpolation also happens before bash sees the line, which is a live quoting footgun (a scenario path containing a space would break today).
+The payoff landed: `just lint-sh` shellchecks the scripts and is part of `just ci`. It found two real issues on the first run — a missing shell directive, and a caller-supplied `printf` format string (fixed by switching to a `{i}` placeholder and plain substitution, which has no stray-`%` hazard). Neither was reachable while the code lived inside a `Justfile`, because shellcheck cannot see recipe bodies.
 
 ### Memory instrumentation
 RQ-1 names merge time, memory, and storage. Time is solid (`convergence_ms`) and storage is partial (`doc_size_bytes` is an OTel gauge, absent from the results CSV, and per-actor OTel only reaches the analysis pipeline on the in-process lane). **Memory has no instrumentation of any kind** — no RSS, no retained heap, no allocator hook. It is the only committed dependent variable with nothing behind it, which makes it the gap most likely to silently drop out of the thesis.
