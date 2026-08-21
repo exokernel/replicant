@@ -15,17 +15,27 @@
 
 [![CI](https://github.com/exokernel/replicant/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/exokernel/replicant/actions/workflows/ci.yml)
 
-A CRDT benchmarking framework built on [Automerge](https://automerge.org/) and gRPC. Replicant spins up replica nodes, drives sync workloads between them, and collects latency/throughput metrics via OpenTelemetry.
+A CRDT benchmarking framework built on gRPC, with pluggable CRDT backends. Replicant spins up replica nodes, drives sync workloads between them, and collects latency/throughput metrics via OpenTelemetry.
+
+Three CRDT libraries are supported behind one `CrdtAdapter` trait, selected per deployment with `--crdt`:
+
+| `--crdt` | Library | List/text algorithm |
+|---|---|---|
+| `automerge` (default) | [Automerge](https://automerge.org/) | RGA-descended |
+| `yrs` | [Yrs](https://github.com/y-crdt/y-crdt) (Rust port of [Yjs](https://yjs.dev/)) | YATA |
+| `loro` | [Loro](https://loro.dev/) | Fugue-descended |
+
+The same scenario file runs against all three — the library is a deployment parameter, not a scenario field — so a comparison holds the workload fixed. Every adapter is validated by a shared, generic conformance suite (`crates/replica/src/adapter/conformance.rs`); see [Adding a CRDT backend](#adding-a-crdt-backend).
 
 > [!IMPORTANT]
-> **Work in progress.** Replicant is an early-stage research framework. Any specific numbers or patterns surfaced by the notebooks are descriptions of what one or two sweeps produced on a single host — not claims about CRDT performance in general. Treat figures as illustrative; see [TODO.md](TODO.md) for the framework gaps (second CRDT backend, statistical rigor, multi-host) that need to land before any of it would be defensible as more than that.
+> **Work in progress.** Replicant is an early-stage research framework. Any specific numbers or patterns surfaced by the notebooks are descriptions of what one or two sweeps produced on a single host — not claims about CRDT performance in general. Treat figures as illustrative; see [TODO.md](TODO.md) for the framework gaps (statistical rigor, memory instrumentation, multi-host) that need to land before any of it would be defensible as more than that. Cross-library comparisons carry an extra caveat: only Automerge ships a stateful peer sync protocol, so for Yrs and Loro the per-peer sync bookkeeping is supplied by Replicant itself — see [Adding a CRDT backend](#adding-a-crdt-backend).
 
 ## Crates
 
 | Crate | Role |
 |---|---|
 | `common` | Protobuf-generated types and shared gRPC stubs |
-| `replica` | Automerge replica with a gRPC server and OTel metrics export |
+| `replica` | CRDT replica (Automerge / Yrs / Loro) with a gRPC server and OTel metrics export |
 | `orchestrator` | Launches replicas, drives workloads, and runs the smoke test |
 
 ## Quick start
@@ -56,6 +66,22 @@ just smoke-docker    # builds the replica image, brings up 5 replicas +
                      # otel-collector + prometheus + grafana, runs
                      # full-mesh-n5 against them, tears the stack down
 ```
+
+Every stack recipe takes an optional CRDT library as its last argument
+(`automerge` by default), so the same scenario can be run against each
+backend in turn:
+
+```sh
+just smoke-docker scenarios/full-mesh-n5.toml loro
+just bench-docker 'scenarios/divergence-*.toml' 20 yrs
+just docker-up    scenarios/full-mesh-n5.toml automerge
+```
+
+`smoke-k8s`, `bench-k8s`, and `k8s-up` take the same argument; on the k8s lane
+it sets the `CRDT` env var on the replica StatefulSet. Because the library is a
+deployment parameter the orchestrator never sees, the `bench-*` recipes record
+it in the run-provenance file — without that, rows from different libraries
+would be indistinguishable in the CSV.
 
 For longer interactive sessions, leave the stack running:
 
@@ -171,7 +197,7 @@ By default the orchestrator runs all replicas as in-process Tokio tasks (no
 subprocesses); with `--replicas` it instead connects to externally-managed
 replicas (e.g. the docker-compose stack above). Either way each node exposes
 two gRPC services: `Replica` for control-plane RPCs and `Sync` for
-peer-to-peer Automerge sync streams.
+peer-to-peer CRDT sync streams.
 
 ```mermaid
 sequenceDiagram
@@ -354,7 +380,7 @@ graph LR
     linkStyle 1,2,3 stroke:#4a9eff,stroke-width:2px
 ```
 
-> **Orange** = write op (orchestrator → node) &nbsp; **Blue** = Automerge sync connection (node ↔ node)
+> **Orange** = write op (orchestrator → node) &nbsp; **Blue** = CRDT sync connection (node ↔ node)
 
 ### Text workloads and the divergence grid
 
@@ -400,10 +426,51 @@ external), per-cell parameters, every per-(trial, node) PRNG seed, and the
 cell's achieved contention (concurrent-siblings-per-anchor, simulated from
 the same seeded draws the runner uses). `--dry-run` emits the provenance file without
 running trials. The `bench-docker` / `bench-k8s` recipes write it
-automatically as `results/results-{docker,k8s}.meta.json`. Sweeps worth
+automatically as `results/results-{docker,k8s}.meta.json`, and add a `crdt`
+field naming the library the stack was running (the orchestrator cannot know
+it — see [Containerized run](#containerized-run)). Sweeps worth
 citing are archived with their provenance files under the tracked [`data/`](data/)
 directory (e.g. [`data/divergence-pilot-2026-08-06/`](data/divergence-pilot-2026-08-06/));
 `results/` remains gitignored scratch.
+
+## Adding a CRDT backend
+
+A backend is one implementation of the `CrdtAdapter` trait (`crates/common/src/lib.rs`),
+one module under `crates/replica/src/adapter/`, and one arm in the replica
+binary's `--crdt` match. The scaffolding is already generic over the trait, so
+nothing else needs touching.
+
+**An adapter is done when the conformance suite says so.**
+`crates/replica/src/adapter/conformance.rs` holds functions generic over
+`A: CrdtAdapter + Default`; each adapter module wraps the ones it claims with a
+`#[test]`. The suite distinguishes two kinds:
+
+- **Universal** — properties any adapter must satisfy. Every adapter wraps these.
+- **Characterization** (marked `ACCOMMODATION`) — properties true of *some*
+  libraries. An adapter that legitimately behaves differently does not silently
+  skip one; it adds a mirror test asserting what it does instead, so the
+  difference is an executable claim rather than a comment.
+
+The line between the two is empirical and moves in both directions as backends
+are added. Rule of thumb: a function is universal until an adapter demonstrates
+otherwise, and when a *second* adapter needs the identical mirror test, the
+mirror was the universal form all along.
+
+Two things the existing adapters learned the hard way, both worth checking
+early in a new one:
+
+- **Whether the library's native "version" is a valid convergence
+  fingerprint.** It is for Automerge (change-hash heads) and Loro (causal
+  frontier), and it is *not* for Yrs — deletion there flags a block without
+  advancing any clock, so a state vector is blind to it. The same blind spot
+  reappeared in Yrs's per-peer sync bookkeeping. Read the library's delete
+  representation before trusting anything derived from a version.
+- **Whether the library ships a peer sync protocol at all.** Only Automerge
+  does. Yjs's `y-sync` is a stateless handshake and Loro has none, so both
+  adapters supply their own per-peer cache to reach the `None` fixed point
+  `sync_generate` requires. That cache is introduced by this harness, not by
+  the library — a caveat that belongs in any writeup comparing sync-message
+  counts or bytes across backends.
 
 ## AI assistance
 

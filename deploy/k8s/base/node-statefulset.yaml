@@ -5,8 +5,17 @@
 # scenarios by index expecting actor IDs node-0..node-{n-1}. We get this
 # for free by naming the StatefulSet `node`.
 #
-# `$(POD_NAME)` is k8s's own env-var substitution (not shell), so a
-# distroless image with no /bin/sh still works.
+# `$(POD_NAME)` and `$(CRDT)` are k8s's own env-var substitution (not
+# shell), so a distroless image with no /bin/sh still works.
+#
+# CRDT selects the backing library and defaults to automerge. It is an env
+# var rather than a literal arg so a caller can retarget the whole
+# StatefulSet with `kubectl set env statefulset/node CRDT=loro` without
+# patching or regenerating this manifest — see the `crdt` parameter on the
+# smoke-k8s / bench-k8s / k8s-up recipes. Keep the value in sync with the
+# `Crdt` value_enum in crates/replica/src/main.rs; an unknown value is
+# rejected by the binary at startup, so a typo shows up as a pod that will
+# not start rather than as wrong measurements.
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -36,7 +45,11 @@ spec:
             - "$(POD_NAME)"
             - "--port"
             - "50051"
+            - "--crdt"
+            - "$(CRDT)"
           env:
+            - name: CRDT
+              value: automerge
             - name: POD_NAME
               valueFrom:
                 fieldRef:

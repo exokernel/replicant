@@ -45,18 +45,28 @@ test:
 smoke:
     cargo run --bin orchestrator
 
-# End-to-end docker verification: generate an N-replica compose file from the scenario's node_count, build the image, run the stack, run one trial of the scenario, tear down. Output goes to the terminal — this proves the deployment plumbing works, it is NOT for analysis. For multi-trial sweeps that produce a notebook-readable CSV, use `just bench-docker`. Not in `just ci` because it needs a docker daemon and image pulls. Shebang recipe + trap so the stack is always torn down and the recipe's exit code reflects the orchestrator, not the teardown.
-smoke-docker scenario='scenarios/full-mesh-n5.toml':
+# `crdt` (accepted by smoke-docker, bench-docker, docker-up, smoke-k8s,
+# bench-k8s, k8s-up; one of automerge|yrs|loro, default automerge) selects the
+# library backing every replica in the stack. It is a DEPLOYMENT parameter, not
+# a scenario field: RQ-1 compares libraries on the identical workload, so one
+# scenario file runs against all three rather than needing three near-duplicate
+# copies. The bench recipes record it in the run-provenance JSON, because the
+# orchestrator never sees it and the CSV alone cannot tell three libraries'
+# rows apart.
+
+# End-to-end docker verification: generate an N-replica compose file from the scenario's node_count and the given CRDT library, build the image, run the stack, run one trial of the scenario, tear down. Output goes to the terminal — this proves the deployment plumbing works, it is NOT for analysis. For multi-trial sweeps that produce a notebook-readable CSV, use `just bench-docker`. Not in `just ci` because it needs a docker daemon and image pulls. Shebang recipe + trap so the stack is always torn down and the recipe's exit code reflects the orchestrator, not the teardown.
+smoke-docker scenario='scenarios/full-mesh-n5.toml' crdt='automerge':
     #!/usr/bin/env bash
     set -euo pipefail
     scenario='{{scenario}}'
+    crdt='{{crdt}}'
     n=$(grep -oP 'node_count\s*=\s*\K\d+' "$scenario" | head -1)
     if [ -z "$n" ]; then echo "error: no node_count in $scenario" >&2; exit 1; fi
 
     # Prefer the analysis .venv interpreter so the pyyaml from requirements.txt
     # is used; fall back to system python3 (also expected to have pyyaml).
     py=$([ -x .venv/bin/python3 ] && echo .venv/bin/python3 || echo python3)
-    "$py" deploy/docker/gen-compose.py "$n" > deploy/docker/compose.generated.yaml
+    "$py" deploy/docker/gen-compose.py "$n" --crdt "$crdt" > deploy/docker/compose.generated.yaml
 
     compose='docker compose -f deploy/docker/compose.generated.yaml'
     $compose up -d --build
@@ -69,12 +79,13 @@ smoke-docker scenario='scenarios/full-mesh-n5.toml':
     done
     cargo run --release --bin orchestrator -- --replicas "$replicas" "$scenario"
 
-# Multi-trial docker benchmark: groups scenarios by node_count, brings up a docker stack sized to each group's N (Reset between trials within a group), and concatenates per-group CSVs into results/results-docker.csv for notebook analysis. Single-N callers (e.g. `scenarios/*-n5*.toml`) get one stack up/down; mixed-N callers (e.g. `scenarios/*.toml`) get one stack per distinct N. Pass scenarios as a space-separated string. Exclusive of `just docker-up`/`just docker-down` (owns the stack lifecycle). Before each group's teardown it snapshots the `deferred` sync counter out of Prometheus into the provenance file — see the comment on that block for why the run is only trustworthy when `deferred_total` is 0 and `tx_total` is not.
-bench-docker scenarios='scenarios/full-mesh-n5.toml' trials='10':
+# Multi-trial docker benchmark: groups scenarios by node_count, brings up a docker stack sized to each group's N and backed by `crdt` (Reset between trials within a group), and concatenates per-group CSVs into results/results-docker.csv for notebook analysis. Single-N callers (e.g. `scenarios/*-n5*.toml`) get one stack up/down; mixed-N callers (e.g. `scenarios/*.toml`) get one stack per distinct N. Pass scenarios as a space-separated string. Exclusive of `just docker-up`/`just docker-down` (owns the stack lifecycle). Before each group's teardown it snapshots the `deferred` sync counter out of Prometheus into the provenance file — see the comment on that block for why the run is only trustworthy when `deferred_total` is 0 and `tx_total` is not.
+bench-docker scenarios='scenarios/full-mesh-n5.toml' trials='10' crdt='automerge':
     #!/usr/bin/env bash
     set -euo pipefail
     scenarios='{{scenarios}}'
     trials='{{trials}}'
+    crdt='{{crdt}}'
     out='results/results-docker.csv'
     # Run-provenance file for $out — commit, host, build profile, seeds, cell params.
     # `results/` is gitignored, so without this a stored CSV cannot be traced
@@ -115,8 +126,8 @@ bench-docker scenarios='scenarios/full-mesh-n5.toml' trials='10':
     metas=()  # per-group provenance temp files, merged into "$meta" after the loop
 
     for n in "${ns[@]}"; do
-        echo ">>> bench-docker: N=$n, scenarios:${by_n[$n]}" >&2
-        "$py" deploy/docker/gen-compose.py "$n" > deploy/docker/compose.generated.yaml
+        echo ">>> bench-docker: N=$n, crdt=$crdt, scenarios:${by_n[$n]}" >&2
+        "$py" deploy/docker/gen-compose.py "$n" --crdt "$crdt" > deploy/docker/compose.generated.yaml
         $compose up -d --build --remove-orphans
 
         replicas=""
@@ -227,7 +238,10 @@ bench-docker scenarios='scenarios/full-mesh-n5.toml' trials='10':
             echo "warning: deferred-counter snapshot FAILED for N=$n — validity signal unavailable" >&2
         fi
         rm -f "$promjson"
-        jq --argjson d "$snap" '. + {deferred: $d}' "$tmpmeta" > "${tmpmeta}.new" && mv "${tmpmeta}.new" "$tmpmeta"
+        # `crdt` is a deployment parameter, so the orchestrator never sees it
+        # and cannot record it. Without this the CSV is unanalyzable for RQ-1:
+        # rows from three libraries are indistinguishable.
+        jq --argjson d "$snap" --arg c "$crdt" '. + {deferred: $d, crdt: $c}' "$tmpmeta" > "${tmpmeta}.new" && mv "${tmpmeta}.new" "$tmpmeta"
         echo ">>> deferred snapshot N=$n: $(jq -c '{tx_total, deferred_total, error}' <<<"$snap")" >&2
 
         $compose down --remove-orphans
@@ -242,13 +256,18 @@ bench-docker scenarios='scenarios/full-mesh-n5.toml' trials='10':
 
     echo "wrote $out and $meta (${#ns[@]} node-count groups)"
 
-# End-to-end kind verification: parse N from the scenario's node_count, build the image, spin up the kind cluster (named `replicant`), apply manifests and scale the StatefulSet to N, port-forward N pods, run one trial of the scenario, tear the cluster down. Output goes to the terminal — this proves the deployment plumbing works, it is NOT for analysis. For multi-trial sweeps that produce a notebook-readable CSV, use `just bench-k8s`. Not in `just ci` (needs docker + kind). Set KEEP_KIND=1 to preserve the cluster after the run for debugging. If the cluster already exists (e.g. from `just k8s-up`), this recipe reuses it and does NOT delete it on exit — only clusters it created itself are torn down.
-smoke-k8s scenario='scenarios/full-mesh-n5.toml':
+# End-to-end kind verification: parse N from the scenario's node_count, build the image, point the StatefulSet at the given CRDT library, spin up the kind cluster (named `replicant`), apply manifests and scale the StatefulSet to N, port-forward N pods, run one trial of the scenario, tear the cluster down. Output goes to the terminal — this proves the deployment plumbing works, it is NOT for analysis. For multi-trial sweeps that produce a notebook-readable CSV, use `just bench-k8s`. Not in `just ci` (needs docker + kind). Set KEEP_KIND=1 to preserve the cluster after the run for debugging. If the cluster already exists (e.g. from `just k8s-up`), this recipe reuses it and does NOT delete it on exit — only clusters it created itself are torn down.
+smoke-k8s scenario='scenarios/full-mesh-n5.toml' crdt='automerge':
     #!/usr/bin/env bash
     set -euo pipefail
     scenario='{{scenario}}'
+    crdt='{{crdt}}'
     n=$(grep -oP 'node_count\s*=\s*\K\d+' "$scenario" | head -1)
     if [ -z "$n" ]; then echo "error: no node_count in $scenario" >&2; exit 1; fi
+    case "$crdt" in
+        automerge|yrs|loro) ;;
+        *) echo "error: unknown crdt '$crdt' (expected automerge, yrs, or loro)" >&2; exit 1 ;;
+    esac
     cluster=replicant
     img=replicant-replica:dev
 
@@ -279,6 +298,11 @@ smoke-k8s scenario='scenarios/full-mesh-n5.toml':
     # `kubectl kustomize` first so the configMapGenerators in base/ can
     # read from deploy/shared/ (outside the kustomization root).
     kubectl kustomize --load-restrictor=LoadRestrictionsNone deploy/k8s/overlays/kind | kubectl apply -f -
+    # Set the CRDT before scaling: both mutate the StatefulSet, and doing it
+    # in this order means the subsequent `rollout status` waits once for pods
+    # that already carry the right library, instead of waiting for an
+    # automerge rollout and then a second one.
+    kubectl -n replicant set env statefulset/node CRDT="$crdt"
     kubectl -n replicant scale statefulset/node --replicas="$n"
     kubectl -n replicant rollout status statefulset/node --timeout=180s
     kubectl -n replicant rollout status deployment/otel-collector --timeout=60s
@@ -308,12 +332,17 @@ smoke-k8s scenario='scenarios/full-mesh-n5.toml':
     done
     cargo run --release --bin orchestrator -- --replicas "$replicas" "$scenario"
 
-# Multi-trial kind benchmark: groups scenarios by node_count, rescales the kind StatefulSet to each group's N (Reset between trials within a group), and concatenates per-group CSVs into results/results-k8s.csv for notebook analysis. The kind cluster, image, and manifests are shared across all groups — only the StatefulSet replica count and port-forwards change between groups. Set KEEP_KIND=1 to preserve the cluster after the run; if the cluster was already up it is preserved automatically. Exclusive of `just k8s-up`/`just k8s-down` (owns the cluster lifecycle).
-bench-k8s scenarios='scenarios/full-mesh-n5.toml' trials='10':
+# Multi-trial kind benchmark: groups scenarios by node_count, points the StatefulSet at `crdt` and rescales it to each group's N (Reset between trials within a group), and concatenates per-group CSVs into results/results-k8s.csv for notebook analysis. The kind cluster, image, and manifests are shared across all groups — only the StatefulSet replica count and port-forwards change between groups. Set KEEP_KIND=1 to preserve the cluster after the run; if the cluster was already up it is preserved automatically. Exclusive of `just k8s-up`/`just k8s-down` (owns the cluster lifecycle).
+bench-k8s scenarios='scenarios/full-mesh-n5.toml' trials='10' crdt='automerge':
     #!/usr/bin/env bash
     set -euo pipefail
     scenarios='{{scenarios}}'
     trials='{{trials}}'
+    crdt='{{crdt}}'
+    case "$crdt" in
+        automerge|yrs|loro) ;;
+        *) echo "error: unknown crdt '$crdt' (expected automerge, yrs, or loro)" >&2; exit 1 ;;
+    esac
     out='results/results-k8s.csv'
     # Run provenance for $out — see the note in `bench-docker`.
     meta="${out%.csv}.meta.json"
@@ -370,6 +399,13 @@ bench-k8s scenarios='scenarios/full-mesh-n5.toml' trials='10':
             pids=()
         fi
 
+        # Set the CRDT before scaling: both mutate the StatefulSet, and doing
+        # it in this order means the subsequent `rollout status` waits once
+        # for pods that already carry the right library, instead of waiting
+        # for an automerge rollout and then a second one. Re-setting it per
+        # group is harmless (kubectl is a no-op when the value is unchanged)
+        # and keeps the loop body independent of what ran before it.
+        kubectl -n replicant set env statefulset/node CRDT="$crdt"
         kubectl -n replicant scale statefulset/node --replicas="$n"
         kubectl -n replicant rollout status statefulset/node --timeout=180s
 
@@ -402,6 +438,9 @@ bench-k8s scenarios='scenarios/full-mesh-n5.toml' trials='10':
             tail -n +2 "$tmpcsv" >> "$out"
         fi
         rm "$tmpcsv"
+        # `crdt` is a deployment parameter the orchestrator never sees — see
+        # the note in `bench-docker`.
+        jq --arg c "$crdt" '. + {crdt: $c}' "$tmpmeta" > "${tmpmeta}.new" && mv "${tmpmeta}.new" "$tmpmeta"
     done
 
     # One provenance record per orchestrator invocation — see the note in `bench-docker`.
@@ -410,19 +449,20 @@ bench-k8s scenarios='scenarios/full-mesh-n5.toml' trials='10':
 
     echo "wrote $out and $meta (${#ns[@]} node-count groups)"
 
-# Bring up the docker compose stack sized for the given scenario and leave it running. Use when you want to inspect Prometheus (http://localhost:9090) while iterating, or run many scenarios against the same stack. Pair with `just docker-down` to tear down. Idempotent: re-running regenerates the compose file from the new scenario and `docker compose up -d` reconciles.
-docker-up scenario='scenarios/full-mesh-n5.toml':
+# Bring up the docker compose stack sized for the given scenario, backed by the given CRDT library, and leave it running. Use when you want to inspect Prometheus (http://localhost:9090) while iterating, or run many scenarios against the same stack. Pair with `just docker-down` to tear down. Idempotent: re-running regenerates the compose file from the new scenario and `docker compose up -d` reconciles.
+docker-up scenario='scenarios/full-mesh-n5.toml' crdt='automerge':
     #!/usr/bin/env bash
     set -euo pipefail
     scenario='{{scenario}}'
+    crdt='{{crdt}}'
     n=$(grep -oP 'node_count\s*=\s*\K\d+' "$scenario" | head -1)
     if [ -z "$n" ]; then echo "error: no node_count in $scenario" >&2; exit 1; fi
 
     py=$([ -x .venv/bin/python3 ] && echo .venv/bin/python3 || echo python3)
-    "$py" deploy/docker/gen-compose.py "$n" > deploy/docker/compose.generated.yaml
+    "$py" deploy/docker/gen-compose.py "$n" --crdt "$crdt" > deploy/docker/compose.generated.yaml
 
     docker compose -f deploy/docker/compose.generated.yaml up -d --build
-    echo "stack up with $n replicas (from $scenario)."
+    echo "stack up with $n replicas backed by $crdt (from $scenario)."
     echo "  Grafana:    http://localhost:3000  (admin/admin)"
     echo "  Prometheus: http://localhost:9090"
     echo "  \`just docker-down\` to tear down."
@@ -458,13 +498,18 @@ docker-reset:
     $compose up -d prometheus
     echo "reset: replicas restarted, Prometheus wiped, Grafana edits preserved."
 
-# Bring up a persistent kind cluster (named `replicant`) with the replica stack sized for the given scenario, plus background per-pod port-forwards on localhost:50051..50050+N so the host-side orchestrator can dial each replica directly. Idempotent: re-runs build → load → apply → scale on top of an existing cluster, so re-invoking with a different scenario rescales the StatefulSet and the forwards. Pair with `just k8s-down` to tear down, `just k8s-reset` to clear state between scenarios.
-k8s-up scenario='scenarios/full-mesh-n5.toml':
+# Bring up a persistent kind cluster (named `replicant`) with the replica stack sized for the given scenario and backed by the given CRDT library, plus background per-pod port-forwards on localhost:50051..50050+N so the host-side orchestrator can dial each replica directly. Idempotent: re-runs build → load → apply → scale on top of an existing cluster, so re-invoking with a different scenario rescales the StatefulSet and the forwards. Pair with `just k8s-down` to tear down, `just k8s-reset` to clear state between scenarios.
+k8s-up scenario='scenarios/full-mesh-n5.toml' crdt='automerge':
     #!/usr/bin/env bash
     set -euo pipefail
     scenario='{{scenario}}'
+    crdt='{{crdt}}'
     n=$(grep -oP 'node_count\s*=\s*\K\d+' "$scenario" | head -1)
     if [ -z "$n" ]; then echo "error: no node_count in $scenario" >&2; exit 1; fi
+    case "$crdt" in
+        automerge|yrs|loro) ;;
+        *) echo "error: unknown crdt '$crdt' (expected automerge, yrs, or loro)" >&2; exit 1 ;;
+    esac
     cluster=replicant
     img=replicant-replica:dev
 
@@ -479,6 +524,11 @@ k8s-up scenario='scenarios/full-mesh-n5.toml':
     # `kubectl kustomize` first so the configMapGenerators in base/ can
     # read from deploy/shared/ (outside the kustomization root).
     kubectl kustomize --load-restrictor=LoadRestrictionsNone deploy/k8s/overlays/kind | kubectl apply -f -
+    # Set the CRDT before scaling: both mutate the StatefulSet, and doing it
+    # in this order means the subsequent `rollout status` waits once for pods
+    # that already carry the right library, instead of waiting for an
+    # automerge rollout and then a second one.
+    kubectl -n replicant set env statefulset/node CRDT="$crdt"
     kubectl -n replicant scale statefulset/node --replicas="$n"
     kubectl -n replicant rollout status statefulset/node --timeout=180s
     kubectl -n replicant rollout status deployment/otel-collector --timeout=60s
