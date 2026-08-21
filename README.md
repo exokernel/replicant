@@ -25,7 +25,7 @@ Three CRDT libraries are supported behind one `CrdtAdapter` trait, selected per 
 | `yrs` | [Yrs](https://github.com/y-crdt/y-crdt) (Rust port of [Yjs](https://yjs.dev/)) | YATA |
 | `loro` | [Loro](https://loro.dev/) | Fugue-descended |
 
-The same scenario file runs against all three — the library is a deployment parameter, not a scenario field — so a comparison holds the workload fixed. Every adapter is validated by a shared, generic conformance suite (`crates/replica/src/adapter/conformance.rs`); see [Adding a CRDT backend](#adding-a-crdt-backend).
+The same scenario file runs against all three — the library is a deployment parameter, not a scenario field — so a comparison holds the workload fixed. The orchestrator takes the same `--crdt` flag for its own in-process replicas; passing it alongside `--replicas` is an error rather than a silent no-op, since the library of an externally-managed stack is fixed by how it was launched. Every adapter is validated by a shared, generic conformance suite (`crates/replica/src/adapter/conformance.rs`); see [Adding a CRDT backend](#adding-a-crdt-backend).
 
 > [!IMPORTANT]
 > **Work in progress.** Replicant is an early-stage research framework. Any specific numbers or patterns surfaced by the notebooks are descriptions of what one or two sweeps produced on a single host — not claims about CRDT performance in general. Treat figures as illustrative; see [TODO.md](TODO.md) for the framework gaps (statistical rigor, memory instrumentation, multi-host) that need to land before any of it would be defensible as more than that. Cross-library comparisons carry an extra caveat: only Automerge ships a stateful peer sync protocol, so for Yrs and Loro the per-peer sync bookkeeping is supplied by Replicant itself — see [Adding a CRDT backend](#adding-a-crdt-backend).
@@ -426,9 +426,13 @@ external), per-cell parameters, every per-(trial, node) PRNG seed, and the
 cell's achieved contention (concurrent-siblings-per-anchor, simulated from
 the same seeded draws the runner uses). `--dry-run` emits the provenance file without
 running trials. The `bench-docker` / `bench-k8s` recipes write it
-automatically as `results/results-{docker,k8s}.meta.json`, and add a `crdt`
-field naming the library the stack was running (the orchestrator cannot know
-it — see [Containerized run](#containerized-run)). Sweeps worth
+automatically as `results/results-{docker,k8s}.meta.json`.
+
+`run.crdt` names the CRDT library, and is the one field to read regardless of
+lane. The in-process lane fills it in itself from `--crdt`; for an external
+stack the orchestrator cannot know which library it is talking to (the
+replicas were launched long before it connected), so it writes `null` and the
+bench scripts patch it afterwards. Schema version 2 added the field. Sweeps worth
 citing are archived with their provenance files under the tracked [`data/`](data/)
 directory (e.g. [`data/divergence-pilot-2026-08-06/`](data/divergence-pilot-2026-08-06/));
 `results/` remains gitignored scratch.

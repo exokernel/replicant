@@ -26,6 +26,7 @@ mod provenance;
 mod runner;
 mod topology;
 
+use replica::adapter::Crdt;
 use runner::{NodeSource, ReplicaEndpoint};
 use topology::{RunResult, ScenarioBody, ScenarioFile, builtin_scenarios};
 
@@ -86,6 +87,16 @@ struct Args {
     #[arg(long, value_delimiter = ',', value_parser = parse_replica_endpoint)]
     replicas: Vec<ReplicaEndpoint>,
 
+    /// Which CRDT library backs the in-process replicas.
+    ///
+    /// Only meaningful without `--replicas`: externally-managed replicas were
+    /// launched with their own `--crdt` and the orchestrator cannot change
+    /// them, so passing both is rejected rather than silently ignored. In the
+    /// containerized lanes the choice is made by the deploy generators — see
+    /// the `crdt` argument on `just bench-docker` / `just bench-k8s`.
+    #[arg(long, value_enum)]
+    crdt: Option<Crdt>,
+
     /// TOML scenario files to run. Omit to run the built-in regression scenarios.
     scenarios: Vec<PathBuf>,
 }
@@ -126,6 +137,17 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+    // Reject rather than ignore: a sweep that silently ran Automerge because
+    // --crdt was overridden by the stack's own flag is exactly the kind of
+    // wrong-library result that reads as a real finding.
+    if !args.replicas.is_empty() && args.crdt.is_some() {
+        bail!(
+            "--crdt applies only to in-process replicas; with --replicas the \
+             library is fixed by how each replica was launched (see the `crdt` \
+             argument on `just bench-docker` / `just bench-k8s`)"
+        );
+    }
+    let in_process_crdt = args.crdt.unwrap_or(Crdt::Automerge);
     if args.trials == 0 {
         bail!("--trials must be at least 1");
     }
@@ -153,6 +175,9 @@ async fn main() -> Result<()> {
                 paths: &args.scenarios,
                 trials: args.trials,
                 replicas: &args.replicas,
+                // Only the in-process lane's library is the orchestrator's to
+                // know; for an external stack the bench scripts fill this in.
+                crdt: args.replicas.is_empty().then(|| in_process_crdt.as_str()),
             },
         )?;
         tracing::info!(path = %path.display(), "run provenance written");
@@ -181,7 +206,7 @@ async fn main() -> Result<()> {
 
         for t in 1..=args.trials {
             let source = if args.replicas.is_empty() {
-                NodeSource::InProcess
+                NodeSource::InProcess(in_process_crdt)
             } else {
                 NodeSource::External(args.replicas.clone())
             };

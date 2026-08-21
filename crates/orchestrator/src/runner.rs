@@ -14,7 +14,7 @@ use common::proto::{
     op_request, replica_client::ReplicaClient, replica_server::ReplicaServer, scalar_value,
     sync_server::SyncServer,
 };
-use replica::adapter::AutomergeAdapter;
+use replica::adapter::Crdt;
 use replica::server::{ReplicaService, ReplicaState, SyncService};
 
 use crate::topology::{
@@ -54,8 +54,16 @@ impl ReplicaEndpoint {
 
 /// Where the scenario gets its replicas from.
 pub enum NodeSource {
-    /// Spawn `n` replicas inside this process on ephemeral ports.
-    InProcess,
+    /// Spawn `n` replicas inside this process on ephemeral ports, each
+    /// backed by the given CRDT library.
+    ///
+    /// The library rides on this variant rather than sitting beside it
+    /// because it only means anything here: externally-managed replicas were
+    /// launched with their own `--crdt` long before the orchestrator
+    /// connected, and nothing the orchestrator does can change them. Putting
+    /// it on the enum makes "a CRDT choice for an external run" unstateable
+    /// rather than merely ignored.
+    InProcess(Crdt),
     /// Connect to replicas already running at these endpoints.
     External(Vec<ReplicaEndpoint>),
 }
@@ -78,11 +86,12 @@ fn node_id(i: usize) -> Result<NodeId> {
 /// `JoinSet` must outlive all client usage or the server will be dropped.
 async fn spawn_node(
     actor_id: NodeId,
+    crdt: Crdt,
     tasks: &mut JoinSet<()>,
 ) -> Result<(ReplicaEndpoint, ReplicaClient<Channel>)> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
-    let state = ReplicaState::new(actor_id, AutomergeAdapter::new());
+    let state = ReplicaState::from_boxed_adapter(actor_id, crdt.build());
     tasks.spawn(async move {
         if let Err(e) = Server::builder()
             .add_service(ReplicaServer::new(ReplicaService::new(state.clone())))
@@ -100,12 +109,13 @@ async fn spawn_node(
 /// Spawn `n` nodes and return their endpoints and clients.
 async fn spawn_nodes(
     n: usize,
+    crdt: Crdt,
     tasks: &mut JoinSet<()>,
 ) -> Result<(Vec<ReplicaEndpoint>, Vec<ReplicaClient<Channel>>)> {
     let mut endpoints = Vec::with_capacity(n);
     let mut clients = Vec::with_capacity(n);
     for i in 0..n {
-        let (ep, client) = spawn_node(node_id(i)?, tasks).await?;
+        let (ep, client) = spawn_node(node_id(i)?, crdt, tasks).await?;
         endpoints.push(ep);
         clients.push(client);
     }
@@ -144,7 +154,7 @@ async fn acquire_nodes(
     tasks: &mut JoinSet<()>,
 ) -> Result<(Vec<ReplicaEndpoint>, Vec<ReplicaClient<Channel>>)> {
     match source {
-        NodeSource::InProcess => spawn_nodes(n, tasks).await,
+        NodeSource::InProcess(crdt) => spawn_nodes(n, crdt, tasks).await,
         NodeSource::External(endpoints) => {
             if endpoints.len() != n {
                 bail!(
@@ -1013,7 +1023,7 @@ mod tests {
     #[tokio::test]
     async fn reset_clears_state_and_allows_subsequent_run() {
         let mut tasks = JoinSet::new();
-        let (endpoints, mut clients) = spawn_nodes(2, &mut tasks).await.unwrap();
+        let (endpoints, mut clients) = spawn_nodes(2, Crdt::Automerge, &mut tasks).await.unwrap();
         let edges = vec![(0, 1)];
 
         // Trial 1: write something and converge.
@@ -1106,7 +1116,7 @@ mod tests {
     #[tokio::test]
     async fn reset_is_noop_on_fresh_replica() {
         let mut tasks = JoinSet::new();
-        let (_endpoints, mut clients) = spawn_nodes(2, &mut tasks).await.unwrap();
+        let (_endpoints, mut clients) = spawn_nodes(2, Crdt::Automerge, &mut tasks).await.unwrap();
         reset_all(&mut clients).await.unwrap();
         for client in clients.iter_mut() {
             let fp = client
@@ -1127,7 +1137,7 @@ mod tests {
     #[tokio::test]
     async fn line_topology_n4_converges_with_relay() {
         let mut tasks = JoinSet::new();
-        let (endpoints, mut clients) = spawn_nodes(4, &mut tasks).await.unwrap();
+        let (endpoints, mut clients) = spawn_nodes(4, Crdt::Automerge, &mut tasks).await.unwrap();
 
         let edges = vec![(0, 1), (1, 2), (2, 3)];
         connect_edges(&clients, &endpoints, &edges).await.unwrap();
@@ -1162,7 +1172,7 @@ mod tests {
     async fn divergence_heal_preserves_both_sides_text() {
         for locality in ["append", "random_position", "same_region"] {
             let config = text_cfg(25, locality);
-            let result = run_partition_heal(&config, NodeSource::InProcess, 1)
+            let result = run_partition_heal(&config, NodeSource::InProcess(Crdt::Automerge), 1)
                 .await
                 .unwrap_or_else(|e| panic!("locality={locality}: {e:#}"));
             assert_eq!(result.total_ops, 50, "locality={locality}");
@@ -1187,7 +1197,7 @@ mod tests {
     #[tokio::test]
     async fn blocked_link_carries_no_state_while_open() {
         let mut tasks = JoinSet::new();
-        let (endpoints, mut clients) = spawn_nodes(2, &mut tasks).await.unwrap();
+        let (endpoints, mut clients) = spawn_nodes(2, Crdt::Automerge, &mut tasks).await.unwrap();
         let edges = vec![(0, 1)];
 
         // Block first, then wire: the stream opens without a handshake.
@@ -1217,7 +1227,7 @@ mod tests {
     #[tokio::test]
     async fn unblock_and_kick_heals_without_reconnecting() {
         let mut tasks = JoinSet::new();
-        let (endpoints, mut clients) = spawn_nodes(2, &mut tasks).await.unwrap();
+        let (endpoints, mut clients) = spawn_nodes(2, Crdt::Automerge, &mut tasks).await.unwrap();
         let edges = vec![(0, 1)];
 
         set_links_blocked(&clients, &edges, true).await.unwrap();
@@ -1244,7 +1254,7 @@ mod tests {
     #[tokio::test]
     async fn diverged_gate_rejects_groups_that_already_agree() {
         let mut tasks = JoinSet::new();
-        let (endpoints, mut clients) = spawn_nodes(2, &mut tasks).await.unwrap();
+        let (endpoints, mut clients) = spawn_nodes(2, Crdt::Automerge, &mut tasks).await.unwrap();
         connect_edges(&clients, &endpoints, &[(0, 1)])
             .await
             .unwrap();
@@ -1269,7 +1279,7 @@ mod tests {
     #[tokio::test]
     async fn diverged_gate_accepts_genuinely_divergent_groups() {
         let mut tasks = JoinSet::new();
-        let (_endpoints, mut clients) = spawn_nodes(2, &mut tasks).await.unwrap();
+        let (_endpoints, mut clients) = spawn_nodes(2, Crdt::Automerge, &mut tasks).await.unwrap();
         map_put(&mut clients[0], "a", "1").await.unwrap();
         map_put(&mut clients[1], "b", "2").await.unwrap();
 
@@ -1296,10 +1306,10 @@ mod tests {
             .expect("valid partition config")
         };
 
-        let small = run_partition_heal(&cfg(2, 4), NodeSource::InProcess, 1)
+        let small = run_partition_heal(&cfg(2, 4), NodeSource::InProcess(Crdt::Automerge), 1)
             .await
             .unwrap();
-        let large = run_partition_heal(&cfg(6, 4), NodeSource::InProcess, 1)
+        let large = run_partition_heal(&cfg(6, 4), NodeSource::InProcess(Crdt::Automerge), 1)
             .await
             .unwrap();
 
@@ -1327,7 +1337,9 @@ mod tests {
              op_count = 3",
         )
         .expect("valid topology config");
-        let result = run(&config, NodeSource::InProcess).await.unwrap();
+        let result = run(&config, NodeSource::InProcess(Crdt::Automerge))
+            .await
+            .unwrap();
         assert_eq!(result.wiring_ms, 0.0);
     }
 
@@ -1344,7 +1356,7 @@ mod tests {
              groups = [{ nodes = [0, 1] }, { nodes = [2, 3] }]",
         )
         .expect("valid partition config");
-        let result = run_partition_heal(&config, NodeSource::InProcess, 1)
+        let result = run_partition_heal(&config, NodeSource::InProcess(Crdt::Automerge), 1)
             .await
             .unwrap();
         assert!(result.wiring_ms > 0.0, "heal wiring is inside the window");

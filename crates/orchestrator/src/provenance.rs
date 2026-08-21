@@ -26,7 +26,11 @@ use crate::topology::{PartitionConfig, ScenarioBody, ScenarioFile, Workload};
 
 /// Bumped whenever the emitted shape changes incompatibly, so downstream
 /// analysis can branch instead of silently misreading an older file.
-const SCHEMA_VERSION: u32 = 1;
+/// Bumped to 2 (2026-08-21) when `run.crdt` was added. Additive, so a reader
+/// that ignores unknown fields handles both; the bump exists so a reader that
+/// *requires* the library name can tell whether its absence means "Automerge,
+/// before we recorded it" or "genuinely unknown".
+const SCHEMA_VERSION: u32 = 2;
 
 /// Everything about a run that the result CSV does not record.
 pub struct RunMeta<'a> {
@@ -42,6 +46,12 @@ pub struct RunMeta<'a> {
     /// Linux are polluted by TCP delayed-ACK stalls, so only the external
     /// (docker/k8s) lane is trustworthy for convergence analysis.
     pub replicas: &'a [ReplicaEndpoint],
+    /// CRDT library backing the replicas, when the orchestrator chose it —
+    /// i.e. the in-process lane. `None` for an external run, where the choice
+    /// was made by whoever launched the stack; the bench scripts fill the
+    /// same field in afterwards, so `run.crdt` is the one place to read it
+    /// from regardless of lane.
+    pub crdt: Option<&'a str>,
 }
 
 /// Write the provenance file for `meta` to `path`, creating parent directories.
@@ -81,6 +91,7 @@ fn document(meta: &RunMeta<'_>) -> Value {
         "run": {
             "trials": meta.trials,
             "node_source": if meta.replicas.is_empty() { "in_process" } else { "external" },
+            "crdt": meta.crdt,
             "replicas": meta.replicas.iter()
                 .map(|r| json!({"client_addr": r.client_addr, "peer_addr": r.peer_addr}))
                 .collect::<Vec<_>>(),
@@ -278,6 +289,7 @@ mod tests {
             paths: &[],
             trials,
             replicas: &[],
+            crdt: Some("automerge"),
         }
     }
 
@@ -352,9 +364,26 @@ mod tests {
             paths: &[],
             trials: 1,
             replicas: &replicas,
+            // The orchestrator cannot know an external stack's library; the
+            // bench scripts patch `run.crdt` in after the fact.
+            crdt: None,
         });
         assert_eq!(doc["run"]["node_source"], "external");
         assert_eq!(doc["run"]["replicas"][0]["peer_addr"], "replica-0:50051");
+        assert!(
+            doc["run"]["crdt"].is_null(),
+            "external runs must leave run.crdt for the bench script to fill"
+        );
+    }
+
+    /// The in-process lane knows its own library and records it, so a
+    /// `--dry-run` provenance file is already complete for that lane.
+    #[test]
+    fn in_process_run_records_its_crdt() {
+        let scenarios = vec![text_cell(4, Locality::Append)];
+        let doc = document(&meta_for(&scenarios, 1));
+        assert_eq!(doc["run"]["node_source"], "in_process");
+        assert_eq!(doc["run"]["crdt"], "automerge");
     }
 
     #[test]

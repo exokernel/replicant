@@ -9,38 +9,9 @@ use clap::Parser as _;
 use common::NodeId;
 use common::proto::{replica_server::ReplicaServer, sync_server::SyncServer};
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
-use replica::adapter::{AutomergeAdapter, LoroAdapter, YrsAdapter};
+use replica::adapter::Crdt;
 use replica::server::{ReplicaService, ReplicaState, SyncService};
 use tonic::transport::Server;
-
-/// Which [`common::CrdtAdapter`] backs this replica process.
-///
-/// A new variant needs one arm in [`Crdt::build`] and nothing else: the
-/// `ReplicaState`/gRPC scaffolding is already generic over `CrdtAdapter`, and
-/// the server-setup path below is shared across every variant.
-#[derive(Copy, Clone, Debug, clap::ValueEnum)]
-enum Crdt {
-    Automerge,
-    Yrs,
-    Loro,
-}
-
-impl Crdt {
-    /// Construct the selected adapter.
-    ///
-    /// Boxing here is what lets the caller keep one server-setup path: the
-    /// three adapters are different concrete types, so a `match` that also
-    /// built the server would have to repeat it three times. `ReplicaState`
-    /// stores a `Box<dyn CrdtAdapter>` regardless, so this costs nothing it
-    /// was not already paying.
-    fn build(self) -> Box<dyn common::CrdtAdapter> {
-        match self {
-            Crdt::Automerge => Box::new(AutomergeAdapter::new()),
-            Crdt::Yrs => Box::new(YrsAdapter::new()),
-            Crdt::Loro => Box::new(LoroAdapter::new()),
-        }
-    }
-}
 
 /// clap adapter for [`NodeId`]'s checked constructor.
 ///
@@ -85,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
 
     let addr = format!("0.0.0.0:{}", args.port).parse()?;
 
-    tracing::info!(actor = %args.actor, %addr, crdt = ?args.crdt, "replica starting");
+    tracing::info!(actor = %args.actor, %addr, crdt = %args.crdt, "replica starting");
 
     let state = ReplicaState::from_boxed_adapter(args.actor.clone(), args.crdt.build());
     Server::builder()

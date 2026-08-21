@@ -116,10 +116,13 @@ bench_run_group() {
     fi
     rm "$tmpcsv"
 
-    # `crdt` is a deployment parameter, so the orchestrator never sees it and
-    # cannot record it. Without this the CSV is unanalyzable for RQ-1: rows
-    # from three libraries are indistinguishable.
-    jq --arg c "$crdt" '. + {crdt: $c}' "$tmpmeta" > "${tmpmeta}.new" \
+    # For an external stack the orchestrator cannot know which library it is
+    # talking to -- the replicas were launched with their own --crdt long
+    # before it connected -- so it writes `run.crdt: null` and we fill it in.
+    # Same field the in-process lane populates itself, so `.run.crdt` is the
+    # one path to read regardless of lane. Without it the CSV is unanalyzable
+    # for RQ-1: rows from three libraries are indistinguishable.
+    jq --arg c "$crdt" '.run.crdt = $c' "$tmpmeta" > "${tmpmeta}.new" \
         && mv "${tmpmeta}.new" "$tmpmeta"
 }
 
