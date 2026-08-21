@@ -1,15 +1,26 @@
 //! `replicant-replica` — one gRPC replica process.
 //!
-//! Spins up an [`AutomergeAdapter`] behind [`ReplicaService`] (control RPCs)
-//! and [`SyncService`] (peer sync streams) on the configured port, with a
-//! stdout OTel metrics exporter for development visibility.
+//! Spins up a [`common::CrdtAdapter`] (selected by `--crdt`) behind
+//! [`ReplicaService`] (control RPCs) and [`SyncService`] (peer sync streams)
+//! on the configured port, with a stdout OTel metrics exporter for
+//! development visibility.
 
 use clap::Parser as _;
 use common::proto::{replica_server::ReplicaServer, sync_server::SyncServer};
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
-use replica::adapter::AutomergeAdapter;
+use replica::adapter::{AutomergeAdapter, YrsAdapter};
 use replica::server::{ReplicaService, ReplicaState, SyncService};
 use tonic::transport::Server;
+
+/// Which [`common::CrdtAdapter`] backs this replica process. A new variant
+/// only needs a matching arm in `main`'s `match args.crdt` below — the
+/// `ReplicaState`/gRPC scaffolding is already generic over `CrdtAdapter`
+/// (`ReplicaState::new` takes `impl CrdtAdapter` and boxes it internally).
+#[derive(Copy, Clone, Debug, clap::ValueEnum)]
+enum Crdt {
+    Automerge,
+    Yrs,
+}
 
 #[derive(clap::Parser)]
 #[command(about = "Replicant replica process")]
@@ -21,6 +32,10 @@ struct Args {
     /// gRPC listen port
     #[arg(long, default_value = "50051")]
     port: u16,
+
+    /// Which CRDT library backs this replica's document
+    #[arg(long, value_enum, default_value = "automerge")]
+    crdt: Crdt,
 }
 
 #[tokio::main]
@@ -37,15 +52,30 @@ async fn main() -> anyhow::Result<()> {
     opentelemetry::global::set_meter_provider(provider.clone());
 
     let addr = format!("0.0.0.0:{}", args.port).parse()?;
-    let state = ReplicaState::new(args.actor.clone(), AutomergeAdapter::new());
 
-    tracing::info!(actor = %args.actor, %addr, "replica starting");
+    tracing::info!(actor = %args.actor, %addr, crdt = ?args.crdt, "replica starting");
 
-    Server::builder()
-        .add_service(ReplicaServer::new(ReplicaService::new(state.clone())))
-        .add_service(SyncServer::new(SyncService::new(state)))
-        .serve(addr)
-        .await?;
+    // `ReplicaState::new` takes `impl CrdtAdapter` and boxes it internally
+    // (`Mutex<Box<dyn CrdtAdapter>>`), so each arm just needs to construct
+    // its concrete adapter — no further generic plumbing per variant.
+    match args.crdt {
+        Crdt::Automerge => {
+            let state = ReplicaState::new(args.actor.clone(), AutomergeAdapter::new());
+            Server::builder()
+                .add_service(ReplicaServer::new(ReplicaService::new(state.clone())))
+                .add_service(SyncServer::new(SyncService::new(state)))
+                .serve(addr)
+                .await?;
+        }
+        Crdt::Yrs => {
+            let state = ReplicaState::new(args.actor.clone(), YrsAdapter::new());
+            Server::builder()
+                .add_service(ReplicaServer::new(ReplicaService::new(state.clone())))
+                .add_service(SyncServer::new(SyncService::new(state)))
+                .serve(addr)
+                .await?;
+        }
+    }
 
     // Flush any buffered metrics before exit.
     provider.shutdown()?;

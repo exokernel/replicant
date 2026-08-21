@@ -226,25 +226,45 @@ pub trait CrdtAdapter: Send + 'static {
 
     /// Generate the next outbound sync message for `peer`, if any.
     ///
-    /// Returns `None` when this replica believes it is already in sync with
-    /// `peer`. The adapter owns one `sync::State` per peer keyed by `peer`.
+    /// Returns `None` once this replica has nothing further to tell `peer`
+    /// given what it has sent so far — a fixed point that must actually be
+    /// reachable, not merely converged toward, or the scaffolding's
+    /// push-after-every-op flush loop (the replica's `flush_to_peers`) spins
+    /// forever and pollutes the sync message-count/byte telemetry. How an
+    /// adapter tracks "what I've told `peer`" to answer this is
+    /// implementation-defined: Automerge threads a `sync::State` per peer;
+    /// other libraries may track a remembered peer state vector, a per-peer
+    /// drain cursor over locally-produced update bytes, or something else
+    /// native to their own sync model. This method makes no claim about which
+    /// message a given call represents (handshake-initiating vs. a data
+    /// delta) — that is opaque protocol framing internal to the returned
+    /// bytes, decoded only by the adapter's own `sync_receive`.
+    ///
+    /// Note that convergence itself is *not* detected through this method —
+    /// the orchestrator polls [`Self::state_fingerprint`] for byte equality
+    /// across replicas independently of what any adapter believes about its
+    /// peers. `None` here only starves the push loop; it is not the
+    /// convergence oracle.
     fn sync_generate(&mut self, peer: &str) -> Option<Vec<u8>>;
 
     /// Process an inbound sync message from `peer`.
     fn sync_receive(&mut self, peer: &str, msg: Vec<u8>) -> anyhow::Result<()>;
 
     /// Discard the per-peer sync protocol state for `peer`, so the next
-    /// [`Self::sync_generate`] starts a fresh handshake. Document state is
-    /// untouched.
+    /// [`Self::sync_generate`] restarts whatever this adapter's native
+    /// protocol does to (re)establish sync with a peer it has no bookkeeping
+    /// for — a fresh handshake for a request/response protocol, a
+    /// from-scratch diff for a state-vector-cache design, etc. Document state
+    /// is untouched.
     ///
     /// Used when healing a simulated partition: while a link is blocked,
     /// messages may have been generated and then dropped (e.g. one racing the
-    /// block's onset), leaving this side's protocol state believing the peer
-    /// received data it never saw. Sync protocols cache that belief — for
-    /// Automerge, `sync::State` tracks sent hashes and shared heads — and a
-    /// stale cache can stall the exchange indefinitely. Dropping the state is
-    /// always safe: the handshake re-derives what the peer has from scratch,
-    /// at worst re-sending data the peer already holds.
+    /// block's onset), leaving this side's per-peer bookkeeping believing the
+    /// peer received data it never saw. Whatever an adapter caches about a
+    /// peer's progress, a stale cache of that kind can stall the exchange
+    /// indefinitely, and discarding it must always be safe: re-deriving from
+    /// scratch costs at most some re-sent data the peer already holds, never
+    /// incorrectness.
     ///
     /// Must be a no-op if no state exists for `peer`.
     fn sync_reset(&mut self, peer: &str);

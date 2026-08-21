@@ -20,8 +20,10 @@ Ordered roughly by impact on the thesis (highest first).
 
 ## High-impact — validates the contribution claim
 
-### Second CRDT backend
-The `CrdtAdapter` trait is the thesis contribution; it has exactly one implementation (Automerge). Until a second backend (Yjs, Loro, or Diamond Types) lands, the abstraction is unproven — we can't claim it generalizes. The trait may need revision to fit a second CRDT's sync model.
+### ~~Second CRDT backend~~ — DONE 2026-08-21 (two of three; Loro remains)
+`YrsAdapter` shipped and is conformance-tested (`crates/replica/src/adapter/{yrs,conformance}.rs`; `--crdt yrs` on the replica binary). The trait itself needed no signature revision — `sync_generate`/`sync_receive`/`sync_reset` turned out already protocol-agnostic in shape; only their doc comments assumed Automerge's specific mechanism and were rewritten to state the observable contract instead (see `crates/common/src/lib.rs`). What *did* need adapter-specific design: Yrs's reference sync protocol (`y-sync`) caches no per-peer state at all — unlike Automerge's `sync::State` — so `YrsAdapter` introduces its own `HashMap<peer, StateVector>` cache, which is itself a confound worth naming explicitly in the RQ-3 methods text (see notes repo, `trace-replay-notes.md`, "Day 4 results (2026-08-21)" for the full argument and the two real bugs the generic conformance suite caught while building it).
+
+Remaining: Loro (third library) — same conformance-suite-first process. Deploy-side wiring (`deploy/docker/gen-compose.py`, `deploy/k8s/base/node-statefulset.yaml`) doesn't propagate a per-scenario CRDT choice yet, so no sweep can actually exercise Yrs until that lands — see "Second CRDT backend" follow-up in NEXT_SESSION.md.
 
 ### Memory instrumentation
 RQ-1 names merge time, memory, and storage. Time is solid (`convergence_ms`) and storage is partial (`doc_size_bytes` is an OTel gauge, absent from the results CSV, and per-actor OTel only reaches the analysis pipeline on the in-process lane). **Memory has no instrumentation of any kind** — no RSS, no retained heap, no allocator hook. It is the only committed dependent variable with nothing behind it, which makes it the gap most likely to silently drop out of the thesis.
