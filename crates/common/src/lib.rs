@@ -122,7 +122,11 @@ impl TryFrom<String> for NodeId {
 // ── Scalar values ──────────────────────────────────────────────────────────
 
 /// A scalar value that can be stored in a CRDT document.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// `Eq` is derivable because there is no float variant — equality here is
+/// total, unlike the CRDT libraries' own scalar types, all three of which
+/// carry a float and so can only be `PartialEq`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScalarVal {
     Str(String),
     Uint(u64),

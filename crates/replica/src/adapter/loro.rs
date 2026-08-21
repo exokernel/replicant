@@ -273,14 +273,11 @@ impl CrdtAdapter for LoroAdapter {
         // not claim the `doc_size_grows_with_every_op` characterization —
         // see `adapter::conformance` and the mirror test
         // `loro_doc_size_can_shrink_on_delete`.
-        self.doc
-            .export(ExportMode::Snapshot)
-            .map(|b| b.len())
-            // The trait's signature has no error channel here, and Loro's
-            // only documented `LoroEncodeError` cases are shallow-snapshot
-            // depth errors that a plain `Snapshot` export cannot hit. Report
-            // 0 rather than panicking a benchmark run on an impossible arm.
-            .unwrap_or(0)
+        // The trait's signature has no error channel here, and Loro's only
+        // documented `LoroEncodeError` cases are shallow-snapshot depth
+        // errors that a plain `Snapshot` export cannot hit. Report 0 rather
+        // than panicking a benchmark run on an impossible arm.
+        self.doc.export(ExportMode::Snapshot).map_or(0, |b| b.len())
     }
 
     fn sync_generate(&mut self, peer: &str) -> Option<Vec<u8>> {
@@ -650,53 +647,16 @@ mod tests {
     /// same way.
     #[test]
     fn loro_snapshot_is_canonical_across_converged_replicas_with_pinned_peer_ids() {
-        let n = 5;
-        let op_count = 10;
-        let mut replicas: Vec<LoroAdapter> = (1..=n as u64)
+        let mut replicas: Vec<LoroAdapter> = (1..=5)
             .map(LoroAdapter::with_peer_id)
             .collect::<Result<_, _>>()
             .unwrap();
-        let id = |i: usize| format!("node-{i}");
+        converged_line(&mut replicas, 10);
 
-        for i in 0..op_count {
-            let writer = i % n;
-            replicas[writer]
-                .apply_op(&map_put("doc", &format!("k{i}"), i as u64))
-                .unwrap();
-            for j in 0..n - 1 {
-                let (left, right) = replicas.split_at_mut(j + 1);
-                if let Some(msg) = left[j].sync_generate(&id(j + 1)) {
-                    right[0].sync_receive(&id(j), msg).unwrap();
-                }
-                if let Some(msg) = right[0].sync_generate(&id(j)) {
-                    left[j].sync_receive(&id(j + 1), msg).unwrap();
-                }
-            }
-        }
-        loop {
-            let mut any = false;
-            for j in 0..n - 1 {
-                let (left, right) = replicas.split_at_mut(j + 1);
-                if let Some(msg) = left[j].sync_generate(&id(j + 1)) {
-                    right[0].sync_receive(&id(j), msg).unwrap();
-                    any = true;
-                }
-                if let Some(msg) = right[0].sync_generate(&id(j)) {
-                    left[j].sync_receive(&id(j + 1), msg).unwrap();
-                    any = true;
-                }
-            }
-            if !any {
-                break;
-            }
-        }
-
-        let fp = replicas[0].state_fingerprint();
-        for replica in replicas.iter_mut().skip(1) {
-            assert_eq!(replica.state_fingerprint(), fp);
-        }
-
-        let sizes: Vec<usize> = (0..n).map(|i| replicas[i].doc_size_bytes()).collect();
+        let sizes: Vec<usize> = replicas
+            .iter_mut()
+            .map(LoroAdapter::doc_size_bytes)
+            .collect();
         assert!(
             sizes.iter().min() == sizes.iter().max(),
             "snapshot stopped being canonical for equal-width peer ids — \

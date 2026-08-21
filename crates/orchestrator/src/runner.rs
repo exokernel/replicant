@@ -174,9 +174,9 @@ async fn acquire_nodes(
 /// latency rather than `n × round-trip`. For in-process replicas this is
 /// effectively a no-op; for external (docker/k8s) replicas it replaces what
 /// used to require a full container bounce between trials.
-async fn reset_all(clients: &mut [ReplicaClient<Channel>]) -> Result<()> {
+async fn reset_all(clients: &[ReplicaClient<Channel>]) -> Result<()> {
     let mut set: JoinSet<Result<()>> = JoinSet::new();
-    for client in clients.iter() {
+    for client in clients {
         let mut c = client.clone();
         set.spawn(async move {
             c.reset(Request::new(Empty {})).await?;
@@ -561,7 +561,7 @@ pub async fn run(config: &TopologyConfig, source: NodeSource) -> Result<RunResul
 
     // Reset before wiring peers so each trial starts from a clean slate even
     // when the same external stack is reused across many scenarios/trials.
-    reset_all(&mut clients).await?;
+    reset_all(&clients).await?;
 
     // Text workloads need the shared text object bootstrapped on every node
     // before any edges exist (see `ensure_text_all`); otherwise each node
@@ -663,7 +663,7 @@ pub async fn run_partition_heal(
 
     // Reset before wiring peers so each trial starts from a clean slate even
     // when the same external stack is reused across many scenarios/trials.
-    reset_all(&mut clients).await?;
+    reset_all(&clients).await?;
 
     // Text workloads: bootstrap the shared text object on every node while the
     // document is still empty and no edges exist. This is what makes the heal
@@ -1054,7 +1054,7 @@ mod tests {
         );
 
         // Reset every replica back to empty.
-        reset_all(&mut clients).await.unwrap();
+        reset_all(&clients).await.unwrap();
 
         for (i, client) in clients.iter_mut().enumerate() {
             let fp = client
@@ -1117,7 +1117,7 @@ mod tests {
     async fn reset_is_noop_on_fresh_replica() {
         let mut tasks = JoinSet::new();
         let (_endpoints, mut clients) = spawn_nodes(2, Crdt::Automerge, &mut tasks).await.unwrap();
-        reset_all(&mut clients).await.unwrap();
+        reset_all(&clients).await.unwrap();
         for client in clients.iter_mut() {
             let fp = client
                 .get_state_fingerprint(Request::new(Empty {}))

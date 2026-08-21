@@ -585,23 +585,7 @@ mod tests {
             b.apply_op(&splice).unwrap();
         }
 
-        let mut rounds = 0;
-        loop {
-            let mut any = false;
-            if let Some(msg) = a.sync_generate("b") {
-                b.sync_receive("a", msg).unwrap();
-                any = true;
-            }
-            if let Some(msg) = b.sync_generate("a") {
-                a.sync_receive("b", msg).unwrap();
-                any = true;
-            }
-            if !any {
-                break;
-            }
-            rounds += 1;
-            assert!(rounds < 64, "sync did not reach quiescence");
-        }
+        sync_until_quiescent(&mut a, "a", &mut b, "b");
 
         assert_eq!(a.state_fingerprint(), b.state_fingerprint());
         assert_eq!(
@@ -627,50 +611,13 @@ mod tests {
     /// which now reflects this rather than leaving it open.
     #[test]
     fn yrs_save_bytes_are_canonical_across_converged_replicas() {
-        let n = 5;
-        let op_count = 10;
-        let mut replicas: Vec<YrsAdapter> = (0..n).map(|_| YrsAdapter::default()).collect();
-        let id = |i: usize| format!("node-{i}");
+        let mut replicas: Vec<YrsAdapter> = (0..5).map(|_| YrsAdapter::default()).collect();
+        converged_line(&mut replicas, 10);
 
-        for i in 0..op_count {
-            let writer = i % n;
-            replicas[writer]
-                .apply_op(&map_put("doc", &format!("k{i}"), i as u64))
-                .unwrap();
-            for j in 0..n - 1 {
-                let (left, right) = replicas.split_at_mut(j + 1);
-                if let Some(msg) = left[j].sync_generate(&id(j + 1)) {
-                    right[0].sync_receive(&id(j), msg).unwrap();
-                }
-                if let Some(msg) = right[0].sync_generate(&id(j)) {
-                    left[j].sync_receive(&id(j + 1), msg).unwrap();
-                }
-            }
-        }
-        loop {
-            let mut any = false;
-            for j in 0..n - 1 {
-                let (left, right) = replicas.split_at_mut(j + 1);
-                if let Some(msg) = left[j].sync_generate(&id(j + 1)) {
-                    right[0].sync_receive(&id(j), msg).unwrap();
-                    any = true;
-                }
-                if let Some(msg) = right[0].sync_generate(&id(j)) {
-                    left[j].sync_receive(&id(j + 1), msg).unwrap();
-                    any = true;
-                }
-            }
-            if !any {
-                break;
-            }
-        }
-
-        let fp = replicas[0].state_fingerprint();
-        for replica in replicas.iter_mut().skip(1) {
-            assert_eq!(replica.state_fingerprint(), fp);
-        }
-
-        let sizes: Vec<usize> = (0..n).map(|i| replicas[i].doc_size_bytes()).collect();
+        let sizes: Vec<usize> = replicas
+            .iter_mut()
+            .map(YrsAdapter::doc_size_bytes)
+            .collect();
         assert!(
             sizes.iter().min() == sizes.iter().max(),
             "save() became non-canonical across line replicas — sizes: {sizes:?}. \

@@ -76,10 +76,7 @@ impl AutomergeAdapter {
             debug_assert!(
                 // Verify the cached object still has the expected type. This
                 // catches callers that reuse a name with a different ObjType.
-                self.doc
-                    .object_type(id)
-                    .map(|t| t == obj_type)
-                    .unwrap_or(false),
+                self.doc.object_type(id).is_ok_and(|t| t == obj_type),
                 "resolve_obj: '{obj}' was cached as a different type than {obj_type:?}"
             );
             return Ok(id.clone());

@@ -51,19 +51,87 @@ pub(crate) fn sync_until_quiescent<A: CrdtAdapter>(a: &mut A, a_id: &str, b: &mu
     // Bounded to prevent a buggy adapter from looping forever; well above
     // any reasonable handshake length for these tiny docs.
     for _ in 0..64 {
-        let from_a = a.sync_generate(b_id);
-        if let Some(msg) = from_a.clone() {
-            b.sync_receive(a_id, msg).unwrap();
-        }
-        let from_b = b.sync_generate(a_id);
-        if let Some(msg) = from_b.clone() {
-            a.sync_receive(b_id, msg).unwrap();
-        }
-        if from_a.is_none() && from_b.is_none() {
+        if !sync_once(a, a_id, b, b_id) {
             return;
         }
     }
     panic!("sync did not reach quiescence within 64 rounds");
+}
+
+/// Exchange at most one message in each direction between two adapters.
+///
+/// Returns whether anything moved, which is what every caller's termination
+/// condition is built from. Deliberately consumes each generated message
+/// rather than cloning it to inspect afterwards: the 1e4 divergence cells
+/// produce large updates, and the clone was pure waste.
+pub(crate) fn sync_once<A: CrdtAdapter>(a: &mut A, a_id: &str, b: &mut A, b_id: &str) -> bool {
+    let mut moved = false;
+    if let Some(msg) = a.sync_generate(b_id) {
+        b.sync_receive(a_id, msg).unwrap();
+        moved = true;
+    }
+    if let Some(msg) = b.sync_generate(a_id) {
+        a.sync_receive(b_id, msg).unwrap();
+        moved = true;
+    }
+    moved
+}
+
+/// The canonical peer id for replica `i` in a line-topology fixture.
+fn line_id(i: usize) -> String {
+    format!("node-{i}")
+}
+
+/// Exchange one message in each direction across every edge of a line
+/// topology `0 <-> 1 <-> .. <-> n-1`. Returns whether anything moved.
+///
+/// Approximates the server's post-`apply_op` `flush_to_peers` for a
+/// non-mesh graph, which is the shape that makes integration order — and so
+/// any order-dependence in a library's encoder — actually observable.
+pub(crate) fn sync_line_once<A: CrdtAdapter>(replicas: &mut [A]) -> bool {
+    let mut moved = false;
+    for j in 0..replicas.len().saturating_sub(1) {
+        let (left, right) = replicas.split_at_mut(j + 1);
+        moved |= sync_once(&mut left[j], &line_id(j), &mut right[0], &line_id(j + 1));
+    }
+    moved
+}
+
+/// Drive a line topology to quiescence.
+pub(crate) fn sync_line_until_quiescent<A: CrdtAdapter>(replicas: &mut [A]) {
+    for _ in 0..64 {
+        if !sync_line_once(replicas) {
+            return;
+        }
+    }
+    panic!("line topology did not reach quiescence within 64 rounds");
+}
+
+/// Build `n` fresh replicas, apply `op_count` round-robin map writes, and
+/// pump the line after every write until the whole line is quiescent.
+///
+/// The fixture behind every save-byte-canonicity test. Those tests differ
+/// only in what they assert about the resulting encodings, so sharing the
+/// setup keeps the three claims — Automerge non-canonical, Yrs canonical,
+/// Loro canonical modulo peer-id width — comparable by construction.
+pub(crate) fn converged_line<A: CrdtAdapter>(replicas: &mut [A], op_count: usize) {
+    let n = replicas.len();
+    for i in 0..op_count {
+        replicas[i % n]
+            .apply_op(&map_put("doc", &format!("k{i}"), i as u64))
+            .unwrap();
+        sync_line_once(replicas);
+    }
+    sync_line_until_quiescent(replicas);
+
+    let fp = replicas[0].state_fingerprint();
+    for (i, replica) in replicas.iter_mut().enumerate().skip(1) {
+        assert_eq!(
+            replica.state_fingerprint(),
+            fp,
+            "replica {i} did not converge with replica 0"
+        );
+    }
 }
 
 pub(crate) fn map_put(obj: &str, key: &str, value: impl Into<ScalarVal>) -> Op {
@@ -807,58 +875,14 @@ pub(crate) fn text_length_errors_on_missing_or_wrong_type<A: CrdtAdapter + Defau
 /// before treating any per-replica doc-size spread as one phenomenon.
 pub(crate) fn save_bytes_not_canonical_across_converged_replicas<A: CrdtAdapter + Default>() {
     let n = 5;
-    let op_count = 10;
     let mut replicas: Vec<A> = (0..n).map(|_| A::default()).collect();
-    let id = |i: usize| format!("node-{i}");
-
-    for i in 0..op_count {
-        let writer = i % n;
-        replicas[writer]
-            .apply_op(&map_put("doc", &format!("k{i}"), i as u64))
-            .unwrap();
-        // Inline one round of bidirectional sync over each line edge —
-        // approximates the server's post-apply_op flush_to_peers.
-        for j in 0..n - 1 {
-            let (left, right) = replicas.split_at_mut(j + 1);
-            if let Some(msg) = left[j].sync_generate(&id(j + 1)) {
-                right[0].sync_receive(&id(j), msg).unwrap();
-            }
-            if let Some(msg) = right[0].sync_generate(&id(j)) {
-                left[j].sync_receive(&id(j + 1), msg).unwrap();
-            }
-        }
-    }
-    // Drain any in-flight messages until both directions of every edge
-    // report quiescence.
-    loop {
-        let mut any = false;
-        for j in 0..n - 1 {
-            let (left, right) = replicas.split_at_mut(j + 1);
-            if let Some(msg) = left[j].sync_generate(&id(j + 1)) {
-                right[0].sync_receive(&id(j), msg).unwrap();
-                any = true;
-            }
-            if let Some(msg) = right[0].sync_generate(&id(j)) {
-                left[j].sync_receive(&id(j + 1), msg).unwrap();
-                any = true;
-            }
-        }
-        if !any {
-            break;
-        }
-    }
-
-    // Fingerprints (the CRDT convergence invariant) must agree.
-    let fp = replicas[0].state_fingerprint();
-    for replica in replicas.iter_mut().skip(1) {
-        assert_eq!(replica.state_fingerprint(), fp);
-    }
+    converged_line(&mut replicas, 10);
 
     // save() bytes are allowed to differ — and empirically they do.
     // Asserting they vary documents the current Automerge behavior so a
     // future-upgrade regression toward canonical save() is loud rather
     // than silent.
-    let sizes: Vec<usize> = (0..n).map(|i| replicas[i].doc_size_bytes()).collect();
+    let sizes: Vec<usize> = replicas.iter_mut().map(A::doc_size_bytes).collect();
     assert!(
         sizes.iter().min() != sizes.iter().max(),
         "save() became canonical across line replicas — sizes: {sizes:?}. \
