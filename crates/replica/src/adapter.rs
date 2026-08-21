@@ -6,9 +6,11 @@
 //! that module's doc comment for what "generic" and "wraps" mean here.
 
 pub mod automerge;
+pub mod loro;
 pub mod yrs;
 
 pub use automerge::AutomergeAdapter;
+pub use loro::LoroAdapter;
 pub use yrs::YrsAdapter;
 
 #[cfg(test)]

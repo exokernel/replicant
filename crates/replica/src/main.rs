@@ -8,7 +8,7 @@
 use clap::Parser as _;
 use common::proto::{replica_server::ReplicaServer, sync_server::SyncServer};
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
-use replica::adapter::{AutomergeAdapter, YrsAdapter};
+use replica::adapter::{AutomergeAdapter, LoroAdapter, YrsAdapter};
 use replica::server::{ReplicaService, ReplicaState, SyncService};
 use tonic::transport::Server;
 
@@ -20,6 +20,7 @@ use tonic::transport::Server;
 enum Crdt {
     Automerge,
     Yrs,
+    Loro,
 }
 
 #[derive(clap::Parser)]
@@ -69,6 +70,14 @@ async fn main() -> anyhow::Result<()> {
         }
         Crdt::Yrs => {
             let state = ReplicaState::new(args.actor.clone(), YrsAdapter::new());
+            Server::builder()
+                .add_service(ReplicaServer::new(ReplicaService::new(state.clone())))
+                .add_service(SyncServer::new(SyncService::new(state)))
+                .serve(addr)
+                .await?;
+        }
+        Crdt::Loro => {
+            let state = ReplicaState::new(args.actor.clone(), LoroAdapter::new());
             Server::builder()
                 .add_service(ReplicaServer::new(ReplicaService::new(state.clone())))
                 .add_service(SyncServer::new(SyncService::new(state)))

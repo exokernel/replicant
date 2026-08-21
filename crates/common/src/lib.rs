@@ -3,7 +3,7 @@
 //! - [`proto`] — generated tonic/prost code for the `replicant.v1` gRPC API.
 //! - [`ScalarVal`] / [`Op`] — library-agnostic value and operation models,
 //!   with `TryFrom` impls from their proto counterparts.
-//! - [`CrdtAdapter`] — the trait every CRDT backend (currently just Automerge)
+//! - [`CrdtAdapter`] — the trait every CRDT backend (Automerge, Yrs, Loro)
 //!   implements, called by the replica scaffolding.
 
 use anyhow::Context as _;
@@ -200,8 +200,10 @@ impl TryFrom<proto::OpRequest> for Op {
 /// in the scaffolding layer, *outside* calls to this trait. Adapter impls
 /// must not emit those metrics directly.
 ///
-/// All methods take `&mut self` because `AutoCommit` requires mutable access
-/// even for reads — it commits any pending transaction first.
+/// All methods take `&mut self`, including the reads. The requirement comes
+/// from Automerge, whose `AutoCommit` commits any pending transaction before
+/// answering a read; Yrs and Loro would both be satisfied by `&self`. Kept
+/// as the wider bound so the trait admits either shape.
 ///
 /// `Send + 'static` allows the adapter to be held behind `Box<dyn
 /// CrdtAdapter>` and moved into a Tokio task.
@@ -211,8 +213,13 @@ pub trait CrdtAdapter: Send + 'static {
 
     /// Return the current document heads as sorted opaque byte vectors.
     ///
-    /// For Automerge each entry is a 32-byte `ChangeHash`. Sorting ensures
-    /// that equality comparison is order-independent.
+    /// What an entry *is* varies by library and the trait makes no claim
+    /// about it: a 32-byte `ChangeHash` for Automerge, a (peer, counter)
+    /// pair from the causal frontier for Loro, a (client, clock) pair from
+    /// the state vector for Yrs — which, note, is not a DAG frontier at all.
+    /// Sorting is required of every implementation, so that equality
+    /// comparison is order-independent even where the underlying collection
+    /// is a hash map with unspecified iteration order.
     fn get_heads(&mut self) -> Vec<Vec<u8>>;
 
     /// Return an opaque fingerprint of the current document state.
@@ -292,9 +299,12 @@ pub trait CrdtAdapter: Send + 'static {
     /// achieves cross-replica identity from a later state is adapter-specific
     /// and generally unsafe.
     ///
-    /// Adapters whose library names root objects globally (e.g. Yrs, where
-    /// `get_or_insert_text` is identity-stable by name) may implement this as
-    /// a no-op lookup.
+    /// Adapters whose library names root objects globally may implement this
+    /// as a no-op lookup — both non-Automerge adapters written so far do,
+    /// by different mechanisms: Yrs's `get_or_insert_text` is identity-stable
+    /// by name, and a Loro root container's id is *derived* from `(name,
+    /// type)` and always exists. Where that holds there is no creation op,
+    /// hence no concurrent creation and no losing side.
     fn ensure_text(&mut self, obj: &str) -> anyhow::Result<()>;
 
     /// Character length of the named text object.
@@ -305,7 +315,13 @@ pub trait CrdtAdapter: Send + 'static {
     /// equality alone cannot distinguish "converged on everything" from
     /// "converged after throwing half the work away".
     ///
-    /// Errors if no such text object exists.
+    /// Errors if no such text object exists — where the backing library can
+    /// represent that. Loro cannot: every `(name, Text)` root id exists by
+    /// construction, so an untouched name reads as an empty text and returns
+    /// `Ok(0)`. Callers must therefore treat this as a length query and not
+    /// as an existence check. The orchestrator's `verify_text_length` already
+    /// does: it compares the length against the scenario's op count, so a
+    /// wrong object name still fails, as a mismatch rather than an error.
     fn text_length(&mut self, obj: &str) -> anyhow::Result<usize>;
 }
 
