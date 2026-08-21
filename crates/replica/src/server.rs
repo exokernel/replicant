@@ -11,6 +11,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
 use tonic::{Request, Response, Status};
 
+use common::NodeId;
 use common::proto::{self, replica_server::Replica, sync_server::Sync};
 use common::{CrdtAdapter, Op};
 
@@ -27,7 +28,7 @@ use crate::metrics::Metrics;
 pub struct ReplicaState {
     /// Stable actor identifier used in metric labels and as the `x-peer-id`
     /// gRPC metadata value when opening outbound sync streams.
-    actor_id: String,
+    actor_id: NodeId,
     /// `std::sync::Mutex` is intentional: the lock is never held across an
     /// `.await` point, so there is no risk of blocking the async executor.
     adapter: Mutex<Box<dyn CrdtAdapter>>,
@@ -35,7 +36,7 @@ pub struct ReplicaState {
     ///
     /// Uses `tokio::sync::Mutex` because `flush_to_peers` holds this lock
     /// across `.await` points while sending on each channel.
-    peer_txs: tokio::sync::Mutex<HashMap<String, mpsc::Sender<Vec<u8>>>>,
+    peer_txs: tokio::sync::Mutex<HashMap<NodeId, mpsc::Sender<Vec<u8>>>>,
     /// Join handles for the inbound and outbound sync-stream driver tasks.
     ///
     /// Tracked so [`Self::reset`] can `abort` + `await` each task before
@@ -54,7 +55,7 @@ pub struct ReplicaState {
     ///
     /// `std::sync::Mutex`: held only for set membership operations, never
     /// across an `.await`.
-    blocked_peers: Mutex<HashSet<String>>,
+    blocked_peers: Mutex<HashSet<NodeId>>,
     metrics: Metrics,
 }
 
@@ -63,7 +64,7 @@ impl ReplicaState {
     ///
     /// Instruments are obtained from the global OTel meter provider, so the
     /// provider must be initialized before calling this.
-    pub fn new(actor_id: String, adapter: impl CrdtAdapter) -> Arc<Self> {
+    pub fn new(actor_id: NodeId, adapter: impl CrdtAdapter) -> Arc<Self> {
         Self::from_boxed_adapter(actor_id, Box::new(adapter))
     }
 
@@ -73,13 +74,10 @@ impl ReplicaState {
     /// Exists so a `match` over a CRDT-selection flag can produce one
     /// `Box<dyn CrdtAdapter>` and share a single server-setup path, instead
     /// of repeating that path once per variant — see the replica binary.
-    pub fn from_boxed_adapter(actor_id: String, adapter: Box<dyn CrdtAdapter>) -> Arc<Self> {
-        assert!(
-            actor_id
-                .parse::<tonic::metadata::AsciiMetadataValue>()
-                .is_ok(),
-            "actor_id must be a valid HTTP-header value: {actor_id:?}",
-        );
+    pub fn from_boxed_adapter(actor_id: NodeId, adapter: Box<dyn CrdtAdapter>) -> Arc<Self> {
+        // No header-value assertion here any more: a `NodeId` cannot be
+        // constructed without passing that check, so the invariant arrives
+        // with the value instead of being re-asserted at each entry point.
         let meter = opentelemetry::global::meter("replicant");
         Arc::new(Self {
             actor_id,
@@ -162,7 +160,7 @@ impl ReplicaState {
     /// heal handshake separately (`KickSync`) once BOTH endpoints of every
     /// healed link are unblocked; kicking from here would race the peer's own
     /// unblock and the kick would be dropped as still-blocked inbound.
-    fn set_peer_links(&self, peers: &[String], blocked: bool) {
+    fn set_peer_links(&self, peers: &[NodeId], blocked: bool) {
         {
             let mut set = self
                 .blocked_peers
@@ -192,7 +190,7 @@ impl ReplicaState {
         );
     }
 
-    pub fn actor_id(&self) -> &str {
+    pub fn actor_id(&self) -> &NodeId {
         &self.actor_id
     }
 
@@ -207,7 +205,7 @@ impl ReplicaState {
         self.metrics.op_duration_ms.record(
             elapsed_ms,
             &[
-                KeyValue::new("actor", self.actor_id.clone()),
+                KeyValue::new("actor", self.actor_id.to_string()),
                 KeyValue::new("op", op_name),
             ],
         );
@@ -217,7 +215,7 @@ impl ReplicaState {
     fn record_doc_size(&self) {
         self.metrics.doc_size_bytes.record(
             self.doc_size_bytes() as u64,
-            &[KeyValue::new("actor", self.actor_id.clone())],
+            &[KeyValue::new("actor", self.actor_id.to_string())],
         );
     }
 
@@ -235,12 +233,12 @@ impl ReplicaState {
 
     fn peer_attrs(&self, peer_id: &str) -> [KeyValue; 2] {
         [
-            KeyValue::new("actor", self.actor_id.clone()),
+            KeyValue::new("actor", self.actor_id.to_string()),
             KeyValue::new("peer", peer_id.to_owned()),
         ]
     }
 
-    async fn register_peer(&self, peer_id: String, tx: mpsc::Sender<Vec<u8>>) {
+    async fn register_peer(&self, peer_id: NodeId, tx: mpsc::Sender<Vec<u8>>) {
         self.peer_txs.lock().await.insert(peer_id, tx);
     }
 
@@ -305,7 +303,7 @@ impl ReplicaState {
     async fn flush_to_peers(&self) {
         // Collect (peer_id, sender) in one lock acquisition; no lock is held
         // across the subsequent async sends.
-        let peers: Vec<(String, mpsc::Sender<Vec<u8>>)> = self
+        let peers: Vec<(NodeId, mpsc::Sender<Vec<u8>>)> = self
             .peer_txs
             .lock()
             .await
@@ -354,9 +352,9 @@ impl ReplicaState {
     /// Peers without an open stream are skipped silently: on non-mesh heal
     /// graphs only the healed edges have streams, and a kick names peers, not
     /// edges.
-    async fn kick_sync(&self, peers: &[String]) {
+    async fn kick_sync(&self, peers: &[NodeId]) {
         let txs = self.peer_txs.lock().await;
-        let targets: Vec<(String, mpsc::Sender<Vec<u8>>)> = peers
+        let targets: Vec<(NodeId, mpsc::Sender<Vec<u8>>)> = peers
             .iter()
             .filter_map(|p| txs.get(p).map(|tx| (p.clone(), tx.clone())))
             .collect();
@@ -441,6 +439,10 @@ impl Replica for ReplicaService {
         request: Request<proto::PeerRef>,
     ) -> Result<Response<proto::Empty>, Status> {
         let proto::PeerRef { peer_id, addr } = request.into_inner();
+        // Validate at the wire boundary: a malformed id would otherwise
+        // surface much later, as a failed metadata header on the outbound
+        // stream this call is about to open.
+        let peer_id = NodeId::new(peer_id).map_err(|e| Status::invalid_argument(e.to_string()))?;
         let state = self.state.clone();
         // `ready_rx` resolves once the TCP connection and gRPC stream are open
         // and the peer is registered in `peer_txs`. Awaiting it here means the
@@ -506,6 +508,7 @@ impl Replica for ReplicaService {
         request: Request<proto::PeerLinkUpdate>,
     ) -> Result<Response<proto::Empty>, Status> {
         let proto::PeerLinkUpdate { peer_ids, blocked } = request.into_inner();
+        let peer_ids = to_node_ids(peer_ids)?;
         self.state.set_peer_links(&peer_ids, blocked);
         Ok(Response::new(proto::Empty {}))
     }
@@ -514,10 +517,22 @@ impl Replica for ReplicaService {
         &self,
         request: Request<proto::PeerIds>,
     ) -> Result<Response<proto::Empty>, Status> {
-        let peer_ids = request.into_inner().peer_ids;
+        let peer_ids = to_node_ids(request.into_inner().peer_ids)?;
         self.state.kick_sync(&peer_ids).await;
         Ok(Response::new(proto::Empty {}))
     }
+}
+
+/// Convert a wire list of peer ids, rejecting the whole request if any is
+/// malformed.
+///
+/// All-or-nothing on purpose: `SetPeerLinks` and `KickSync` describe one
+/// topology change, and applying the valid half of a partition instruction
+/// would leave the run in a state no scenario asked for — worse than failing.
+fn to_node_ids(ids: Vec<String>) -> Result<Vec<NodeId>, Status> {
+    ids.into_iter()
+        .map(|id| NodeId::new(id).map_err(|e| Status::invalid_argument(e.to_string())))
+        .collect()
 }
 
 // ── Sync service ───────────────────────────────────────────────────────────
@@ -539,8 +554,12 @@ impl Sync for SyncService {
             .metadata()
             .get("x-peer-id")
             .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| Status::invalid_argument("missing x-peer-id metadata"))?
-            .to_owned();
+            .ok_or_else(|| Status::invalid_argument("missing x-peer-id metadata"))?;
+        // A value that arrived *as* a header is trivially a legal header
+        // value, so this only rejects the empty string in practice. Kept as a
+        // checked conversion anyway rather than an unwrap, because nothing
+        // about the metadata API guarantees that for all time.
+        let peer_id = NodeId::new(peer_id).map_err(|e| Status::invalid_argument(e.to_string()))?;
 
         // Two-stage outbound pipeline: internal code writes raw Vec<u8> onto
         // raw_tx; the adapter task below re-wraps each payload as a typed gRPC
@@ -576,7 +595,7 @@ impl Sync for SyncService {
 /// Runs for the lifetime of the connection. On exit, deregisters the peer.
 async fn recv_loop(
     state: Arc<ReplicaState>,
-    peer_id: String,
+    peer_id: NodeId,
     mut inbound: tonic::Streaming<proto::SyncMessage>,
     tx: mpsc::Sender<Vec<u8>>,
 ) {
@@ -636,7 +655,7 @@ async fn recv_loop(
 /// connection is genuinely usable rather than relying on a fixed sleep.
 async fn connect_to_peer(
     state: Arc<ReplicaState>,
-    peer_id: String,
+    peer_id: NodeId,
     addr: String,
     ready_tx: tokio::sync::oneshot::Sender<()>,
 ) -> anyhow::Result<()> {
@@ -650,13 +669,9 @@ async fn connect_to_peer(
     spawn_payload_forwarder(raw_rx, grpc_tx, std::convert::identity);
 
     let mut request = Request::new(ReceiverStream::new(grpc_rx));
-    request.metadata_mut().insert(
-        "x-peer-id",
-        state
-            .actor_id
-            .parse()
-            .expect("actor_id is validated as a header value in ReplicaState::new"),
-    );
+    request
+        .metadata_mut()
+        .insert("x-peer-id", state.actor_id.header_value());
 
     let response = client.stream(request).await?;
     let inbound = response.into_inner();
@@ -711,6 +726,14 @@ fn spawn_payload_forwarder<T, F>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `NodeId` from a literal known to be valid.
+    ///
+    /// Tests use fixed `node-N` names, so the checked constructor cannot fail
+    /// here; unwrapping keeps the assertions readable.
+    fn id(s: &str) -> NodeId {
+        NodeId::new(s).expect("test node ids are valid")
+    }
     use crate::adapter::AutomergeAdapter;
     use common::ScalarVal;
 
@@ -733,10 +756,10 @@ mod tests {
     /// deliver the pending change.
     #[tokio::test]
     async fn full_peer_channel_defers_rather_than_dropping_a_change() {
-        let state = ReplicaState::new("node-0".to_owned(), AutomergeAdapter::new());
+        let state = ReplicaState::new(id("node-0"), AutomergeAdapter::new());
         // Capacity 1, so a single un-drained message saturates the channel.
         let (tx, mut rx) = mpsc::channel::<Vec<u8>>(1);
-        state.register_peer("node-1".to_owned(), tx).await;
+        state.register_peer(id("node-1"), tx).await;
 
         // Fills the only slot with the sync handshake — left undrained, so the
         // channel is full for the next flush.
@@ -759,9 +782,9 @@ mod tests {
     /// The happy path still sends on every flush that has something to say.
     #[tokio::test]
     async fn flush_delivers_when_the_peer_channel_has_room() {
-        let state = ReplicaState::new("node-0".to_owned(), AutomergeAdapter::new());
+        let state = ReplicaState::new(id("node-0"), AutomergeAdapter::new());
         let (tx, mut rx) = mpsc::channel::<Vec<u8>>(8);
-        state.register_peer("node-1".to_owned(), tx).await;
+        state.register_peer(id("node-1"), tx).await;
 
         state.flush_to_peers().await;
         state.apply_op_timed(&map_put("k")).unwrap();
@@ -776,9 +799,9 @@ mod tests {
     /// otherwise repeated no-op flushes would drain the channel's capacity.
     #[tokio::test]
     async fn idle_flush_does_not_consume_channel_capacity() {
-        let state = ReplicaState::new("node-0".to_owned(), AutomergeAdapter::new());
+        let state = ReplicaState::new(id("node-0"), AutomergeAdapter::new());
         let (tx, mut rx) = mpsc::channel::<Vec<u8>>(2);
-        state.register_peer("node-1".to_owned(), tx.clone()).await;
+        state.register_peer(id("node-1"), tx.clone()).await;
 
         // First flush queues the handshake; subsequent ones have nothing new.
         state.flush_to_peers().await;
@@ -801,12 +824,12 @@ mod tests {
     /// This is the outbound half of the partition primitive.
     #[tokio::test]
     async fn flush_skips_blocked_peers_and_serves_the_rest() {
-        let state = ReplicaState::new("node-0".to_owned(), AutomergeAdapter::new());
+        let state = ReplicaState::new(id("node-0"), AutomergeAdapter::new());
         let (tx_b, mut rx_blocked) = mpsc::channel::<Vec<u8>>(8);
         let (tx_o, mut rx_open) = mpsc::channel::<Vec<u8>>(8);
-        state.register_peer("node-1".to_owned(), tx_b).await;
-        state.register_peer("node-2".to_owned(), tx_o).await;
-        state.set_peer_links(&["node-1".to_owned()], true);
+        state.register_peer(id("node-1"), tx_b).await;
+        state.register_peer(id("node-2"), tx_o).await;
+        state.set_peer_links(&[id("node-1")], true);
 
         state.apply_op_timed(&map_put("k")).unwrap();
         state.flush_to_peers().await;
@@ -827,17 +850,17 @@ mod tests {
     /// generate.
     #[tokio::test]
     async fn unblock_delivers_changes_made_during_the_block() {
-        let state = ReplicaState::new("node-0".to_owned(), AutomergeAdapter::new());
+        let state = ReplicaState::new(id("node-0"), AutomergeAdapter::new());
         let (tx, mut rx) = mpsc::channel::<Vec<u8>>(8);
-        state.register_peer("node-1".to_owned(), tx).await;
-        state.set_peer_links(&["node-1".to_owned()], true);
+        state.register_peer(id("node-1"), tx).await;
+        state.set_peer_links(&[id("node-1")], true);
 
         state.apply_op_timed(&map_put("during-block")).unwrap();
         state.flush_to_peers().await;
         assert!(rx.try_recv().is_err(), "nothing crosses a blocked link");
 
-        state.set_peer_links(&["node-1".to_owned()], false);
-        state.kick_sync(&["node-1".to_owned()]).await;
+        state.set_peer_links(&[id("node-1")], false);
+        state.kick_sync(&[id("node-1")]).await;
         assert!(
             rx.try_recv().is_ok(),
             "post-unblock kick must start the handshake"
@@ -848,16 +871,16 @@ mod tests {
     /// peers, and on sparse heal graphs not every peer has an edge.
     #[tokio::test]
     async fn kick_sync_ignores_unknown_peers() {
-        let state = ReplicaState::new("node-0".to_owned(), AutomergeAdapter::new());
-        state.kick_sync(&["node-9".to_owned()]).await;
+        let state = ReplicaState::new(id("node-0"), AutomergeAdapter::new());
+        state.kick_sync(&[id("node-9")]).await;
     }
 
     /// Trial reset must clear the blocked set: a fresh trial's links start
     /// open, whatever the previous scenario left behind.
     #[tokio::test]
     async fn reset_clears_blocked_peers() {
-        let state = ReplicaState::new("node-0".to_owned(), AutomergeAdapter::new());
-        state.set_peer_links(&["node-1".to_owned()], true);
+        let state = ReplicaState::new(id("node-0"), AutomergeAdapter::new());
+        state.set_peer_links(&[id("node-1")], true);
         assert!(state.is_blocked("node-1"));
 
         state.reset().await;

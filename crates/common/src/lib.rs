@@ -13,6 +13,112 @@ pub mod proto {
     tonic::include_proto!("replicant.v1");
 }
 
+// ── Node identity ──────────────────────────────────────────────────────────
+
+/// A replica's stable identity — `node-0`, `node-1`, and so on.
+///
+/// One type covers both roles: a replica's own `actor_id` and the id it uses
+/// for a peer are the same namespace seen from two directions, so a separate
+/// `PeerId` would only invite conversions between two types that must always
+/// agree.
+///
+/// # Why a newtype
+///
+/// The id is sent as the `x-peer-id` gRPC metadata header on every outbound
+/// sync stream, so it must be a legal HTTP header value. That invariant used
+/// to be an `assert!` in `ReplicaState::new` relied on by an `.expect()` some
+/// five hundred lines away in `connect_to_peer` — two halves of one rule held
+/// together by a comment. [`NodeId::new`] is now the only way to make one, so
+/// the invariant travels with the value.
+///
+/// It also makes the ids and addresses that appear side by side in connection
+/// setup impossible to transpose: `fn connect(id: NodeId, addr: String)` no
+/// longer accepts its arguments in the wrong order, where two `String`s did
+/// and failed at runtime.
+///
+/// # Ergonomics
+///
+/// `Borrow<str>` is implemented so a `HashMap<NodeId, _>` can still be probed
+/// with a plain `&str`, which is what keeps the change from rippling into
+/// [`CrdtAdapter`]'s `peer: &str` parameters. Adapters treat the id as an
+/// opaque map key, so widening the trait would touch every implementation for
+/// no gain in safety.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct NodeId(String);
+
+impl NodeId {
+    /// Validate and wrap a node identifier.
+    ///
+    /// Rejects the empty string and anything that is not a legal HTTP header
+    /// value, so a misconfigured id fails where it enters the system rather
+    /// than on first peer connect.
+    pub fn new(id: impl Into<String>) -> anyhow::Result<Self> {
+        let id = id.into();
+        if id.is_empty() {
+            anyhow::bail!("node id must not be empty");
+        }
+        id.parse::<tonic::metadata::AsciiMetadataValue>()
+            .with_context(|| format!("node id is not a valid HTTP-header value: {id:?}"))?;
+        Ok(Self(id))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The id as a gRPC metadata value, for the `x-peer-id` header.
+    ///
+    /// Infallible by construction: [`NodeId::new`] already parsed it. The
+    /// `expect` is one method away from the check that guarantees it rather
+    /// than in another file, which is the point of the newtype.
+    pub fn header_value(&self) -> tonic::metadata::AsciiMetadataValue {
+        self.0
+            .parse()
+            .expect("NodeId validated as a header value at construction")
+    }
+}
+
+impl std::fmt::Display for NodeId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::ops::Deref for NodeId {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for NodeId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Lets `HashMap<NodeId, V>` and `HashSet<NodeId>` be queried with `&str`.
+/// Required for `Borrow` to be sound here: `NodeId`'s `Hash` and `Eq` delegate
+/// to the inner `String`, so the borrowed and owned forms agree.
+impl std::borrow::Borrow<str> for NodeId {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<NodeId> for String {
+    fn from(id: NodeId) -> String {
+        id.0
+    }
+}
+
+impl TryFrom<String> for NodeId {
+    type Error = anyhow::Error;
+    fn try_from(s: String) -> anyhow::Result<Self> {
+        Self::new(s)
+    }
+}
+
 // ── Scalar values ──────────────────────────────────────────────────────────
 
 /// A scalar value that can be stored in a CRDT document.
@@ -334,6 +440,60 @@ mod tests {
         ListDelete, ListInsert, ListSplice, MapDelete, MapPut, OpRequest, ScalarValue, TextSplice,
         op_request, scalar_value,
     };
+
+    // ── NodeId ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn node_id_accepts_the_scheme_the_system_actually_uses() {
+        for name in ["node-0", "node-11", "replica-0"] {
+            let id = NodeId::new(name).unwrap();
+            assert_eq!(id.as_str(), name);
+            assert_eq!(id.to_string(), name);
+            // The header conversion must not panic for anything `new` accepts
+            // — that equivalence is the whole reason the type exists.
+            let _ = id.header_value();
+        }
+    }
+
+    #[test]
+    fn node_id_rejects_what_would_break_the_peer_header() {
+        // Empty, plus the control characters that make a value illegal to
+        // send as an HTTP header — a newline is the interesting one, since an
+        // id spliced into a header could otherwise inject a second header.
+        // Each of these used to be caught by an assert in `ReplicaState` if
+        // the value arrived through the constructor, and not at all if it
+        // arrived over the wire as a peer id.
+        // (Horizontal tab and bytes 0x80-0xFF are *legal* in a header value,
+        // so they are not in this list — see the test below.)
+        for bad in ["", "node\n0", "node\r\n0", "node\u{0}0"] {
+            assert!(
+                NodeId::new(bad).is_err(),
+                "should have rejected {bad:?} as a node id"
+            );
+        }
+    }
+
+    /// Non-ASCII is *accepted*, and deliberately so: bytes 0x80-0xFF are legal
+    /// obs-text in an HTTP header value, so such an id can be sent as
+    /// `x-peer-id` and the type's invariant holds. Asserted rather than left
+    /// implicit because "ASCII" appears in the underlying type's name
+    /// (`AsciiMetadataValue`) and reads like a stricter promise than it is.
+    #[test]
+    fn node_id_allows_non_ascii_because_the_header_does() {
+        let id = NodeId::new("nodé-0").unwrap();
+        let _ = id.header_value();
+    }
+
+    #[test]
+    fn node_id_maps_can_be_probed_with_a_str() {
+        // The `Borrow<str>` impl is what keeps `CrdtAdapter`'s `peer: &str`
+        // parameters unchanged; without it every lookup would need an
+        // allocation.
+        let mut m = std::collections::HashMap::new();
+        m.insert(NodeId::new("node-1").unwrap(), 7);
+        assert_eq!(m.get("node-1"), Some(&7));
+        assert_eq!(m.get("node-2"), None);
+    }
 
     // ── ScalarVal conversions ──────────────────────────────────────────────
 

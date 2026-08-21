@@ -6,6 +6,7 @@
 //! development visibility.
 
 use clap::Parser as _;
+use common::NodeId;
 use common::proto::{replica_server::ReplicaServer, sync_server::SyncServer};
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use replica::adapter::{AutomergeAdapter, LoroAdapter, YrsAdapter};
@@ -41,12 +42,24 @@ impl Crdt {
     }
 }
 
+/// clap adapter for [`NodeId`]'s checked constructor.
+///
+/// `value_parser` needs an owned error type; `anyhow::Error` is not `Clone`,
+/// which clap requires, so the message is flattened to a `String`.
+fn parse_node_id(s: &str) -> Result<NodeId, String> {
+    NodeId::new(s).map_err(|e| e.to_string())
+}
+
 #[derive(clap::Parser)]
 #[command(about = "Replicant replica process")]
 struct Args {
     /// Stable actor ID for this replica (used in metric labels and peer routing)
-    #[arg(long)]
-    actor: String,
+    ///
+    /// Parsed into a [`common::NodeId`], so an id that could not be sent as
+    /// the `x-peer-id` gRPC header is rejected here rather than on first peer
+    /// connect.
+    #[arg(long, value_parser = parse_node_id)]
+    actor: NodeId,
 
     /// gRPC listen port
     #[arg(long, default_value = "50051")]

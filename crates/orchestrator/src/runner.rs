@@ -8,6 +8,7 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::Request;
 use tonic::transport::{Channel, Server};
 
+use common::NodeId;
 use common::proto::{
     Empty, MapPut, ObjRef, OpRequest, PeerIds, PeerLinkUpdate, PeerRef, ScalarValue, TextSplice,
     op_request, replica_client::ReplicaClient, replica_server::ReplicaServer, scalar_value,
@@ -61,12 +62,22 @@ pub enum NodeSource {
 
 // ── Private helpers ────────────────────────────────────────────────────────
 
+/// The canonical actor id for node `i`.
+///
+/// The `node-{i}` scheme is load-bearing beyond this crate: the k8s
+/// StatefulSet is named `node` so its pod ordinals produce the same names,
+/// and the orchestrator wires scenarios by index assuming it. One helper so
+/// the format string is not repeated at each site that needs it.
+fn node_id(i: usize) -> Result<NodeId> {
+    NodeId::new(format!("node-{i}"))
+}
+
 /// Bind a port, start a replica server, and return its endpoint and gRPC client.
 ///
 /// The server task is added to `tasks` so the caller can detect panics; the
 /// `JoinSet` must outlive all client usage or the server will be dropped.
 async fn spawn_node(
-    actor_id: String,
+    actor_id: NodeId,
     tasks: &mut JoinSet<()>,
 ) -> Result<(ReplicaEndpoint, ReplicaClient<Channel>)> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -94,7 +105,7 @@ async fn spawn_nodes(
     let mut endpoints = Vec::with_capacity(n);
     let mut clients = Vec::with_capacity(n);
     for i in 0..n {
-        let (ep, client) = spawn_node(format!("node-{i}"), tasks).await?;
+        let (ep, client) = spawn_node(node_id(i)?, tasks).await?;
         endpoints.push(ep);
         clients.push(client);
     }
