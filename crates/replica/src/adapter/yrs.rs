@@ -420,12 +420,10 @@ mod tests {
     // Deliberately NOT wrapped here (Automerge-only characterization, see
     // adapter::conformance for why): ensure_text_is_deterministic_across_replicas,
     // without_bootstrap_partitioned_text_loses_a_side,
-    // ensure_text_rejects_non_empty_doc_without_the_object.
-    //
-    // save_bytes_not_canonical_across_converged_replicas is explicitly an
-    // open question for non-Automerge adapters (see its doc comment) and is
-    // deliberately left untested here pending a dedicated look at whether
-    // Yrs's update encoding is order-dependent the way Automerge's save() is.
+    // ensure_text_rejects_non_empty_doc_without_the_object,
+    // save_bytes_not_canonical_across_converged_replicas (see
+    // yrs_save_bytes_are_canonical_across_converged_replicas below — tried
+    // against YrsAdapter and it asserts the opposite outcome).
     //
     // reset_clears_doc_and_sync_state and
     // reset_allows_clean_re_sync_to_another_replica were tried and both
@@ -593,5 +591,72 @@ mod tests {
             "no lazy-creation collision to lose a side to"
         );
         assert_eq!(b.text_length("text").unwrap(), 20);
+    }
+
+    /// Counterpart to `save_bytes_not_canonical_across_converged_replicas`
+    /// (Automerge-only): tried against `YrsAdapter` directly (not just
+    /// asserted from source-reading) and it asserts the *opposite* outcome.
+    /// Automerge's `save()` preserves change-list storage order, which
+    /// depends on integration order and therefore differs by graph position
+    /// in non-mesh topologies. Yrs's full-update encoding sorts blocks by
+    /// client id before writing (verified against source:
+    /// `Store::write_blocks_from`, `diff.sort_by(|a, b| b.0.cmp(&a.0))`), so
+    /// converged replicas produce byte-identical encodings regardless of
+    /// which graph position received which write. This is a genuine
+    /// library-level difference, not an untested gap — see
+    /// `save_bytes_not_canonical_across_converged_replicas`'s doc comment,
+    /// which now reflects this rather than leaving it open.
+    #[test]
+    fn yrs_save_bytes_are_canonical_across_converged_replicas() {
+        let n = 5;
+        let op_count = 10;
+        let mut replicas: Vec<YrsAdapter> = (0..n).map(|_| YrsAdapter::default()).collect();
+        let id = |i: usize| format!("node-{i}");
+
+        for i in 0..op_count {
+            let writer = i % n;
+            replicas[writer]
+                .apply_op(&map_put("doc", &format!("k{i}"), i as u64))
+                .unwrap();
+            for j in 0..n - 1 {
+                let (left, right) = replicas.split_at_mut(j + 1);
+                if let Some(msg) = left[j].sync_generate(&id(j + 1)) {
+                    right[0].sync_receive(&id(j), msg).unwrap();
+                }
+                if let Some(msg) = right[0].sync_generate(&id(j)) {
+                    left[j].sync_receive(&id(j + 1), msg).unwrap();
+                }
+            }
+        }
+        loop {
+            let mut any = false;
+            for j in 0..n - 1 {
+                let (left, right) = replicas.split_at_mut(j + 1);
+                if let Some(msg) = left[j].sync_generate(&id(j + 1)) {
+                    right[0].sync_receive(&id(j), msg).unwrap();
+                    any = true;
+                }
+                if let Some(msg) = right[0].sync_generate(&id(j)) {
+                    left[j].sync_receive(&id(j + 1), msg).unwrap();
+                    any = true;
+                }
+            }
+            if !any {
+                break;
+            }
+        }
+
+        let fp = replicas[0].state_fingerprint();
+        for replica in replicas.iter_mut().skip(1) {
+            assert_eq!(replica.state_fingerprint(), fp);
+        }
+
+        let sizes: Vec<usize> = (0..n).map(|i| replicas[i].doc_size_bytes()).collect();
+        assert!(
+            sizes.iter().min() == sizes.iter().max(),
+            "save() became non-canonical across line replicas — sizes: {sizes:?}. \
+             If this starts failing, without_bootstrap_partitioned_text_loses_a_side-style \
+             analysis is needed to find what changed in yrs's encoder.",
+        );
     }
 }

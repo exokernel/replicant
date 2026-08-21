@@ -538,7 +538,7 @@ pub(crate) fn text_length_errors_on_missing_or_wrong_type<A: CrdtAdapter + Defau
     assert!(err.to_string().contains("not Text"), "{err}");
 }
 
-/// ACCOMMODATION: Automerge-only.
+/// ACCOMMODATION: Automerge-only — confirmed, not merely untested elsewhere.
 /// Locks in a known Automerge property: two replicas with identical
 /// logical state (same heads, same fingerprint, same readable values)
 /// can produce *different* save() byte streams. The encoding preserves
@@ -550,8 +550,16 @@ pub(crate) fn text_length_errors_on_missing_or_wrong_type<A: CrdtAdapter + Defau
 /// and presents the spread as informational rather than an assertion.
 /// If a future Automerge release ever canonicalizes save(), this test
 /// will start failing and the table can be tightened to strict
-/// equality. Whether this holds for other adapters is an open question,
-/// not assumed either way here.
+/// equality. Tried against `YrsAdapter` directly
+/// (`yrs_save_bytes_are_canonical_across_converged_replicas`) and it
+/// asserts the opposite: Yrs's full-update encoding sorts blocks by
+/// client id before writing, so it is canonical across converged
+/// replicas regardless of graph position. Kept generic here rather than
+/// moved into `automerge.rs` for the same reason as the other
+/// Automerge-only functions above: the body has no Automerge-specific
+/// imports, so a future adapter with the same non-canonical-save
+/// property (plausible for a from-scratch RGA implementation) can wrap
+/// it directly without extraction work.
 pub(crate) fn save_bytes_not_canonical_across_converged_replicas<A: CrdtAdapter + Default>() {
     let n = 5;
     let op_count = 10;
