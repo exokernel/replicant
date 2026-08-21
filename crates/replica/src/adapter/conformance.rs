@@ -145,6 +145,53 @@ pub(crate) fn post_sync_divergence_is_detected<A: CrdtAdapter + Default>() {
     assert_ne!(a.get_heads(), b.get_heads());
 }
 
+/// Map ops addressed at ROOT — the empty `obj` name — must work and converge.
+///
+/// Universal, and it should have been here from the start. Every other
+/// function in this suite names its map explicitly (`map_put("doc", ...)`),
+/// so nothing exercised the empty name until the deploy generators were
+/// wired up and a docker run against Loro failed with "object name must not
+/// be empty". The orchestrator's own `map_put` helper has always sent
+/// `obj: ""`, so this was a live gap between what the suite tested and what
+/// the system does — not a hypothetical one, and it would have hit Yrs
+/// identically had a Yrs scenario ever been runnable.
+///
+/// The lesson worth keeping: a conformance suite written *alongside* one
+/// adapter tests the shapes that adapter's author had in mind. Cross-check
+/// against what the callers actually emit, not only against the trait.
+pub(crate) fn root_map_ops_are_supported<A: CrdtAdapter + Default>() {
+    let mut a = A::default();
+    let mut b = A::default();
+
+    a.apply_op(&map_put("", "k", "v")).unwrap();
+    let after_put = a.state_fingerprint();
+    assert_ne!(
+        after_put,
+        A::default().state_fingerprint(),
+        "a ROOT map put must change the document"
+    );
+
+    sync_until_quiescent(&mut a, "a", &mut b, "b");
+    assert_eq!(a.state_fingerprint(), b.state_fingerprint());
+
+    // ROOT must be the *same* object on both sides, not one per replica: a
+    // concurrent delete of the key `a` wrote has to land on `a`'s entry.
+    b.apply_op(&Op::MapDelete {
+        obj: String::new(),
+        key: "k".into(),
+    })
+    .unwrap();
+    sync_until_quiescent(&mut a, "a", &mut b, "b");
+    assert_eq!(a.state_fingerprint(), b.state_fingerprint());
+    assert_ne!(
+        a.state_fingerprint(),
+        after_put,
+        "the ROOT delete must be visible on the writer's side too — if each \
+         replica had its own ROOT, this would converge without the delete \
+         ever reaching a's entry"
+    );
+}
+
 /// One of each [`Op`] variant, in dependency order (deletes need something
 /// to delete). Shared by the two functions below so they exercise exactly
 /// the same sequence.

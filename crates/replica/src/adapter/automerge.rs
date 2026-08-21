@@ -284,6 +284,11 @@ mod tests {
     }
 
     #[test]
+    fn automerge_root_map_ops_are_supported() {
+        root_map_ops_are_supported::<AutomergeAdapter>();
+    }
+
+    #[test]
     fn automerge_each_op_variant_mutates_the_doc() {
         each_op_variant_mutates_the_doc::<AutomergeAdapter>();
     }

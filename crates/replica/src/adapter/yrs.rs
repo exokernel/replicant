@@ -15,6 +15,24 @@ fn type_ref_of<S: SharedRef>(s: &S) -> &TypeRef {
     AsRef::<Branch>::as_ref(s).type_ref()
 }
 
+/// Root-map name standing in for the empty object name.
+///
+/// [`common::Op`]'s model says the empty `obj` string refers to ROOT itself —
+/// an unnamed top-level map, which Automerge has natively and Yrs does not.
+/// Mapping it to one reserved root name reproduces ROOT's semantics exactly
+/// where it matters: a single well-known top-level map that every replica
+/// resolves identically, with no creation op and therefore no concurrent-
+/// creation hazard (see this module's doc comment).
+///
+/// The alternative — having the orchestrator name the map explicitly — was
+/// rejected because it would make Automerge create that map lazily on first
+/// write, which is exactly the collision `ensure_text` exists to prevent, and
+/// would change measured Automerge behaviour on every scenario already swept.
+///
+/// A workload that used this literal name for its own object would alias
+/// ROOT. Nothing generates it today.
+const ROOT_MAP_NAME: &str = "_root";
+
 /// [`common::CrdtAdapter`] implementation backed by `yrs::Doc` (the Rust port
 /// of Yjs, using the YATA algorithm rather than Automerge's RGA-descended
 /// list CRDT).
@@ -31,16 +49,38 @@ fn type_ref_of<S: SharedRef>(s: &S) -> &TypeRef {
 /// for what this means for the shared-object bootstrap problem.
 pub struct YrsAdapter {
     doc: Doc,
-    /// This adapter's own belief of what each peer has already been sent,
-    /// expressed as a state vector. Yrs's own reference sync protocol
-    /// (`y-sync`) is a stateless request/response handshake with no
-    /// persistent per-peer cache of this kind — see
-    /// `common::CrdtAdapter::sync_generate`'s doc comment. Without this map,
-    /// every `sync_generate` call would have to re-send the full document,
-    /// which is correct (Yrs updates are idempotent to re-application) but
-    /// would never reach the `None` fixed point the push loop and the
-    /// `sync_is_idempotent_once_converged` conformance test require.
-    peer_sv: HashMap<String, StateVector>,
+    /// This adapter's own belief of what each peer has already been sent.
+    /// Yrs's own reference sync protocol (`y-sync`) is a stateless
+    /// request/response handshake with no persistent per-peer cache of this
+    /// kind — see `common::CrdtAdapter::sync_generate`'s doc comment.
+    /// Without this map, every `sync_generate` call would have to re-send
+    /// the full document, which is correct (Yrs updates are idempotent to
+    /// re-application) but would never reach the `None` fixed point the push
+    /// loop and the `sync_is_idempotent_once_converged` conformance test
+    /// require.
+    peer_sent: HashMap<String, PeerSent>,
+}
+
+/// What [`YrsAdapter`] believes one peer has already received.
+///
+/// Two fields, not one, and the second is the whole point: **a state vector
+/// alone cannot detect a deletion.** Yrs deletion flags an existing block and
+/// records the range in a separate delete set; it authors no block and
+/// advances no client's clock. A state-vector-only "nothing new" check is
+/// therefore blind to a pure delete, and after two replicas quiesce, any
+/// subsequent delete would never be offered to the peer — it would sit
+/// locally forever while both sides believed they were caught up.
+///
+/// This is the same blind spot that made a state-vector-derived
+/// `state_fingerprint` wrong (see `get_heads`), reappearing in a different
+/// method. Both were found by the conformance suite rather than by review,
+/// and it is worth assuming there is a third: **any** Yrs bookkeeping keyed
+/// on "how much has each client authored" is delete-blind by construction.
+struct PeerSent {
+    sv: StateVector,
+    /// The delete set as of the last send, encoded. Compared by value rather
+    /// than hashed so a collision cannot silently drop a deletion.
+    ds: Vec<u8>,
 }
 
 impl Default for YrsAdapter {
@@ -60,7 +100,7 @@ impl YrsAdapter {
     pub fn new() -> Self {
         Self {
             doc: Doc::new(),
-            peer_sv: HashMap::new(),
+            peer_sent: HashMap::new(),
         }
     }
 
@@ -89,14 +129,27 @@ impl YrsAdapter {
         txn.encode_state_as_update_v1(&StateVector::default())
     }
 
+    /// The document's delete set alone, encoded.
+    ///
+    /// Diffing against the *current* state vector means no blocks are
+    /// written — a Yrs update always carries the full delete set regardless
+    /// of the target vector, so what comes back is the delete set plus a few
+    /// bytes of framing. This is the cheapest handle the public API offers
+    /// on "has anything been deleted since last time"; Yrs exposes no delete
+    /// set version or counter.
+    fn delete_set_bytes(&self) -> Vec<u8> {
+        let txn = self.doc.transact();
+        let sv = txn.state_vector();
+        txn.encode_diff_v1(&sv)
+    }
+
     /// Materialize (or look up) a root-level `Map`, failing if `obj` already
-    /// names a different type. `obj` must be non-empty: Yrs has no implicit
-    /// unnamed root object analogous to Automerge's ROOT map, so there is no
-    /// safe interpretation of `obj == ""` here — every root type needs a name.
+    /// names a different type. An empty `obj` resolves to [`ROOT_MAP_NAME`];
+    /// see that constant for why. Unlike the list and text accessors below,
+    /// this one has a faithful stand-in for Automerge's ROOT available,
+    /// because ROOT is itself a map.
     fn get_or_create_map(txn: &mut TransactionMut, obj: &str) -> anyhow::Result<MapRef> {
-        if obj.is_empty() {
-            bail!("object name must not be empty: Yrs has no implicit root map");
-        }
+        let obj = if obj.is_empty() { ROOT_MAP_NAME } else { obj };
         let map = Root::<MapRef>::new(obj).get_or_create(txn);
         let actual = type_ref_of(&map);
         if actual != &TypeRef::Map {
@@ -255,16 +308,21 @@ impl CrdtAdapter for YrsAdapter {
     }
 
     fn sync_generate(&mut self, peer: &str) -> Option<Vec<u8>> {
+        let my_ds = self.delete_set_bytes();
         let txn = self.doc.transact();
         let my_sv = txn.state_vector();
-        let known = self.peer_sv.get(peer).cloned().unwrap_or_default();
-        // Cheap pre-check so a caught-up peer costs an O(local clients) scan
-        // rather than an encode: nothing to send iff every client clock I
-        // have is already covered by what I believe this peer has.
-        let nothing_new = my_sv
+        let sent = self.peer_sent.get(peer);
+        let known = sent.map(|s| s.sv.clone()).unwrap_or_default();
+        // Nothing to send iff BOTH: every client clock I have is already
+        // covered by what I believe this peer has, AND my delete set is
+        // unchanged since the last send. See `PeerSent` for why the second
+        // condition is not redundant — without it a post-quiescence delete
+        // is never offered and the two replicas silently stay diverged.
+        let blocks_covered = my_sv
             .iter()
             .all(|(client, clock)| known.get(client) >= *clock);
-        if nothing_new {
+        let deletes_covered = sent.is_some_and(|s| s.ds == my_ds);
+        if blocks_covered && deletes_covered {
             return None;
         }
         let bytes = txn.encode_diff_v1(&known);
@@ -273,7 +331,13 @@ impl CrdtAdapter for YrsAdapter {
         // does with sent heads: assume this send reaches the peer, so the
         // next call doesn't re-offer the same bytes. `sync_reset` is what
         // lets a lost message be recovered from — see its doc comment.
-        self.peer_sv.insert(peer.to_owned(), my_sv);
+        self.peer_sent.insert(
+            peer.to_owned(),
+            PeerSent {
+                sv: my_sv,
+                ds: my_ds,
+            },
+        );
         Some(bytes)
     }
 
@@ -288,11 +352,12 @@ impl CrdtAdapter for YrsAdapter {
 
     fn sync_reset(&mut self, peer: &str) {
         // Dropping the entry is the whole reset: the next sync_generate
-        // recomputes `nothing_new` against `StateVector::default()`, which
-        // is `false` for any non-empty document, so it resends everything
-        // this peer might have missed rather than trusting a possibly-stale
+        // compares against `StateVector::default()` and against a `None`
+        // last-sent delete set, both of which fail the "already covered"
+        // test for any non-empty document, so it resends everything this
+        // peer might have missed rather than trusting a possibly-stale
         // belief that they already have it.
-        self.peer_sv.remove(peer);
+        self.peer_sent.remove(peer);
     }
 
     fn reset(&mut self) {
@@ -355,6 +420,11 @@ mod tests {
     #[test]
     fn yrs_post_sync_divergence_is_detected() {
         post_sync_divergence_is_detected::<YrsAdapter>();
+    }
+
+    #[test]
+    fn yrs_root_map_ops_are_supported() {
+        root_map_ops_are_supported::<YrsAdapter>();
     }
 
     #[test]

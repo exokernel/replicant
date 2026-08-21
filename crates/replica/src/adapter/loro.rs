@@ -4,6 +4,24 @@ use anyhow::{Context, bail};
 use common::{CrdtAdapter, Op, ScalarVal};
 use loro::{ExportMode, LoroDoc, LoroValue, VersionVector};
 
+/// Root-map name standing in for the empty object name.
+///
+/// [`common::Op`]'s model says the empty `obj` string refers to ROOT itself —
+/// an unnamed top-level map, which Automerge has natively and Loro does not.
+/// Mapping it to one reserved root name reproduces ROOT's semantics exactly
+/// where it matters: a single well-known top-level map that every replica
+/// resolves identically, with no creation op and therefore no concurrent-
+/// creation hazard (see fact 1 in this module's doc comment).
+///
+/// The alternative — having the orchestrator name the map explicitly — was
+/// rejected because it would make Automerge create that map lazily on first
+/// write, which is exactly the collision `ensure_text` exists to prevent, and
+/// would change measured Automerge behaviour on every scenario already swept.
+///
+/// A workload that used this literal name for its own object would alias
+/// ROOT. Nothing generates it today.
+const ROOT_MAP_NAME: &str = "_root";
+
 /// [`common::CrdtAdapter`] implementation backed by `loro::LoroDoc` (Loro,
 /// whose list/text CRDT is Fugue-descended rather than Automerge's RGA or
 /// Yjs/Yrs's YATA).
@@ -109,13 +127,19 @@ impl LoroAdapter {
         }
     }
 
-    /// Reject an empty object name.
+    /// Resolve a map object name, translating the empty name to
+    /// [`ROOT_MAP_NAME`]. See that constant for why.
+    fn map_name(obj: &str) -> &str {
+        if obj.is_empty() { ROOT_MAP_NAME } else { obj }
+    }
+
+    /// Reject an empty object name for the non-map container kinds.
     ///
-    /// Loro has no implicit unnamed root object analogous to Automerge's
-    /// ROOT map, so `obj == ""` has no safe interpretation — same call as
-    /// [`super::yrs::YrsAdapter`] makes. Unlike that adapter this is the
-    /// *only* validation a container accessor needs: a wrong-type collision
-    /// is unrepresentable (fact 1 in this module's doc comment).
+    /// Automerge's ROOT is a map, so an empty name has no meaning for a list
+    /// or text op there either; erroring is more useful than silently
+    /// inventing a root sequence. Unlike [`super::yrs::YrsAdapter`], this is
+    /// the *only* validation a Loro container accessor needs: a wrong-type
+    /// collision is unrepresentable (fact 1 in this module's doc comment).
     fn check_name(obj: &str) -> anyhow::Result<()> {
         if obj.is_empty() {
             bail!("object name must not be empty: Loro has no implicit root container");
@@ -128,14 +152,12 @@ impl CrdtAdapter for LoroAdapter {
     fn apply_op(&mut self, op: &Op) -> anyhow::Result<()> {
         match op {
             Op::MapPut { obj, key, value } => {
-                Self::check_name(obj)?;
                 self.doc
-                    .get_map(obj.as_str())
+                    .get_map(Self::map_name(obj))
                     .insert(key.as_str(), Self::to_loro_value(value))?;
             }
             Op::MapDelete { obj, key } => {
-                Self::check_name(obj)?;
-                self.doc.get_map(obj.as_str()).delete(key.as_str())?;
+                self.doc.get_map(Self::map_name(obj)).delete(key.as_str())?;
             }
             Op::ListInsert { obj, index, value } => {
                 Self::check_name(obj)?;
@@ -367,6 +389,11 @@ mod tests {
     #[test]
     fn loro_post_sync_divergence_is_detected() {
         post_sync_divergence_is_detected::<LoroAdapter>();
+    }
+
+    #[test]
+    fn loro_root_map_ops_are_supported() {
+        root_map_ops_are_supported::<LoroAdapter>();
     }
 
     #[test]
