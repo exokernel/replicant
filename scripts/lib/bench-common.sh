@@ -18,7 +18,7 @@
 # Callers own the stack lifecycle (compose vs kind); this file owns everything
 # that is identical between them.
 
-# Must match the `Crdt` value_enum in crates/replica/src/main.rs and
+# Must match `Crdt::ALL` in crates/replica/src/adapter.rs and
 # CRDT_CHOICES in deploy/docker/gen-compose.py.
 BENCH_CRDT_CHOICES="automerge yrs loro"
 

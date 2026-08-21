@@ -40,7 +40,7 @@ class NoAliasDumper(yaml.SafeDumper):
 REPLICA_INTERNAL_PORT = 50051
 REPLICA_HOST_PORT_BASE = 50051
 
-# Must match the `Crdt` value_enum in crates/replica/src/main.rs. Duplicated
+# Must match `Crdt::ALL` in crates/replica/src/adapter.rs. Duplicated
 # rather than derived because the generator must not need a cargo build to
 # emit a compose file; the replica binary re-validates on startup, so a drift
 # here fails fast at container start rather than producing wrong measurements.

@@ -20,14 +20,19 @@ pub use yrs::YrsAdapter;
 /// its in-process lane. Two copies of this enum would be two lists to keep in
 /// step, and the one that drifted would silently benchmark the wrong library.
 ///
-/// A new variant needs one arm in [`Crdt::build`] and nothing else — the
-/// `ReplicaState`/gRPC scaffolding is already generic over `CrdtAdapter`.
+/// A new variant needs an arm in [`Crdt::build`] and an entry in
+/// [`Crdt::ALL`]; [`Crdt::as_str`] and [`FromStr`] are exhaustive matches, so
+/// the compiler catches the rest.
 ///
-/// The value-enum names clap derives (`automerge`, `yrs`, `loro`) are also
-/// what `deploy/docker/gen-compose.py` and the k8s StatefulSet's `CRDT`
-/// environment variable emit, so renaming a variant is a deploy-side change
-/// too.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+/// The names in [`Crdt::as_str`] are also what `deploy/docker/gen-compose.py`
+/// and the k8s StatefulSet's `CRDT` environment variable emit, so renaming a
+/// variant is a deploy-side change too.
+///
+/// Deliberately *not* deriving `clap::ValueEnum`: that would put a CLI
+/// concern in a library crate for its binaries' benefit. [`FromStr`] plus
+/// [`Crdt::ALL`] give each binary everything it needs to build its own
+/// `value_parser` without this module knowing that a command line exists.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Crdt {
     Automerge,
     Yrs,
@@ -35,6 +40,10 @@ pub enum Crdt {
 }
 
 impl Crdt {
+    /// Every variant, for callers that need to enumerate them — a CLI's
+    /// accepted-values list, or a sweep over all backends.
+    pub const ALL: [Crdt; 3] = [Crdt::Automerge, Crdt::Yrs, Crdt::Loro];
+
     /// Construct the selected adapter.
     ///
     /// Boxing here is what lets callers keep a single setup path: the three
@@ -67,6 +76,22 @@ impl Crdt {
 impl std::fmt::Display for Crdt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Crdt {
+    type Err = String;
+
+    /// The inverse of [`Crdt::as_str`]. The error lists the accepted values,
+    /// since the only callers are argument parsers reporting to a human.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Crdt::ALL
+            .into_iter()
+            .find(|c| c.as_str() == s)
+            .ok_or_else(|| {
+                let names: Vec<&str> = Crdt::ALL.iter().map(|c| c.as_str()).collect();
+                format!("unknown CRDT '{s}' (expected one of: {})", names.join(", "))
+            })
     }
 }
 

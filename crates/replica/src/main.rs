@@ -13,6 +13,25 @@ use replica::adapter::Crdt;
 use replica::server::{ReplicaService, ReplicaState, SyncService};
 use tonic::transport::Server;
 
+/// clap parser for `--crdt`.
+///
+/// `PossibleValuesParser` gives `--help` and the error message the accepted
+/// list, and `.map` turns the validated string back into a [`Crdt`] so the
+/// args struct stays typed. Both are derived from [`Crdt::ALL`], so a new
+/// backend cannot be accepted while going unmentioned in `--help`.
+///
+/// This lives in the binary rather than on `Crdt` itself: a `ValueEnum`
+/// derive would put a CLI concern in a library crate for its binaries'
+/// benefit. The cost is these few lines in each binary that takes the flag,
+/// which is the right side of that trade — each binary owns its own CLI.
+fn crdt_parser() -> impl clap::builder::TypedValueParser<Value = Crdt> {
+    use clap::builder::TypedValueParser as _;
+    clap::builder::PossibleValuesParser::new(Crdt::ALL.map(|c| c.as_str())).map(|s| {
+        s.parse::<Crdt>()
+            .expect("PossibleValuesParser restricts the input to Crdt::ALL")
+    })
+}
+
 /// clap adapter for [`NodeId`]'s checked constructor.
 ///
 /// `value_parser` needs an owned error type; `anyhow::Error` is not `Clone`,
@@ -37,7 +56,7 @@ struct Args {
     port: u16,
 
     /// Which CRDT library backs this replica's document
-    #[arg(long, value_enum, default_value = "automerge")]
+    #[arg(long, value_parser = crdt_parser(), default_value = "automerge")]
     crdt: Crdt,
 }
 
