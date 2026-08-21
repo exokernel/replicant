@@ -304,6 +304,26 @@ mod tests {
     }
 
     #[test]
+    fn automerge_doc_size_grows_with_every_op() {
+        doc_size_grows_with_every_op::<AutomergeAdapter>();
+    }
+
+    #[test]
+    fn automerge_reset_returns_adapter_to_a_fresh_state() {
+        reset_returns_adapter_to_a_fresh_state::<AutomergeAdapter>();
+    }
+
+    #[test]
+    fn automerge_reset_drops_stale_peer_state() {
+        reset_drops_stale_peer_state::<AutomergeAdapter>();
+    }
+
+    #[test]
+    fn automerge_reset_allows_clean_re_sync_with_equal_fingerprint() {
+        reset_allows_clean_re_sync_with_equal_fingerprint::<AutomergeAdapter>();
+    }
+
+    #[test]
     fn automerge_reset_clears_doc_and_sync_state() {
         reset_clears_doc_and_sync_state::<AutomergeAdapter>();
     }

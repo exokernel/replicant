@@ -378,6 +378,26 @@ mod tests {
     }
 
     #[test]
+    fn yrs_doc_size_grows_with_every_op() {
+        doc_size_grows_with_every_op::<YrsAdapter>();
+    }
+
+    #[test]
+    fn yrs_reset_returns_adapter_to_a_fresh_state() {
+        reset_returns_adapter_to_a_fresh_state::<YrsAdapter>();
+    }
+
+    #[test]
+    fn yrs_reset_drops_stale_peer_state() {
+        reset_drops_stale_peer_state::<YrsAdapter>();
+    }
+
+    #[test]
+    fn yrs_reset_allows_clean_re_sync_with_equal_fingerprint() {
+        reset_allows_clean_re_sync_with_equal_fingerprint::<YrsAdapter>();
+    }
+
+    #[test]
     fn yrs_ensure_text_is_idempotent() {
         ensure_text_is_idempotent::<YrsAdapter>();
     }
@@ -431,90 +451,19 @@ mod tests {
     // Automerge-specific assumption this design deliberately doesn't share.
     // reset_clears_doc_and_sync_state fails on two separate Automerge-shaped
     // assumptions, not one: "a fresh adapter always has a handshake to send"
-    // (see the replacement test below) AND "a fresh adapter's fingerprint is
-    // an empty byte vector" (true for Automerge's flattened empty head list,
-    // false for Yrs's fixed-size empty-update marker — this one first
-    // surfaced while writing the *replacement* test below, not the original).
-    // See the two replacement tests below for what actually failed and why.
-
-    /// Replaces `reset_clears_doc_and_sync_state`'s final assertion, which
-    /// expects a completely fresh (zero-op) adapter to have *something* to
-    /// say to a never-seen peer. That's true for Automerge because
-    /// `sync::State` always speaks first with a handshake, content or not.
-    /// This adapter's `sync_generate` deliberately doesn't: it only sends
-    /// when the local state vector has a client clock the peer doesn't —
-    /// vacuously false against an empty document — because always sending a
-    /// content-free "hello" to every peer of every idle adapter is exactly
-    /// the kind of unforced overhead the sync-protocol design discussion
-    /// ruled out. What actually matters — that `reset` drops stale per-peer
-    /// bookkeeping rather than merely hiding it — is what this asserts
-    /// instead, by giving the adapter real content to report after reset.
-    #[test]
-    fn yrs_reset_drops_stale_peer_state_once_there_is_something_to_send() {
-        let mut a = YrsAdapter::default();
-        a.apply_op(&map_put("doc", "k", "v")).unwrap();
-        assert!(a.sync_generate("peer-x").is_some());
-
-        a.reset();
-        assert!(a.get_heads().is_empty(), "heads not cleared by reset");
-        assert!(
-            a.sync_generate("peer-x").is_none(),
-            "fresh empty doc: nothing to report yet"
-        );
-
-        a.apply_op(&map_put("doc", "k2", "v2")).unwrap();
-        assert!(
-            a.sync_generate("peer-x").is_some(),
-            "reset must have dropped peer-x's old state vector; if it \
-             leaked, this would still compare against the pre-reset write \
-             and could wrongly report nothing new"
-        );
-    }
-
-    /// Replaces `reset_allows_clean_re_sync_to_another_replica`'s final
-    /// assertion, which compares exact `doc_size_bytes()` against a
-    /// from-scratch baseline. That assumes a fixed-width per-instance
-    /// identifier (true of Automerge's 16-byte UUID `ActorId`); Yrs's
-    /// `ClientID` is var-int encoded (verified against source:
-    /// `write_client` calls `write_var`), so two *independently random*
-    /// client ids can legitimately need a different number of bytes to
-    /// encode the same logical content — confirmed empirically: this
-    /// comparison first failed 29 vs 30 bytes with no logical difference.
-    /// Fingerprint equality is the property that actually generalizes:
-    /// same content, regardless of which random id produced it.
-    ///
-    /// This also caught a second Automerge-shaped assumption on the first
-    /// attempt: `state_fingerprint().is_empty()` for a reset adapter, which
-    /// holds for Automerge (empty change list -> empty flattened heads) but
-    /// not Yrs, whose "empty document" update encoding is a fixed 2-byte
-    /// marker (`Update::EMPTY_V1`), not a zero-length vector. Compared
-    /// against a fresh baseline's fingerprint instead of assuming emptiness.
-    #[test]
-    fn yrs_reset_allows_clean_re_sync_with_equal_fingerprint() {
-        let mut a = YrsAdapter::default();
-        let mut b = YrsAdapter::default();
-        a.apply_op(&map_put("doc", "before", "old")).unwrap();
-        sync_until_quiescent(&mut a, "a", &mut b, "b");
-        assert_eq!(a.state_fingerprint(), b.state_fingerprint());
-
-        a.reset();
-        b.reset();
-        let fresh = YrsAdapter::default().state_fingerprint();
-        assert_eq!(
-            a.state_fingerprint(),
-            fresh,
-            "reset must return to a fresh-doc fingerprint"
-        );
-        assert_eq!(b.state_fingerprint(), fresh);
-
-        a.apply_op(&map_put("doc", "after", "new")).unwrap();
-        sync_until_quiescent(&mut a, "a", &mut b, "b");
-        assert_eq!(
-            a.state_fingerprint(),
-            b.state_fingerprint(),
-            "post-reset replicas must still converge with each other"
-        );
-    }
+    // AND "a fresh adapter's fingerprint is an empty byte vector" (true for
+    // Automerge's flattened empty head list, false for Yrs's fixed-size
+    // empty-update marker — this one first surfaced while writing the
+    // replacement test, not the original).
+    //
+    // Both replacements originally lived here as Yrs-local tests. When
+    // LoroAdapter needed the character-for-character same two replacements,
+    // that stopped being a Yrs characterization and became the universal
+    // form of the property, so they moved into the generic suite as
+    // reset_returns_adapter_to_a_fresh_state / reset_drops_stale_peer_state
+    // / reset_allows_clean_re_sync_with_equal_fingerprint (wrapped above).
+    // The Automerge-only assertions they dropped still run, under the
+    // original two names.
 
     // ── Yrs-specific characterization ───────────────────────────────────
     //
