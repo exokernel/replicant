@@ -1,10 +1,20 @@
+//! Scenario configuration: the shapes a scenario file can take, the graphs a
+//! run can be wired into, and the parameters of the divergence sweep.
+//!
+//! A scenario file is TOML. It holds either a `[topology]` table for a
+//! steady-state run or a `[partition_heal]` table for a divergence cell. See
+//! `docs/divergence-sweep.md` for what the sweep parameters mean.
+//!
+//! This module is data and pure functions only. It spawns nothing and talks to
+//! no replica.
+
 use std::collections::{HashSet, VecDeque};
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Deserializer, Serialize};
 
-/// Top-level scenario file — TOML format; exactly one of `[topology]` or
-/// `[partition_heal]` must be present.
+/// One parsed scenario file. Exactly one of `[topology]` or `[partition_heal]`
+/// must be present.
 #[derive(Debug)]
 pub struct ScenarioFile {
     /// Human-readable name used in log output and result reporting.
@@ -13,20 +23,23 @@ pub struct ScenarioFile {
     pub body: ScenarioBody,
 }
 
-/// The two scenario shapes a file may describe. The exactly-one-set invariant
-/// from the TOML layer is encoded here so downstream code never has to
-/// re-check it.
+/// The two scenario shapes a file can describe.
+///
+/// Parsing rejects a file that sets both tables or neither, so code that reads
+/// this enum never has to re-check that rule.
 #[derive(Debug)]
 pub enum ScenarioBody {
     Topology(TopologyConfig),
     PartitionHeal(PartitionConfig),
 }
 
-// Custom Deserialize so the TOML form stays as:
-//   [topology]    | [partition_heal]
-// rather than serde's default `body = { topology = {...} }`. Validates that
-// exactly one of the two tables is present and surfaces a clear error
-// otherwise, so the invariant is established at parse time.
+// Hand-written Deserialize. It keeps the TOML form as a plain table:
+//
+//   [topology]    or    [partition_heal]
+//
+// serde's default for an enum field would instead require
+// `body = { topology = {...} }`. This impl also rejects a file that sets both
+// tables or neither, with a message naming the scenario.
 impl<'de> Deserialize<'de> for ScenarioFile {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -62,10 +75,10 @@ impl<'de> Deserialize<'de> for ScenarioFile {
     }
 }
 
-/// Write distribution for ops in a scenario run.
+/// Chooses which node receives each write.
 ///
-/// `Serialize` is derived alongside `Deserialize` so the run-provenance file
-/// records each parameter with the exact spelling the scenario TOML uses.
+/// `Serialize` is derived as well as `Deserialize`, so the provenance file
+/// records the parameter with the same spelling the scenario TOML uses.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WritePattern {
@@ -77,13 +90,13 @@ pub enum WritePattern {
 
 /// The kind of CRDT operation each write applies.
 ///
-/// Defaults to `MapPut` so every pre-existing scenario TOML — which omits the
-/// field — keeps its original map-put behaviour. `TextSplice` exercises the
-/// sequence-CRDT path (Automerge `splice_text`), the workload RQ-1 measures.
+/// `TextSplice` drives the sequence-CRDT path, which is what the divergence
+/// sweep measures. `MapPut` is the default, so a scenario TOML that omits the
+/// field keeps its original behaviour.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Workload {
-    /// Each write is a `MapPut` on the root map (historical behaviour).
+    /// Each write is a `MapPut` on the root map.
     #[default]
     MapPut,
     /// Each write is a `TextSplice` on a named text object under root.
@@ -182,15 +195,13 @@ pub enum HealTopology {
     Bridge,
 }
 
-/// Connection topology for a scenario run.
+/// Which node pairs a run connects.
 ///
-/// Named variants (`FullMesh`, `Ring`, `Line`, `Star`) are derived
-/// programmatically from `n`. `Custom` carries an explicit undirected edge
-/// list for arbitrary graphs.
+/// The named variants compute their edges from the node count `n`. `Custom`
+/// carries an explicit undirected edge list.
 ///
-/// Adding a variant is a breaking change for every `match` in the crate, which
-/// is the intent: `kind`, `edges`, and `diameter` all need a new arm, and the
-/// compiler should say so.
+/// A new variant needs a new arm in `kind`, `edges`, and `diameter`. The enum
+/// is matched exhaustively so the compiler reports all three.
 #[derive(Debug, Clone)]
 pub enum Connections {
     /// Connect every pair — n*(n-1)/2 bidi sync streams. Diameter 1.
@@ -211,11 +222,13 @@ pub enum Connections {
     },
 }
 
-// Custom Deserialize so TOML accepts the ergonomic forms:
+// Hand-written Deserialize. It accepts these two TOML forms:
+//
 //   connections = "full_mesh" | "ring" | "line" | "star"
-//   connections = { edges = [[0,1],[1,2]] }     # Custom
-// rather than serde's externally-tagged default for struct variants
-// (`connections = { custom = { edges = [...] } }`).
+//   connections = { edges = [[0,1],[1,2]] }
+//
+// serde's default for a struct variant would instead require
+// `connections = { custom = { edges = [...] } }`.
 impl<'de> Deserialize<'de> for Connections {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -246,8 +259,8 @@ impl<'de> Deserialize<'de> for Connections {
 }
 
 impl Connections {
-    /// Stable identifier for this topology, used in result reporting so
-    /// downstream analyses can group/pivot by topology kind.
+    /// Returns the stable name of this topology. Results are grouped by this
+    /// value, so it must not change.
     pub fn kind(&self) -> &'static str {
         match self {
             Self::FullMesh => "full_mesh",
@@ -258,10 +271,10 @@ impl Connections {
         }
     }
 
-    /// Return the (initiator, target) edge list for `n` nodes.
+    /// Returns the `(initiator, target)` edges for `n` nodes.
     ///
-    /// Mechanical view of the topology; degenerate combinations (e.g. `Ring`
-    /// with `n < 3`) yield edges that fail [`Connections::validate`].
+    /// No checking happens here. A degenerate combination, such as `Ring` with
+    /// `n < 3`, produces edges that [`Connections::validate`] then rejects.
     pub fn edges(&self, n: usize) -> Vec<(usize, usize)> {
         match self {
             Self::FullMesh => (0..n)
@@ -274,14 +287,13 @@ impl Connections {
         }
     }
 
-    /// Diameter of the (undirected) topology — the longest shortest-path
-    /// between any pair of nodes. Predictor of multi-hop convergence latency.
+    /// Returns the diameter of the undirected graph: the longest shortest path
+    /// between any pair of nodes. It predicts how many hops convergence needs.
     ///
-    /// Computed by BFS from every node (O(n·(n+e))); fine for thesis-scale
-    /// `n`. Assumes the graph is connected — call [`Connections::validate`]
-    /// first if the input came from a `Custom` user-supplied edge list.
-    /// Returns 0 for `n <= 1`. Unreachable nodes are skipped, so on a
-    /// disconnected graph this returns the largest within-component diameter.
+    /// Runs a BFS from every node, so it costs `O(n·(n+e))`. Returns 0 for
+    /// `n <= 1`. Unreachable nodes are skipped, so a disconnected graph yields
+    /// the largest diameter within any one component. Call
+    /// [`Connections::validate`] first if the edges came from a `Custom` list.
     pub fn diameter(&self, n: usize) -> usize {
         if n <= 1 {
             return 0;
@@ -310,13 +322,12 @@ impl Connections {
         max_dist
     }
 
-    /// Validate that the resulting edge list is a well-formed connected
-    /// undirected simple graph on `n` nodes.
+    /// Checks that the edges form a connected undirected simple graph on `n`
+    /// nodes.
     ///
-    /// Catches the four common ways topologies break in practice:
-    /// out-of-range indices, self-loops, duplicate undirected edges, and
-    /// disconnected components — the last would never converge, so we fail
-    /// fast instead of waiting for the convergence timeout.
+    /// Rejects four faults: an index outside `0..n`, a self-loop, a duplicate
+    /// undirected edge, and a disconnected graph. A disconnected graph would
+    /// never converge, so failing here saves waiting for the timeout.
     pub fn validate(&self, n: usize) -> Result<()> {
         let edges = self.edges(n);
 
@@ -334,7 +345,7 @@ impl Connections {
             }
         }
 
-        // Connectivity via BFS from node 0; n <= 1 is trivially connected.
+        // Connectivity: BFS from node 0. A graph of 0 or 1 nodes is connected.
         if n > 1 {
             let adj = adjacency_list(n, &edges);
             let mut visited = vec![false; n];
@@ -363,7 +374,7 @@ impl Connections {
     }
 }
 
-/// Configuration for a topology run.
+/// Parameters of a steady-state topology run.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TopologyConfig {
     /// Number of replica nodes to spawn.
@@ -372,91 +383,93 @@ pub struct TopologyConfig {
     pub connections: Connections,
     /// How to distribute write ops across nodes.
     pub write_pattern: WritePattern,
-    /// Which CRDT op each write applies. Defaults to `MapPut` so existing
-    /// scenario TOMLs that omit the field are unchanged.
+    /// Which CRDT operation each write applies. Defaults to `MapPut`.
     #[serde(default)]
     pub workload: Workload,
-    /// Total ops to apply.
+    /// Total operations to apply.
     pub op_count: usize,
-    /// Delay between successive op submissions, in milliseconds. `0` (the
-    /// default) means burst as fast as possible — the historical behaviour
-    /// and what every existing scenario file does. Positive values pace ops
-    /// so multi-second runs produce visible curves on Grafana's rate panels.
-    /// Sleeps fall *inside* the measurement window, so paced runs report a
-    /// larger `convergence_ms` than burst equivalents on the same topology.
+    /// Delay between one operation and the next, in milliseconds.
+    ///
+    /// `0`, the default, sends them as fast as possible. A positive value
+    /// spreads the run out so Grafana's rate panels show a visible curve.
+    ///
+    /// The delay falls *inside* the measured window. A paced run therefore
+    /// reports a larger `convergence_ms` than a burst run on the same topology.
     #[serde(default)]
     pub op_interval_ms: u64,
 }
 
-/// A single partition group in a partition-heal scenario.
+/// One partition group: the nodes that stay connected to each other while the
+/// partition holds.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Group {
     /// Node indices belonging to this partition group.
     pub nodes: Vec<usize>,
 }
 
-/// Configuration for a partition-then-heal scenario.
+/// Parameters of a partition-heal scenario, which is one cell of the
+/// divergence sweep.
 ///
-/// Phase 1: nodes in each group connect internally and write independently.
-/// Phase 2 (heal): remaining cross-group edges are added; we wait for
-/// global convergence and record the time.
+/// Each group writes on its own while cut off from the others. The groups are
+/// then reconnected, and the time to global agreement is the result. See
+/// `docs/divergence-sweep.md`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PartitionConfig {
     /// Total node count (must equal the sum of all group sizes).
     pub node_count: usize,
     /// Disjoint sets of node indices, one per partition group.
     pub groups: Vec<Group>,
-    /// Ops applied to each group independently during the partition phase.
+    /// Operations each group applies while the partition holds. This is the
+    /// divergence-volume axis of the sweep.
     pub ops_per_group: usize,
     /// Write distribution within each group.
     pub write_pattern: WritePattern,
-    /// Which CRDT op each write applies. Defaults to `MapPut` so existing
-    /// scenario TOMLs that omit the field are unchanged.
+    /// Which CRDT operation each write applies. Defaults to `MapPut`.
     #[serde(default)]
     pub workload: Workload,
-    /// Edit-locality rule for the `TextSplice` workload. Ignored for `MapPut`.
-    /// Defaults to `Append` so existing scenarios are unaffected.
+    /// Where each insert lands under the `TextSplice` workload. This is the
+    /// anchor-contention axis of the sweep. Ignored by `MapPut`. Defaults to
+    /// `Append`.
     #[serde(default)]
     pub locality: Locality,
-    /// Wiring added on heal. Defaults to `FullMesh` so pre-existing TOML
-    /// scenarios that omit the field keep their original behaviour.
+    /// Which links to reopen at heal time. Defaults to `FullMesh`.
     #[serde(default)]
     pub heal_topology: HealTopology,
 }
 
-/// Result of a completed scenario run.
+/// What one completed trial measured.
 #[derive(Debug, Clone, Copy)]
 pub struct RunResult {
-    /// Fractional milliseconds from write-start (full-mesh) or heal-start
-    /// (partition-heal) until all node fingerprints agree.
+    /// Milliseconds until every node reports the same fingerprint. The clock
+    /// starts at the first write for a topology run, and at the first unblock
+    /// for a partition-heal run.
     pub convergence_ms: f64,
-    /// The part of `convergence_ms` spent opening sync streams rather than
-    /// merging state.
+    /// The part of `convergence_ms` spent on link setup rather than merging.
     ///
-    /// `0.0` for topology runs, where every edge is wired before the timer
-    /// starts. For partition-heal runs the heal edges are necessarily wired
-    /// inside the timed window, so this is the cost of establishing them —
-    /// subtract it when comparing heal topologies whose edge counts differ
-    /// (`Bridge` opens one stream, `FullMesh` opens every cross-group pair).
+    /// `0.0` for topology runs, which wire every edge before the clock starts.
+    /// A partition-heal run also wires its whole graph up front, so this covers
+    /// only the round of unblock calls that opens the heal. It is small and
+    /// does not grow with the number of healed links.
+    ///
+    /// Report it alongside `convergence_ms` rather than subtracting it. It is
+    /// part of the heal, and it also serves as a host-noise signal.
     pub wiring_ms: f64,
-    /// Total ops applied across all nodes.
+    /// Total operations applied across all nodes.
     pub total_ops: usize,
-    /// Stable identifier for the topology that produced this run, e.g.
-    /// `"full_mesh"`, `"ring"`, `"partition_heal"`. Used as a pivot key
-    /// in CSV/JSON output.
+    /// Stable name of the topology that produced this run, such as
+    /// `"full_mesh"`, `"ring"`, or `"partition_heal"`. Used as a pivot key in
+    /// the CSV and JSON output.
     pub topology_kind: &'static str,
-    /// Number of undirected edges in the final wired topology.
+    /// Undirected edges in the final wired graph.
     pub edge_count: usize,
-    /// Diameter of the final wired topology (longest shortest-path between
-    /// any pair of nodes). The structural predictor of multi-hop convergence
-    /// latency. `0` for `n <= 1`.
+    /// Diameter of the final wired graph. `0` for `n <= 1`.
     pub diameter: usize,
 }
 
-/// Build an undirected adjacency list from an edge list.
+/// Builds an undirected adjacency list from an edge list.
 ///
-/// Each edge `(i, j)` adds `j` to `adj[i]` and `i` to `adj[j]`. Caller is
-/// responsible for ensuring `i, j < n`; out-of-range edges panic on index.
+/// Each edge `(i, j)` adds `j` to `adj[i]` and `i` to `adj[j]`. The caller must
+/// ensure `i < n` and `j < n`. An out-of-range edge panics.
 fn adjacency_list(n: usize, edges: &[(usize, usize)]) -> Vec<Vec<usize>> {
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
     for &(i, j) in edges {
@@ -475,10 +488,10 @@ impl ScenarioFile {
         }
     }
 
-    /// Total ops applied across all nodes in one trial of this scenario.
+    /// Total operations one trial of this scenario applies across all nodes.
     ///
-    /// Deterministic from the config, so every trial of the same scenario
-    /// reports the same value.
+    /// Computed from the config, so every trial of a scenario reports the same
+    /// value.
     pub fn op_count(&self) -> usize {
         match &self.body {
             ScenarioBody::Topology(t) => t.op_count,
@@ -488,18 +501,18 @@ impl ScenarioFile {
 }
 
 impl TopologyConfig {
-    /// Check that the connection topology is well-formed for `node_count`
-    /// (see [`Connections::validate`]).
+    /// Checks the graph against `node_count`. See [`Connections::validate`].
     pub fn validate(&self) -> Result<()> {
         self.connections.validate(self.node_count)
     }
 }
 
 impl PartitionConfig {
-    /// Check that `node_count` equals the total number of nodes across all
-    /// groups, and that `heal_topology = "bridge"` (if set) is paired with
-    /// exactly 2 groups — the bridge variant is currently only defined for
-    /// two-partition heals.
+    /// Checks two rules: `node_count` must equal the number of nodes the groups
+    /// cover, and `heal_topology = "bridge"` requires exactly two groups.
+    ///
+    /// `Bridge` is defined only for a two-way partition, because it connects
+    /// the first node of one group to the first node of the other.
     pub fn validate(&self) -> Result<()> {
         let total: usize = self.groups.iter().map(|g| g.nodes.len()).sum();
         if total != self.node_count {
@@ -519,7 +532,8 @@ impl PartitionConfig {
     }
 }
 
-/// Built-in scenarios used as a regression suite when no TOML files are given.
+/// Returns the scenarios that run when the orchestrator is given no TOML file.
+/// They act as a small regression suite.
 pub fn builtin_scenarios() -> Vec<ScenarioFile> {
     vec![
         ScenarioFile {
@@ -708,8 +722,8 @@ mod tests {
 
     // ── op_interval_ms ─────────────────────────────────────────────────────
 
-    /// Pre-existing TOML scenarios omit `op_interval_ms`; it must default to 0
-    /// so they continue to burst ops as before.
+    /// A scenario that omits `op_interval_ms` must get 0, which sends
+    /// operations as fast as possible.
     #[test]
     fn op_interval_ms_defaults_to_zero_when_absent() {
         let s: ScenarioFile = toml::from_str(
@@ -751,8 +765,8 @@ mod tests {
 
     // ── HealTopology ───────────────────────────────────────────────────────
 
-    /// Pre-existing partition_heal TOML scenarios omit `heal_topology`; the
-    /// field must default to `FullMesh` so their behaviour does not change.
+    /// A partition-heal scenario that omits `heal_topology` must get
+    /// `FullMesh`.
     #[test]
     fn heal_topology_defaults_to_full_mesh_when_absent() {
         let s: ScenarioFile = toml::from_str(
@@ -856,8 +870,8 @@ mod tests {
         assert!(cfg.validate().is_ok());
     }
 
-    /// Many-group partition-heals are still allowed under the default
-    /// `FullMesh` heal — the 2-group restriction only kicks in for `Bridge`.
+    /// The two-group rule applies only to `Bridge`. A `FullMesh` heal accepts
+    /// any number of groups.
     #[test]
     fn validate_ok_when_full_mesh_with_three_groups() {
         let cfg = make_config(6, vec![vec![0, 1], vec![2, 3], vec![4, 5]]);

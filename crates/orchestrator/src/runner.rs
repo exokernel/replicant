@@ -32,13 +32,13 @@ use crate::topology::{Group, RunResult, TopologyConfig, Workload, WritePattern};
 
 // ── Replica endpoints ──────────────────────────────────────────────────────
 
-/// Network addresses for a single replica.
+/// The two network addresses of one replica.
 ///
-/// Two addresses are kept because the orchestrator and the replicas may sit
-/// in different name spaces. On host, they coincide (`127.0.0.1:<port>`).
-/// In docker-compose, `client_addr` is `localhost:<host-port>` (orchestrator
-/// reaches the replica via the published port) and `peer_addr` is
-/// `replica-N:50051` (containers resolve each other via service DNS).
+/// Two are needed because the orchestrator and the replicas can sit in
+/// different name spaces. On the host they are the same
+/// (`127.0.0.1:<port>`). Under docker-compose, `client_addr` is
+/// `localhost:<published-port>` and `peer_addr` is `replica-N:50051`, because
+/// containers reach each other by service DNS.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplicaEndpoint {
     /// `host:port` the orchestrator uses to dial this replica.
@@ -49,8 +49,8 @@ pub struct ReplicaEndpoint {
 }
 
 impl ReplicaEndpoint {
-    /// Endpoint where the orchestrator and peers reach the replica at the
-    /// same address — the in-process case.
+    /// Builds an endpoint whose two addresses are the same. This is the
+    /// in-process case.
     pub fn loopback(addr: impl Into<String>) -> Self {
         let s = addr.into();
         Self {
@@ -62,36 +62,34 @@ impl ReplicaEndpoint {
 
 /// Where the scenario gets its replicas from.
 pub enum NodeSource {
-    /// Spawn `n` replicas inside this process on ephemeral ports, each
-    /// backed by the given CRDT library.
+    /// Spawn `n` replicas inside this process on ephemeral ports, each backed
+    /// by the named CRDT library.
     ///
-    /// The library rides on this variant rather than sitting beside it
-    /// because it only means anything here: externally-managed replicas were
-    /// launched with their own `--crdt` long before the orchestrator
-    /// connected, and nothing the orchestrator does can change them. Putting
-    /// it on the enum makes "a CRDT choice for an external run" unstateable
-    /// rather than merely ignored.
+    /// The library is part of this variant because it applies only here. An
+    /// external replica chose its library from its own `--crdt` flag at
+    /// startup, and the orchestrator cannot change it. Carrying the choice on
+    /// the variant makes a CRDT selection for an external run impossible to
+    /// express, rather than silently ignored.
     InProcess(Crdt),
-    /// Connect to replicas already running at these endpoints.
+    /// Connect to replicas that are already running at these endpoints.
     External(Vec<ReplicaEndpoint>),
 }
 
 // ── Private helpers ────────────────────────────────────────────────────────
 
-/// The canonical actor id for node `i`.
+/// Returns the actor ID for node `i`, which is `node-{i}`.
 ///
-/// The `node-{i}` scheme is load-bearing beyond this crate: the k8s
-/// StatefulSet is named `node` so its pod ordinals produce the same names,
-/// and the orchestrator wires scenarios by index assuming it. One helper so
-/// the format string is not repeated at each site that needs it.
+/// This naming scheme is shared with code outside this crate. The Kubernetes
+/// StatefulSet is named `node`, so its pod ordinals produce the same names, and
+/// scenarios are wired by index on that assumption. Do not change the format.
 fn node_id(i: usize) -> Result<NodeId> {
     NodeId::new(format!("node-{i}"))
 }
 
-/// Bind a port, start a replica server, and return its endpoint and gRPC client.
+/// Binds a port, starts a replica server, and returns its endpoint and client.
 ///
-/// The server task is added to `tasks` so the caller can detect panics; the
-/// `JoinSet` must outlive all client usage or the server will be dropped.
+/// The server task joins `tasks`, so the caller can detect a panic. `tasks`
+/// must outlive every use of the returned client, or the server is dropped.
 async fn spawn_node(
     actor_id: NodeId,
     crdt: Crdt,
@@ -114,7 +112,7 @@ async fn spawn_node(
     Ok((ReplicaEndpoint::loopback(addr.to_string()), client))
 }
 
-/// Spawn `n` nodes and return their endpoints and clients.
+/// Spawns `n` nodes and returns their endpoints and clients.
 async fn spawn_nodes(
     n: usize,
     crdt: Crdt,
@@ -130,11 +128,12 @@ async fn spawn_nodes(
     Ok((endpoints, clients))
 }
 
-/// Connect to externally-managed replicas at the supplied endpoints.
+/// Connects to replicas that are already running at `endpoints`.
 ///
-/// Each endpoint is dialled via `client_addr`; before returning, every replica
-/// must answer a `GetStateFingerprint` RPC so we fail fast if the container
-/// hasn't started yet (rather than during the first `ConnectPeer`).
+/// Each endpoint is dialled on its `client_addr`. Every replica must then
+/// answer a `GetStateFingerprint` call before this returns. That check reports
+/// a container that has not started yet, instead of letting the failure appear
+/// later during `ConnectPeer`.
 async fn connect_external(endpoints: &[ReplicaEndpoint]) -> Result<Vec<ReplicaClient<Channel>>> {
     let mut clients = Vec::with_capacity(endpoints.len());
     for ep in endpoints {
@@ -150,12 +149,13 @@ async fn connect_external(endpoints: &[ReplicaEndpoint]) -> Result<Vec<ReplicaCl
     Ok(clients)
 }
 
-/// Acquire replicas from the configured source.
+/// Gets `n` replicas from `source`.
 ///
-/// For `InProcess`, spawns `n` replicas on ephemeral ports; for `External`,
-/// validates that the endpoint count matches `n` and connects to each. The
-/// returned `JoinSet` is non-empty only for the in-process case — `External`
-/// runs leave it empty, so subsequent `check_tasks` calls degrade to no-ops.
+/// `InProcess` spawns them on ephemeral ports. `External` checks that the
+/// endpoint count matches `n`, then connects to each.
+///
+/// Only the in-process path adds anything to `tasks`. An external run leaves it
+/// empty, which makes every later [`check_tasks`] call a no-op.
 pub(crate) async fn acquire_nodes(
     source: NodeSource,
     n: usize,
@@ -176,12 +176,11 @@ pub(crate) async fn acquire_nodes(
     }
 }
 
-/// Reset every replica back to an empty document with no peer connections.
+/// Resets every replica to an empty document with no peer connections.
 ///
-/// Issued in parallel so the per-trial overhead is one round-trip's worth of
-/// latency rather than `n × round-trip`. For in-process replicas this is
-/// effectively a no-op; for external (docker/k8s) replicas it replaces what
-/// used to require a full container bounce between trials.
+/// The calls run in parallel, so this costs one round trip rather than `n` of
+/// them. For an external replica this is what makes repeated trials possible
+/// without restarting the container.
 pub(crate) async fn reset_all(clients: &[ReplicaClient<Channel>]) -> Result<()> {
     let mut set: JoinSet<Result<()>> = JoinSet::new();
     for client in clients {
@@ -197,18 +196,18 @@ pub(crate) async fn reset_all(clients: &[ReplicaClient<Channel>]) -> Result<()> 
     Ok(())
 }
 
-/// Call `ConnectPeer` for each edge and wait for all streams to be ready.
+/// Opens a sync stream for every edge and waits until all of them are ready.
 ///
-/// Each `ConnectPeer` RPC blocks until the TCP connection and gRPC stream are
-/// open and the peer is registered, so no post-connect sleep is needed. The
-/// address passed in `PeerRef.addr` is `peer_addr`, which is what the *target*
-/// replica `i` will dial to reach replica `j` (may differ from the
-/// orchestrator's `client_addr` for the same replica — see [`ReplicaEndpoint`]).
+/// A `ConnectPeer` call returns only once the TCP connection and the gRPC
+/// stream are open and the peer is registered, so no sleep is needed
+/// afterwards.
 ///
-/// Edges are wired concurrently, so the wall time is one connection setup
-/// rather than `edges.len()` of them. Every caller now wires outside a timed
-/// window — [`crate::partition_heal::run_partition_heal`] pre-wires its whole post-heal graph — so
-/// this is about keeping setup cheap, not about measurement validity.
+/// `PeerRef.addr` carries `peer_addr`, the address replica `i` dials to reach
+/// replica `j`. It can differ from the `client_addr` the orchestrator dials.
+/// See [`ReplicaEndpoint`].
+///
+/// The edges are wired concurrently, so this costs one connection setup rather
+/// than `edges.len()` of them.
 pub(crate) async fn connect_edges(
     clients: &[ReplicaClient<Channel>],
     endpoints: &[ReplicaEndpoint],
@@ -235,17 +234,15 @@ pub(crate) async fn connect_edges(
     Ok(())
 }
 
-/// Block or unblock the sync links for `edges`, on both endpoints of each.
+/// Blocks or unblocks the sync link for every edge, on both of its endpoints.
 ///
-/// Both endpoints matter. A link blocked on one side only still carries
-/// traffic the other way, so the partition would leak; and on heal, a peer
-/// unblocked before its counterpart would have its kick dropped as
-/// still-blocked inbound. Grouping by node means one RPC per replica rather
-/// than one per edge, so the heal-side cost stays flat in edge count.
+/// Both endpoints must be set. A link blocked on one side only still carries
+/// traffic the other way, which leaks the partition. At heal time, a peer
+/// unblocked before its counterpart has its kick dropped on arrival.
 ///
-/// Issued concurrently — for the unblock this is inside the measured heal
-/// window, and serial RPCs would reintroduce exactly the edge-count-scaled
-/// cost this design removes.
+/// The calls are grouped by node, so this issues one call per replica rather
+/// than one per edge, and they run concurrently. The unblock happens inside the
+/// measured window, so its cost must not grow with the number of edges.
 pub(crate) async fn set_links_blocked(
     clients: &[ReplicaClient<Channel>],
     edges: &[(usize, usize)],
@@ -274,13 +271,15 @@ pub(crate) async fn set_links_blocked(
     Ok(())
 }
 
-/// Start the post-heal sync handshake across `edges`.
+/// Starts the sync handshake on every edge.
 ///
-/// Only one endpoint of each edge needs kicking — the sync protocol is
-/// bidirectional once a message lands — so this kicks the lower-numbered node
-/// of each pair. Concurrent for the same reason as [`set_links_blocked`].
+/// Only one endpoint of each edge needs a kick, because the sync protocol runs
+/// in both directions once a message arrives. This kicks the lower-numbered
+/// node of each pair. The calls run concurrently, for the same reason as in
+/// [`set_links_blocked`].
 ///
-/// Must run only after every endpoint is unblocked.
+/// Every endpoint must already be unblocked. A kick to a blocked peer is
+/// dropped, and the sender then waits for a reply that never comes.
 pub(crate) async fn kick_sync_edges(
     clients: &[ReplicaClient<Channel>],
     edges: &[(usize, usize)],
@@ -308,18 +307,16 @@ pub(crate) async fn kick_sync_edges(
     Ok(())
 }
 
-/// Assert that the partition actually held: no two groups may share a
-/// fingerprint at the end of the divergence phase.
+/// Checks that the partition held. No two groups may share a fingerprint at the
+/// end of the divergence phase.
 ///
-/// With the topology fully wired and the partition enforced only by the
-/// blocked-link flags, a bug in that enforcement would quietly turn the
-/// scenario into "already converged, then heal" — which reports a fast heal
-/// and looks like a result rather than a broken experiment. The same class of
-/// failure as the shared-object bug the text-length gate catches, so it gets
-/// the same treatment: check it, in-runner, every trial.
+/// The graph is fully wired during the partition, and only the blocked-link
+/// flags keep the groups apart. If that enforcement fails, the groups converge
+/// early and the run becomes "already agreed, then heal". It reports a fast
+/// heal, which reads as a result rather than as a broken experiment.
 ///
-/// Groups that wrote no ops are skipped — they are legitimately empty and
-/// would match each other.
+/// A group that wrote nothing is skipped. Empty groups match each other, and
+/// that is not a leak.
 pub(crate) async fn verify_groups_diverged(
     clients: &mut [ReplicaClient<Channel>],
     groups: &[Group],
@@ -347,7 +344,7 @@ pub(crate) async fn verify_groups_diverged(
     Ok(())
 }
 
-/// Apply a single `MapPut` on the root map.
+/// Applies one `MapPut` to the root map.
 pub(crate) async fn map_put(
     client: &mut ReplicaClient<Channel>,
     key: &str,
@@ -367,12 +364,11 @@ pub(crate) async fn map_put(
     Ok(())
 }
 
-/// Apply a single `TextSplice` on the named text object under root.
+/// Applies one `TextSplice` to the named text object under the root.
 ///
-/// `pos = 0` (prepend) is always a valid splice position regardless of the
-/// replica's current text length, so it stays valid under any write pattern
-/// without the orchestrator tracking per-node document length. Phase 1's
-/// generator replaces this fixed anchor with the swept locality rule.
+/// Inserts only; `del_count` is always 0. The caller supplies `pos` and must
+/// keep it within the replica's current text length. `pos = 0` is valid at any
+/// length.
 pub(crate) async fn text_splice(
     client: &mut ReplicaClient<Channel>,
     obj: &str,
@@ -392,16 +388,18 @@ pub(crate) async fn text_splice(
     Ok(())
 }
 
-/// Name of the shared text object every `TextSplice` workload writes to.
+/// Name of the shared text object that every `TextSplice` workload writes to.
 pub(crate) const TEXT_OBJ: &str = "text";
 
-/// Bootstrap the shared text object on every node in `indices`.
+/// Creates the shared text object on every node in `indices`.
 ///
-/// Each replica authors the bit-identical bootstrap change (fixed actor,
-/// time 0) as its first change, so all replicas share one object identity
-/// with no sync required. Must run after `reset_all` and **before any edges
-/// are wired**: once sync is flowing, a peer's ops could land first and the
-/// replica-side determinism guard would reject the bootstrap.
+/// Each replica writes a bit-identical first change, using a fixed actor and
+/// time 0. All replicas therefore end up with one shared object identity
+/// without syncing.
+///
+/// Call this after `reset_all` and **before any edge is wired**. Once sync is
+/// running, a peer's operation can arrive first, and the replica's determinism
+/// guard then rejects the bootstrap change.
 pub(crate) async fn ensure_text_all(
     clients: &mut [ReplicaClient<Channel>],
     indices: impl Iterator<Item = usize>,
@@ -417,14 +415,13 @@ pub(crate) async fn ensure_text_all(
     Ok(())
 }
 
-/// Post-convergence validity check for insert-only text workloads: every
-/// node's text must hold exactly `expected` characters (one per op).
+/// Checks that every node's text holds exactly `expected` characters. Valid
+/// only for insert-only workloads, where each operation adds one character.
 ///
-/// Fingerprint equality proves the replicas *agree*; this proves they agree
-/// on a document that contains **all** the work. The distinction is not
-/// theoretical — a shared-object bug once made every heal converge cleanly
-/// while silently discarding one side's entire text, and only a length check
-/// like this one could have caught it.
+/// Matching fingerprints prove the replicas *agree*. This proves they agree on
+/// a document that still contains everyone's work. A bug that made both sides
+/// converge on one side's text only would pass the fingerprint check and fail
+/// here.
 pub(crate) async fn verify_text_length(
     clients: &mut [ReplicaClient<Channel>],
     indices: &[usize],
@@ -450,11 +447,14 @@ pub(crate) async fn verify_text_length(
     Ok(())
 }
 
-/// Apply write number `seq` to `client` under the configured `workload`.
+/// Applies write number `seq` to `client`, using the configured `workload`.
 ///
-/// `seq` disambiguates `MapPut` keys; the text workload ignores it (each op is
-/// a fixed-anchor prepend of one filler character — content is merge-cost
-/// irrelevant, only position and op shape matter).
+/// `seq` keeps `MapPut` keys distinct. The text workload ignores it and
+/// prepends one filler character, because merge cost depends on position and
+/// operation shape, not on content.
+///
+/// This is the steady-state path. The divergence sweep draws its positions from
+/// the locality rule instead. See [`crate::partition_heal`].
 async fn apply_write(
     client: &mut ReplicaClient<Channel>,
     workload: Workload,
@@ -466,9 +466,10 @@ async fn apply_write(
     }
 }
 
-/// Poll nodes at `indices` until all have equal, non-empty fingerprints.
+/// Polls the nodes at `indices` until every fingerprint is equal and non-empty.
 ///
-/// Returns fractional ms from `start` to convergence.
+/// Returns the milliseconds elapsed from `start`. Fails if `timeout` passes
+/// first.
 pub(crate) async fn wait_for_nodes(
     clients: &mut [ReplicaClient<Channel>],
     indices: &[usize],
@@ -487,8 +488,8 @@ pub(crate) async fn wait_for_nodes(
             );
         }
 
-        // Empty fingerprint means the node has received no ops yet; treat as
-        // not converged to avoid a spurious match before any writes land.
+        // An empty fingerprint means the node has no operations yet. Treat that
+        // as not converged, so a run cannot match before any write lands.
         let converged = fps.iter().all(|fp| !fp.is_empty()) && fps.windows(2).all(|w| w[0] == w[1]);
         if converged {
             return Ok(start.elapsed().as_secs_f64() * 1000.0);
@@ -506,12 +507,11 @@ pub(crate) async fn wait_for_nodes(
     }
 }
 
-/// Check whether any server tasks have exited and bail if so.
+/// Fails if any server task has exited.
 ///
-/// Servers are expected to run for the duration of a scenario. Any exit —
-/// clean shutdown or panic — means something went wrong. Calling this after
-/// each major phase surfaces failures promptly rather than letting them appear
-/// as confusing "connection refused" RPC errors.
+/// A server runs for the whole scenario, so any exit is a fault, whether it
+/// panicked or returned cleanly. Call this after each phase. Without it the
+/// failure surfaces later as a confusing "connection refused" from an RPC.
 pub(crate) fn check_tasks(tasks: &mut JoinSet<()>) -> Result<()> {
     if let Some(result) = tasks.try_join_next() {
         match result {
@@ -522,7 +522,7 @@ pub(crate) fn check_tasks(tasks: &mut JoinSet<()>) -> Result<()> {
     Ok(())
 }
 
-/// Return the full-mesh intra-group edges for a slice of node indices.
+/// Returns every pair within `nodes`, which wires one group as a full mesh.
 pub(crate) fn intra_group_edges(nodes: &[usize]) -> Vec<(usize, usize)> {
     nodes
         .iter()
@@ -530,10 +530,10 @@ pub(crate) fn intra_group_edges(nodes: &[usize]) -> Vec<(usize, usize)> {
         .collect()
 }
 
-/// Select the target-node index for op `i` given a write pattern.
+/// Returns the node that receives operation `i`.
 ///
-/// `nodes` is the in-scope slice — `0..n` for a topology run, or a group's
-/// `nodes` for one phase of a partition-heal run.
+/// `nodes` is the set in scope: `0..n` for a topology run, or one group's nodes
+/// during a partition.
 pub(crate) fn target_node(pattern: &WritePattern, i: usize, nodes: &[usize]) -> usize {
     match pattern {
         WritePattern::Concentrated => nodes[0],
@@ -543,7 +543,11 @@ pub(crate) fn target_node(pattern: &WritePattern, i: usize, nodes: &[usize]) -> 
 
 // ── Public API ─────────────────────────────────────────────────────────────
 
-/// Spawn nodes, wire the topology, apply writes, and wait for convergence.
+/// Runs one steady-state topology scenario and returns its measurements.
+///
+/// Acquires the nodes, wires the graph, applies the writes, and waits for every
+/// node to agree. All wiring happens before the clock starts, so `wiring_ms` is
+/// always `0.0` here.
 pub async fn run(config: &TopologyConfig, source: NodeSource) -> Result<RunResult> {
     config.validate()?;
 
@@ -555,10 +559,9 @@ pub async fn run(config: &TopologyConfig, source: NodeSource) -> Result<RunResul
     // when the same external stack is reused across many scenarios/trials.
     reset_all(&clients).await?;
 
-    // Text workloads need the shared text object bootstrapped on every node
-    // before any edges exist (see `ensure_text_all`); otherwise each node
-    // lazily creates its own object on first write and concurrent creations
-    // collide as map-key conflicts.
+    // Create the shared text object on every node before any edge exists. See
+    // `ensure_text_all`. Without this each node creates its own object on first
+    // write, and those creations then collide as a map-key conflict.
     if config.workload == Workload::TextSplice {
         ensure_text_all(&mut clients, 0..n).await?;
     }
@@ -570,25 +573,24 @@ pub async fn run(config: &TopologyConfig, source: NodeSource) -> Result<RunResul
     connect_edges(&clients, &endpoints, &edges).await?;
     check_tasks(&mut tasks)?;
 
-    // Start timing before the first write so the measurement includes write
-    // propagation time; on loopback sync completes before wait_for_nodes
-    // returns its first poll, so a post-write timer would always read 0.
+    // Start the clock before the first write, so the measurement includes
+    // propagation. Over loopback, sync finishes before the first poll returns,
+    // so a clock started after the writes would always read 0.
     let all_nodes: Vec<usize> = (0..n).collect();
     let measure_start = Instant::now();
     for i in 0..config.op_count {
         let target = target_node(&config.write_pattern, i, &all_nodes);
         apply_write(&mut clients[target], config.workload, i).await?;
-        // Pace between op submissions only — sleeping after the last op would
-        // just delay wait_for_nodes' first poll and inflate convergence_ms
-        // beyond what the pacing semantics imply.
+        // Pace between operations only. A sleep after the last one would delay
+        // the first convergence poll and inflate `convergence_ms`.
         if config.op_interval_ms > 0 && i + 1 < config.op_count {
             tokio::time::sleep(Duration::from_millis(config.op_interval_ms)).await;
         }
     }
     check_tasks(&mut tasks)?;
 
-    // Timeout absorbs the cumulative paced wall time plus a 5s convergence
-    // budget; burst runs (op_interval_ms = 0) keep the historical 5s deadline.
+    // The timeout covers the total pacing delay plus 5s for convergence. An
+    // unpaced run therefore gets the plain 5s deadline.
     let pacing_budget =
         Duration::from_millis(config.op_interval_ms.saturating_mul(config.op_count as u64));
     let convergence_ms = wait_for_nodes(
@@ -600,16 +602,16 @@ pub async fn run(config: &TopologyConfig, source: NodeSource) -> Result<RunResul
     .await?;
     check_tasks(&mut tasks)?;
 
-    // Validity gate, outside the measurement window: the converged text must
-    // contain every op's insert (ops are insert-only, one char each).
+    // Validity gate, outside the measured window: the converged text must hold
+    // one character per operation, because operations are insert-only.
     if config.workload == Workload::TextSplice {
         verify_text_length(&mut clients, &all_nodes, config.op_count).await?;
     }
 
     Ok(RunResult {
         convergence_ms,
-        // All wiring happens before `measure_start`, so none of it is inside
-        // the reported window.
+        // Every edge is wired before `measure_start`, so no setup is inside the
+        // reported window.
         wiring_ms: 0.0,
         total_ops: config.op_count,
         topology_kind,
@@ -687,10 +689,11 @@ mod tests {
 
     // ── relay across non-mesh topologies ───────────────────────────────────
 
-    /// `Replica.Reset` over the wire: write, converge, reset, verify the
-    /// fingerprint is empty, then re-wire and write again — proves the second
-    /// trial starts from a clean slate. This is the exact pattern the
-    /// orchestrator runs each time a `--replicas`-mode trial begins.
+    /// Drives `Replica.Reset` over the wire: write, converge, reset, check the
+    /// fingerprint is empty, then re-wire and write again.
+    ///
+    /// This is the sequence the orchestrator runs at the start of every trial
+    /// against external replicas. It shows the second trial starts clean.
     #[tokio::test]
     async fn reset_clears_state_and_allows_subsequent_run() {
         let mut tasks = JoinSet::new();
@@ -780,10 +783,9 @@ mod tests {
         check_tasks(&mut tasks).unwrap();
     }
 
-    /// Reset must be safe to call when there are no peer connections and an
-    /// empty document — i.e. the very first trial after `spawn_nodes`. The
-    /// orchestrator unconditionally resets at the start of every trial, so
-    /// this path needs to not deadlock or panic on the no-op case.
+    /// Reset on a fresh replica: no peers, empty document. The orchestrator
+    /// resets before every trial, including the first, so this case must not
+    /// deadlock or panic.
     #[tokio::test]
     async fn reset_is_noop_on_fresh_replica() {
         let mut tasks = JoinSet::new();
@@ -801,10 +803,11 @@ mod tests {
         check_tasks(&mut tasks).unwrap();
     }
 
-    /// Convergence across a 4-node line (0↔1↔2↔3) with all writes at node 0
-    /// only succeeds if `recv_loop` relays received state onward — nodes 2
-    /// and 3 are not directly connected to the writer, so the only way for
-    /// them to learn about its changes is through node 1 forwarding.
+    /// Convergence across a 4-node line (0↔1↔2↔3) with every write at node 0.
+    ///
+    /// Nodes 2 and 3 have no link to the writer. They can only learn its
+    /// changes if `recv_loop` forwards received state onward, so this passes
+    /// only when relaying works.
     #[tokio::test]
     async fn line_topology_n4_converges_with_relay() {
         let mut tasks = JoinSet::new();
@@ -844,10 +847,12 @@ mod tests {
             .fingerprint
     }
 
-    /// The core guarantee of the app-layer partition: a blocked link carries
-    /// nothing, even though the stream is fully open and both replicas are
-    /// writing. Without this, wiring the heal edges up front would simply
-    /// merge the groups immediately and the scenario would measure nothing.
+    /// A blocked link carries nothing, even though its stream is open and both
+    /// replicas are writing.
+    ///
+    /// This is what lets the harness wire the whole graph before the partition.
+    /// If a blocked link leaked, the groups would merge at once and the heal
+    /// would measure nothing.
     #[tokio::test]
     async fn blocked_link_carries_no_state_while_open() {
         let mut tasks = JoinSet::new();
@@ -875,9 +880,10 @@ mod tests {
         check_tasks(&mut tasks).unwrap();
     }
 
-    /// Unblocking plus a kick must converge an already-wired link. This is the
-    /// heal path end-to-end through the real gRPC stack: no new connection is
-    /// made, so convergence here is the sync protocol alone.
+    /// An unblock plus a kick converges an already-wired link.
+    ///
+    /// This is the heal path through the real gRPC stack. No connection is
+    /// opened, so the time here is the sync protocol alone.
     #[tokio::test]
     async fn unblock_and_kick_heals_without_reconnecting() {
         let mut tasks = JoinSet::new();
@@ -903,8 +909,8 @@ mod tests {
         check_tasks(&mut tasks).unwrap();
     }
 
-    /// The leak gate must fire when the groups already agree. Simulated by
-    /// running the check on two nodes that were never partitioned at all.
+    /// The leak gate fires when the groups already agree. Two nodes that were
+    /// never partitioned stand in for a leaked partition.
     #[tokio::test]
     async fn diverged_gate_rejects_groups_that_already_agree() {
         let mut tasks = JoinSet::new();
@@ -929,7 +935,7 @@ mod tests {
         assert!(err.to_string().contains("partition leaked"), "{err}");
     }
 
-    /// ...and must pass when they genuinely differ.
+    /// The leak gate passes when the groups really do differ.
     #[tokio::test]
     async fn diverged_gate_accepts_genuinely_divergent_groups() {
         let mut tasks = JoinSet::new();
@@ -941,10 +947,10 @@ mod tests {
         assert!(verify_groups_diverged(&mut clients, &groups).await.is_ok());
     }
 
-    /// A heal that opens no new connections should cost far less than one
-    /// that does, and — the point of the change — should not scale with the
-    /// number of healed edges. Full-mesh heal on n=6 opens 9 cross-group
-    /// links; the reported `wiring_ms` is now flag flips only.
+    /// `wiring_ms` must not grow with the number of healed links.
+    ///
+    /// A full-mesh heal on n=6 reopens 9 cross-group links. Because the graph
+    /// is wired up front, the measured cost is only the unblock round.
     #[tokio::test]
     async fn full_mesh_heal_wiring_does_not_scale_with_edge_count() {
         let cfg = |n: usize, per_group: usize| -> PartitionConfig {
@@ -980,8 +986,8 @@ mod tests {
 
     // ── wiring_ms ──────────────────────────────────────────────────────────
 
-    /// A topology run wires every edge before starting the clock, so none of
-    /// its `convergence_ms` is stream setup.
+    /// A topology run wires every edge before the clock starts, so its
+    /// `wiring_ms` is 0.0 and no stream setup is inside `convergence_ms`.
     #[tokio::test]
     async fn topology_run_reports_no_wiring_inside_the_window() {
         let config: TopologyConfig = toml::from_str(
@@ -997,10 +1003,10 @@ mod tests {
         assert_eq!(result.wiring_ms, 0.0);
     }
 
-    /// The heal's unblock round is inside the window, so it is still reported
-    /// as `wiring_ms` — it just no longer contains connection setup. It must
-    /// remain a real part of the measured window, or an analysis subtracting
-    /// it would produce a negative merge time.
+    /// The heal's unblock round runs inside the measured window and is reported
+    /// as `wiring_ms`. It no longer contains connection setup, but it is still
+    /// a real part of the window: `wiring_ms <= convergence_ms` must hold, or
+    /// an analysis that subtracts it would report a negative merge time.
     #[tokio::test]
     async fn partition_heal_reports_wiring_within_the_convergence_window() {
         let config: PartitionConfig = toml::from_str(

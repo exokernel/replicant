@@ -1,14 +1,14 @@
-//! Orchestrator — runs topology scenarios and reports convergence metrics.
+//! Orchestrator: runs scenarios and reports how long each one took to converge.
 //!
-//! With no file arguments, runs three built-in regression scenarios.
-//! With file arguments, runs each TOML scenario file `--trials` times and
-//! emits structured output to stdout:
+//! Given no file arguments, it runs three built-in regression scenarios. Given
+//! file arguments, it runs each TOML scenario `--trials` times and writes
+//! structured records to stdout:
 //!
 //! ```text
 //! cargo run --bin orchestrator -- --trials 5 --output csv scenarios/full-mesh-n5.toml
 //! ```
 //!
-//! Tracing logs are written to stderr so stdout remains pipe-clean.
+//! Logs go to stderr, so stdout stays clean enough to pipe.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -44,75 +44,79 @@ struct Args {
     #[arg(long, value_enum, default_value_t = OutputFormat::Csv)]
     output: OutputFormat,
 
-    /// Write OTel metrics (sync message counts, op latencies, doc sizes) as JSON
-    /// to this file after all scenarios complete. If omitted, metrics are discarded.
+    /// Write OTel metrics as JSON to this file once all scenarios finish. Covers
+    /// sync message counts, operation latencies, and document sizes. Metrics are
+    /// discarded if this is omitted.
     #[arg(long)]
     metrics_file: Option<PathBuf>,
 
-    /// Write a run-provenance file (commit, host, build profile, seeds, cell
-    /// parameters) as JSON to this path. Pair it with the result CSV, which
-    /// records none of that; `results/` is gitignored, so without a provenance
-    /// file a stored CSV cannot be traced back to the code that produced it.
+    /// Write a run-provenance file as JSON to this path: commit, host, build
+    /// profile, seeds, and cell parameters.
     ///
-    /// Written before the first trial, so an interrupted sweep still leaves a
-    /// record of what it was configured to run.
+    /// Keep it beside the result CSV, which records none of those. `results/` is
+    /// gitignored, so without this file a stored CSV cannot be traced back to
+    /// the code that produced it.
+    ///
+    /// It is written before the first trial, so an interrupted sweep still
+    /// leaves a record of what it was going to run.
     #[arg(long)]
     provenance: Option<PathBuf>,
 
-    /// Parse the scenarios and write the provenance file, then exit without
-    /// running any trials. Everything in it is derived from the config and the
-    /// seeds, so cell metadata — including achieved contention — is available
-    /// without spending the CPU a sweep would cost.
+    /// Parse the scenarios, write the provenance file, and exit without running
+    /// any trials.
+    ///
+    /// Everything in that file comes from the config and the seeds, so cell
+    /// metadata, including achieved contention, is available without paying for
+    /// a sweep.
     #[arg(long)]
     dry_run: bool,
 
     /// Connect to externally-managed replicas instead of spawning in-process.
     ///
-    /// Comma-separated `client_addr[=peer_addr]` entries. `client_addr` is what
-    /// the orchestrator dials; `peer_addr` (defaults to `client_addr` if
-    /// omitted) is what each replica passes to its peers in `ConnectPeer`. The
-    /// two diverge when replicas live in a different network namespace from
-    /// the orchestrator — e.g. docker-compose, where the orchestrator reaches
-    /// replicas via published ports but containers reach each other via
-    /// service DNS:
+    /// Takes comma-separated `client_addr[=peer_addr]` entries. The orchestrator
+    /// dials `client_addr`. Each replica gives `peer_addr` to its peers, and it
+    /// defaults to `client_addr`.
+    ///
+    /// The two differ when the replicas sit in another network namespace. Under
+    /// docker-compose the orchestrator uses published ports while containers
+    /// reach each other by service DNS:
     ///
     /// ```text
     /// --replicas localhost:50051=replica-0:50051,localhost:50052=replica-1:50051
     /// ```
     ///
-    /// Each external replica must be launched with actor ID `node-N` (matching
-    /// the orchestrator's wiring scheme) and the scenario's `node_count` must
-    /// equal the number of entries. The runner calls the `Reset` RPC on every
-    /// replica at the start of each trial, so multiple scenarios and trials can
-    /// share a single long-lived stack without the prior run's state leaking in.
+    /// Each external replica must be launched with actor ID `node-N`, matching
+    /// the orchestrator's wiring scheme, and `node_count` must equal the number
+    /// of entries.
+    ///
+    /// Every trial begins with a `Reset` call to each replica, so many scenarios
+    /// and trials can share one long-lived stack with no state carried over.
     #[arg(long, value_delimiter = ',', value_parser = parse_replica_endpoint)]
     replicas: Vec<ReplicaEndpoint>,
 
     /// Which CRDT library backs the in-process replicas.
     ///
-    /// Only meaningful without `--replicas`: externally-managed replicas were
-    /// launched with their own `--crdt` and the orchestrator cannot change
-    /// them, so passing both is rejected rather than silently ignored. In the
-    /// containerized lanes the choice is made by the deploy generators — see
-    /// the `crdt` argument on `just bench-docker` / `just bench-k8s`.
+    /// Valid only without `--replicas`. An external replica chose its library
+    /// from its own `--crdt` at startup, and the orchestrator cannot change it,
+    /// so passing both flags is an error rather than a silent no-op. In the
+    /// container lanes the deploy generators make the choice; see the `crdt`
+    /// argument on `just bench-docker` and `just bench-k8s`.
     #[arg(long, value_parser = crdt_parser())]
     crdt: Option<Crdt>,
 
-    /// TOML scenario files to run. Omit to run the built-in regression scenarios.
+    /// TOML scenario files to run. Omit these to run the built-in scenarios.
     scenarios: Vec<PathBuf>,
 }
 
-/// clap parser for `--crdt`.
+/// Builds the clap parser for `--crdt`.
 ///
-/// `PossibleValuesParser` gives `--help` and the error message the accepted
-/// list, and `.map` turns the validated string back into a [`Crdt`] so the
-/// args struct stays typed. Both are derived from [`Crdt::ALL`], so a new
-/// backend cannot be accepted while going unmentioned in `--help`.
+/// `PossibleValuesParser` supplies the accepted list to `--help` and to the
+/// error message. `.map` turns the validated string back into a [`Crdt`], so
+/// the args struct stays typed. Both read [`Crdt::ALL`], so a new backend
+/// cannot be accepted without also appearing in `--help`.
 ///
-/// This lives in the binary rather than on `Crdt` itself: a `ValueEnum`
-/// derive would put a CLI concern in a library crate for its binaries'
-/// benefit. The cost is these few lines in each binary that takes the flag,
-/// which is the right side of that trade — each binary owns its own CLI.
+/// This lives in the binary because it is a CLI concern. Deriving `ValueEnum`
+/// on `Crdt` would push it into the library crate.
 fn crdt_parser() -> impl clap::builder::TypedValueParser<Value = Crdt> {
     use clap::builder::TypedValueParser as _;
     clap::builder::PossibleValuesParser::new(Crdt::ALL.map(|c| c.as_str())).map(|s| {
@@ -121,7 +125,7 @@ fn crdt_parser() -> impl clap::builder::TypedValueParser<Value = Crdt> {
     })
 }
 
-/// Parse a single `client_addr[=peer_addr]` entry from the `--replicas` flag.
+/// Parses one `client_addr[=peer_addr]` entry of the `--replicas` flag.
 fn parse_replica_endpoint(s: &str) -> Result<ReplicaEndpoint, String> {
     let (client, peer) = s.split_once('=').unwrap_or((s, s));
     let (client, peer) = (client.trim(), peer.trim());
@@ -134,15 +138,15 @@ fn parse_replica_endpoint(s: &str) -> Result<ReplicaEndpoint, String> {
     })
 }
 
-/// Output format for per-trial and summary records.
+/// How per-trial and summary records are written.
 ///
-/// Both formats interleave per-trial rows with the per-scenario summary row,
-/// distinguished by a `row_type` column/field (`trial` or `summary`).
+/// Both formats mix per-trial records with the per-scenario summary. A
+/// `row_type` column tells them apart, holding either `trial` or `summary`.
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
 enum OutputFormat {
-    /// CSV rows; header is emitted once before the first record.
+    /// CSV rows. The header is written once, before the first record.
     Csv,
-    /// JSON Lines (one self-describing object per line, no surrounding array).
+    /// JSON Lines: one object per line, with no enclosing array.
     Json,
 }
 
@@ -150,16 +154,15 @@ enum OutputFormat {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Tracing always goes to stderr so structured stdout output stays clean.
+    // Logs go to stderr, so the structured records on stdout stay clean.
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .with_writer(std::io::stderr)
         .init();
 
     let args = Args::parse();
-    // Reject rather than ignore: a sweep that silently ran Automerge because
-    // --crdt was overridden by the stack's own flag is exactly the kind of
-    // wrong-library result that reads as a real finding.
+    // Reject the combination rather than ignore one flag. A sweep that quietly
+    // ran the wrong library would still produce plausible-looking numbers.
     if !args.replicas.is_empty() && args.crdt.is_some() {
         bail!(
             "--crdt applies only to in-process replicas; with --replicas the \
@@ -195,8 +198,8 @@ async fn main() -> Result<()> {
                 paths: &args.scenarios,
                 trials: args.trials,
                 replicas: &args.replicas,
-                // Only the in-process lane's library is the orchestrator's to
-                // know; for an external stack the bench scripts fill this in.
+                // The orchestrator knows the library only for the in-process
+                // lane. For an external stack the bench scripts record it.
                 crdt: args.replicas.is_empty().then(|| in_process_crdt.as_str()),
             },
         )?;
@@ -220,8 +223,9 @@ async fn main() -> Result<()> {
         let op_count = scenario.op_count();
         let mut trial_ms: Vec<f64> = Vec::with_capacity(args.trials);
         let mut wiring_ms: Vec<f64> = Vec::with_capacity(args.trials);
-        // Captured from the first trial — topology_kind/edge_count/diameter
-        // are deterministic per scenario, so the summary row reuses them.
+        // Kept from the last trial. `topology_kind`, `edge_count`, and
+        // `diameter` are the same in every trial, so the summary row reuses
+        // them.
         let mut last_result: Option<RunResult> = None;
 
         for t in 1..=args.trials {
@@ -261,10 +265,10 @@ async fn main() -> Result<()> {
         );
     }
 
-    // Flush any pending metrics before exit. Shutting down the provider gives
-    // the OTLP exporter a chance to send its final batch (PeriodicReader's
-    // interval is longer than a typical scenario run); for the file exporter
-    // it triggers the final JSON snapshot.
+    // Flush pending metrics before exiting. Shutting the provider down lets the
+    // OTLP exporter send its last batch, which matters because the reader's
+    // interval is longer than most runs. For the file exporter it writes the
+    // final JSON snapshot.
     provider
         .shutdown()
         .map_err(|e| anyhow::anyhow!("metrics provider shutdown failed: {e:?}"))?;
@@ -276,11 +280,12 @@ async fn main() -> Result<()> {
 
 // ── Scenario helpers ─────────────────────────────────────────────────────────
 
-/// Run a single scenario once and return its result.
+/// Runs one scenario once and returns its result.
 ///
-/// `repetition` is the 1-based trial index; it seeds the divergence generator
-/// so each repetition of a text cell draws an independent op stream (the
-/// source of run-to-run CV), while map-put scenarios ignore it.
+/// `repetition` is the 1-based trial index. It feeds the divergence generator's
+/// seed, so each repetition of a text cell draws its own operation stream. That
+/// variation is what the run-to-run spread measures. `MapPut` scenarios ignore
+/// it.
 async fn run_scenario_once(
     scenario: &ScenarioFile,
     source: NodeSource,
@@ -303,17 +308,16 @@ async fn run_scenario_once(
 
 // ── Output emission ──────────────────────────────────────────────────────────
 
-/// The output schema, in column order — the single definition of it.
+/// The output schema, in column order. This is its only definition.
 ///
-/// Both row kinds carry every column; the ones a kind does not populate render
-/// as an empty CSV field and are omitted from the JSON object. [`emit`] asserts
-/// that each row it renders matches this list name-for-name and in order, so a
-/// column cannot be added to one row kind and forgotten in the other or in the
-/// header.
+/// Both row kinds carry every column. A column a row kind does not fill becomes
+/// an empty CSV field, and is left out of the JSON object entirely. [`emit`]
+/// checks each row against this list by name and position, so a column cannot
+/// be added to one row kind and forgotten in the other.
 ///
-/// Columns are append-only: `wiring_ms` and `mean_wiring_ms` are at the end
-/// rather than beside the timings they belong with, so the original twelve keep
-/// the positions any archived CSV in `data/` was written with.
+/// **Columns are append-only.** `wiring_ms` and `mean_wiring_ms` sit at the end
+/// rather than beside the other timings, so the original twelve keep the
+/// positions that the archived CSVs in `data/` were written with.
 const COLUMNS: &[&str] = &[
     "row_type",
     "scenario",
@@ -331,16 +335,16 @@ const COLUMNS: &[&str] = &[
     "mean_wiring_ms",
 ];
 
-/// One output row as `(column, value)` pairs in [`COLUMNS`] order. `None` marks
-/// a column that does not apply to this row kind.
+/// One output row: `(column, value)` pairs in [`COLUMNS`] order. `None` marks a
+/// column that does not apply to this row kind.
 type Row = Vec<(&'static str, Option<serde_json::Value>)>;
 
-/// The CSV header line.
+/// Returns the CSV header line.
 fn header() -> String {
     COLUMNS.join(",")
 }
 
-/// Build the per-trial row.
+/// Builds the row for one trial.
 fn trial_row(
     scenario: &str,
     trial: usize,
@@ -366,11 +370,12 @@ fn trial_row(
     ]
 }
 
-/// Build the per-scenario summary row.
+/// Builds the summary row for one scenario.
 ///
-/// `shape` supplies the structural fields (topology kind, edge count,
-/// diameter), which are deterministic per scenario and so identical in every
-/// trial. The `trial` column holds the trial *count* on this row kind.
+/// `shape` supplies the structural fields: topology kind, edge count, and
+/// diameter. They are the same in every trial, so any trial's result will do.
+///
+/// On this row kind the `trial` column holds the trial *count*, not an index.
 fn summary_row(
     scenario: &str,
     n_trials: usize,
@@ -398,7 +403,7 @@ fn summary_row(
     ]
 }
 
-/// Print `row` in the requested format.
+/// Prints `row` in the requested format.
 fn emit(fmt: OutputFormat, row: &Row) {
     debug_assert!(
         row.iter()
@@ -412,7 +417,7 @@ fn emit(fmt: OutputFormat, row: &Row) {
     }
 }
 
-/// Render a row as one CSV line.
+/// Renders a row as one CSV line.
 fn csv_line(row: &Row) -> String {
     row.iter()
         .map(|(_, value)| csv_cell(value.as_ref()))
@@ -420,9 +425,12 @@ fn csv_line(row: &Row) -> String {
         .join(",")
 }
 
-/// One CSV cell: absent values are empty, floats carry three decimal places
-/// (the historical precision of every millisecond column), strings are bare
-/// (no field in this schema can contain a comma), and integers print plainly.
+/// Renders one CSV cell.
+///
+/// An absent value is empty. A float gets three decimal places, which is the
+/// precision every millisecond column has always used. A string is written
+/// bare, because no field in this schema can contain a comma. An integer prints
+/// as itself.
 fn csv_cell(value: Option<&serde_json::Value>) -> String {
     match value {
         None => String::new(),
@@ -434,8 +442,8 @@ fn csv_cell(value: Option<&serde_json::Value>) -> String {
     }
 }
 
-/// Render a row as one self-describing JSON object; absent columns are omitted
-/// rather than emitted as `null`.
+/// Renders a row as one JSON object. An absent column is left out rather than
+/// written as `null`.
 fn json_line(row: &Row) -> String {
     let obj: serde_json::Map<String, serde_json::Value> = row
         .iter()
@@ -446,15 +454,14 @@ fn json_line(row: &Row) -> String {
 
 // ── Statistics ───────────────────────────────────────────────────────────────
 
-/// Aggregated convergence statistics for a scenario's trial set.
-/// All values are in milliseconds, matching the input to [`stats`].
+/// Convergence statistics across one scenario's trials, in milliseconds.
 struct TrialStats {
     mean: f64,
     p50: f64,
     p95: f64,
 }
 
-/// Compute mean, p50, and p95 over a non-empty slice of millisecond durations.
+/// Returns the mean, p50, and p95 of `values`, which must not be empty.
 fn stats(values: &[f64]) -> TrialStats {
     debug_assert!(!values.is_empty());
     let mut sorted = values.to_vec();
@@ -466,7 +473,7 @@ fn stats(values: &[f64]) -> TrialStats {
     }
 }
 
-/// Nearest-rank percentile on a pre-sorted slice.
+/// Returns the nearest-rank percentile `p` of an already-sorted slice.
 fn percentile(sorted: &[f64], p: f64) -> f64 {
     let idx = ((p / 100.0 * sorted.len() as f64).ceil() as usize)
         .saturating_sub(1)
@@ -476,14 +483,14 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 
 // ── Metrics setup ─────────────────────────────────────────────────────────────
 
-/// Build the metrics provider.
+/// Builds the metrics provider, choosing an exporter in this order:
 ///
-/// Exporter precedence:
-/// 1. `--metrics-file PATH` → [`FileMetricExporter`] (offline JSON snapshot).
-/// 2. `OTEL_EXPORTER_OTLP_ENDPOINT` (or the metrics-specific variant) set →
-///    OTLP gRPC exporter; endpoint is read from the env var by the builder.
-/// 3. Neither → no reader; instruments still record but nothing is exported,
-///    keeping `just smoke` and unit-test runs free of exporter noise.
+/// 1. `--metrics-file PATH` gives a [`FileMetricExporter`], which writes a JSON
+///    snapshot.
+/// 2. `OTEL_EXPORTER_OTLP_ENDPOINT`, or its metrics-specific variant, gives an
+///    OTLP gRPC exporter. The builder reads the endpoint from the variable.
+/// 3. Neither gives no reader at all. Instruments still record, but nothing is
+///    exported, which keeps `just smoke` and the tests quiet.
 fn init_metrics(
     metrics_file: Option<&std::path::Path>,
 ) -> Result<(SdkMeterProvider, Option<FileMetricExporter>)> {
@@ -513,11 +520,11 @@ fn init_metrics(
 
 // ── FileMetricExporter ────────────────────────────────────────────────────────
 
-/// A [`PushMetricExporter`] that serialises each export call to a JSON line in a file.
+/// A [`PushMetricExporter`] that writes each export as one JSON line to a file.
 ///
-/// The struct is cheaply `Clone`able; all clones share the same underlying file
-/// handle via an `Arc<Mutex<…>>` so that the instance given to `PeriodicReader`
-/// and the one kept by the caller both write to the same file.
+/// Cloning is cheap. Every clone shares one file handle through an
+/// `Arc<Mutex<_>>`, so the copy held by the reader and the copy held by the
+/// caller write to the same file.
 #[derive(Clone)]
 struct FileMetricExporter {
     sink: Arc<Mutex<std::fs::File>>,
@@ -564,7 +571,7 @@ impl PushMetricExporter for FileMetricExporter {
 
 // ── Metric serialisation ──────────────────────────────────────────────────────
 
-/// Serialise a [`ResourceMetrics`] snapshot to a compact JSON string.
+/// Serialises a [`ResourceMetrics`] snapshot to a compact JSON string.
 ///
 /// Output shape:
 /// ```json
@@ -630,13 +637,14 @@ fn serialize_metrics(rm: &ResourceMetrics) -> String {
         })
         .collect();
 
-    // serde_json::Value serialization is infallible (no non-string map keys).
+    // Serialising a serde_json::Value cannot fail here: every map key is a
+    // string.
     serde_json::to_string(&serde_json::json!({ "metrics": metrics_arr }))
         .expect("serde_json::Value serialization is infallible")
 }
 
-/// Build one JSON data-point object: attributes as top-level keys, plus
-/// whatever numeric fields `fill` inserts (e.g. `value`, or `count`/`sum`).
+/// Builds one JSON data point. Attributes become top-level keys, and `fill`
+/// adds the numeric fields, such as `value`, or `count` and `sum`.
 fn data_point<'a, F>(
     attrs: impl Iterator<Item = &'a opentelemetry::KeyValue>,
     fill: F,
@@ -649,7 +657,7 @@ where
     serde_json::Value::Object(obj)
 }
 
-/// Convert an attribute iterator to a `serde_json::Map` keyed by attribute name.
+/// Converts an attribute iterator to a `serde_json::Map` keyed by name.
 fn kv_to_map<'a>(
     attrs: impl Iterator<Item = &'a opentelemetry::KeyValue>,
 ) -> serde_json::Map<String, serde_json::Value> {
@@ -722,9 +730,8 @@ mod tests {
         }
     }
 
-    /// The header and both row kinds are generated from one column list, so
-    /// they cannot drift apart. This is the property that broke when the schema
-    /// lived in three hand-maintained format strings.
+    /// The header and both row kinds come from one column list, so they cannot
+    /// drift apart.
     #[test]
     fn header_and_both_row_kinds_share_one_column_list() {
         let trial = trial_row("s", 1, 3, 10, &sample_result());
@@ -762,9 +769,9 @@ mod tests {
         }
     }
 
-    /// Millisecond columns keep three decimal places, absent columns are empty
-    /// fields, and strings are unquoted — the CSV shape archived sweeps in
-    /// `data/` were written with.
+    /// Millisecond columns keep three decimal places, an absent column is an
+    /// empty field, and strings are unquoted. This is the CSV shape the
+    /// archived sweeps in `data/` were written with.
     #[test]
     fn csv_cells_preserve_the_historical_formatting() {
         let line = csv_line(&trial_row("full-mesh-n3", 2, 3, 10, &sample_result()));
@@ -777,8 +784,8 @@ mod tests {
         assert_eq!(cells[12], "1.500", "wiring_ms rounds to 3 places");
     }
 
-    /// JSON Lines rows stay self-describing: every populated column becomes a
-    /// key, and columns that do not apply are omitted rather than `null`.
+    /// A JSON Lines row describes itself: every filled column becomes a key,
+    /// and a column that does not apply is left out rather than set to `null`.
     #[test]
     fn json_rows_omit_inapplicable_columns() {
         let json: serde_json::Value =

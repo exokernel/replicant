@@ -1,18 +1,18 @@
-//! Run-provenance file written alongside a benchmark CSV.
+//! Writes the provenance file that accompanies a benchmark CSV.
 //!
-//! The CSV carries measurements and nothing else: reading one months later
-//! cannot tell you which commit produced it, on which host, in which build
-//! profile, or from which PRNG seeds. `results/` is gitignored, so there is no
-//! commit history to fall back on either. This module writes that context to a
-//! JSON file next to the CSV at the moment the run starts.
+//! A result CSV holds measurements and nothing else. Read one months later and
+//! it cannot say which commit produced it, on which host, in which build
+//! profile, or from which seeds. `results/` is gitignored, so there is no commit
+//! history to recover that from either. This module records it as JSON beside
+//! the CSV.
 //!
-//! Scope: the provenance file describes the run's *configuration*, not its outcome. It
-//! is written before the first trial, so a sweep that dies halfway still leaves
-//! a record of what was attempted — pair it with the CSV to see how far the run
+//! The file describes the run's *configuration*, not its outcome. It is written
+//! before the first trial, so a sweep that dies halfway still leaves a record of
+//! what it meant to run. Read it together with the CSV to see how far the run
 //! actually got.
 //!
-//! The pinned toolchain is not recorded separately: `rust-toolchain.toml` is
-//! tracked, so `git.commit` already determines it.
+//! The pinned toolchain is not recorded separately. `rust-toolchain.toml` is
+//! tracked, so the commit already determines it.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -25,37 +25,42 @@ use crate::partition_heal::{DIVERGENCE_SEED_BASE, seed_for};
 use crate::runner::ReplicaEndpoint;
 use crate::topology::{PartitionConfig, ScenarioBody, ScenarioFile, Workload};
 
-/// Bumped whenever the emitted shape changes incompatibly, so downstream
-/// analysis can branch instead of silently misreading an older file.
-/// Bumped to 2 (2026-08-21) when `run.crdt` was added. Additive, so a reader
-/// that ignores unknown fields handles both; the bump exists so a reader that
-/// *requires* the library name can tell whether its absence means "Automerge,
-/// before we recorded it" or "genuinely unknown".
+/// Version of the emitted JSON shape. Raise it whenever the shape changes in a
+/// way an existing reader would misread.
+///
+/// Version 2 added `run.crdt`. The change is additive, so a reader that ignores
+/// unknown fields handles both versions. The bump lets a reader that *needs* the
+/// library name tell a missing field apart from an unknown one: below version 2
+/// its absence means Automerge.
 const SCHEMA_VERSION: u32 = 2;
 
-/// Everything about a run that the result CSV does not record.
+/// The parts of a run that the result CSV does not record.
 pub struct RunMeta<'a> {
     /// Scenarios in execution order.
     pub scenarios: &'a [ScenarioFile],
     /// Source paths, positionally matching `scenarios`. Empty when the
     /// built-in regression scenarios are running (they have no files).
     pub paths: &'a [PathBuf],
-    /// Trials per scenario — also the number of PRNG repetitions per cell.
+    /// Trials per scenario. This is also the number of PRNG repetitions per
+    /// cell.
     pub trials: usize,
-    /// External replicas dialled, or empty for the in-process lane. Which lane
-    /// a run used is load-bearing here: in-process convergence timings on
-    /// Linux are polluted by TCP delayed-ACK stalls, so only the external
-    /// (docker/k8s) lane is trustworthy for convergence analysis.
+    /// The external replicas dialled, or empty for the in-process lane.
+    ///
+    /// Record which lane ran. On Linux, in-process convergence timings are
+    /// distorted by TCP delayed-ACK stalls, so only the external lane can be
+    /// used for convergence analysis.
     pub replicas: &'a [ReplicaEndpoint],
-    /// CRDT library backing the replicas, when the orchestrator chose it —
-    /// i.e. the in-process lane. `None` for an external run, where the choice
-    /// was made by whoever launched the stack; the bench scripts fill the
-    /// same field in afterwards, so `run.crdt` is the one place to read it
-    /// from regardless of lane.
+    /// The CRDT library, when the orchestrator picked it. That means the
+    /// in-process lane.
+    ///
+    /// `None` for an external run, where whoever launched the stack chose. The
+    /// bench scripts then fill the same field in, so `run.crdt` is the single
+    /// place to read the library from in either lane.
     pub crdt: Option<&'a str>,
 }
 
-/// Write the provenance file for `meta` to `path`, creating parent directories.
+/// Writes the provenance file for `meta` to `path`, creating parent
+/// directories as needed.
 pub fn write(path: &Path, meta: &RunMeta<'_>) -> Result<()> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)
@@ -67,7 +72,7 @@ pub fn write(path: &Path, meta: &RunMeta<'_>) -> Result<()> {
         .with_context(|| format!("writing provenance file {}", path.display()))
 }
 
-/// Build the provenance document.
+/// Builds the provenance document.
 fn document(meta: &RunMeta<'_>) -> Value {
     let scenarios: Vec<Value> = meta
         .scenarios
@@ -82,8 +87,8 @@ fn document(meta: &RunMeta<'_>) -> Value {
         "git": git_provenance(),
         "host": host_provenance(),
         "build": {
-            // The orchestrator is always run through `cargo run`, so the
-            // binary matches the working tree `git` reported above.
+            // The orchestrator always runs through `cargo run`, so the binary
+            // matches the working tree that `git` reported above.
             "profile": if cfg!(debug_assertions) { "debug" } else { "release" },
             "orchestrator_version": env!("CARGO_PKG_VERSION"),
             "os": std::env::consts::OS,
@@ -101,8 +106,8 @@ fn document(meta: &RunMeta<'_>) -> Value {
     })
 }
 
-/// One scenario's parameters, plus its seeds when the divergence generator
-/// drives it.
+/// Builds one scenario's entry: its parameters, and its seeds when the
+/// divergence generator drives it.
 fn scenario_entry(scenario: &ScenarioFile, path: Option<&PathBuf>, trials: usize) -> Value {
     let mut entry = json!({
         "name": scenario.name,
@@ -177,12 +182,14 @@ fn scenario_entry(scenario: &ScenarioFile, path: Option<&PathBuf>, trials: usize
     entry
 }
 
-/// Summarise the cell's achieved anchor contention across its repetitions.
+/// Summarises the cell's achieved anchor contention over its repetitions.
 ///
-/// The `Locality` axis *claims* a contention ordering; this records what the
-/// generated op stream actually produces, so a cell's measured merge time can
-/// be read against real contention rather than intended contention. `None` when
-/// the metric is undefined for the cell (see [`crate::contention`]).
+/// The `Locality` axis claims an ordering of contention. This records what the
+/// generated stream actually produces, so a cell's merge time can be read
+/// against real contention rather than intended contention.
+///
+/// `None` when the metric does not apply to the cell. See
+/// [`crate::contention`].
 fn achieved_contention(config: &PartitionConfig, trials: usize) -> Option<Value> {
     let per_rep: Vec<AchievedContention> = (1..=trials)
         .filter_map(|rep| contention::simulate(config, rep))
@@ -191,8 +198,9 @@ fn achieved_contention(config: &PartitionConfig, trials: usize) -> Option<Value>
 
     let siblings: Vec<usize> = per_rep.iter().map(|c| c.max_concurrent_siblings).collect();
     let total: usize = siblings.iter().sum();
-    // Repetitions differ only through the PRNG, so a varying contested-anchor
-    // count would mean the metric is not a stable property of the cell.
+    // Repetitions differ only in their PRNG stream. A contested-anchor count
+    // that varied between them would mean the metric is not a property of the
+    // cell.
     debug_assert!(
         rest.iter()
             .all(|c| c.contested_anchors == first.contested_anchors),
@@ -200,8 +208,8 @@ fn achieved_contention(config: &PartitionConfig, trials: usize) -> Option<Value>
     );
 
     Some(json!({
-        // Names the simulation so a future adapter (Yrs/YATA, Loro/Fugue) can
-        // say whether this anchor model still applies to it.
+        // Name the model, so a later adapter can state whether this anchor
+        // model still describes it.
         "model": "rga_anchor_simulation",
         "contested_anchors": first.contested_anchors,
         "max_concurrent_siblings": {
@@ -213,33 +221,37 @@ fn achieved_contention(config: &PartitionConfig, trials: usize) -> Option<Value>
     }))
 }
 
-/// Milliseconds since the Unix epoch; 0 if the clock predates it.
+/// Returns milliseconds since the Unix epoch, or 0 if the clock reads earlier
+/// than that.
 fn unix_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64)
 }
 
-/// Commit and dirty-flag for the working tree, best-effort.
+/// Returns the commit and a dirty flag for the working tree.
 ///
-/// Shells out to `git` rather than `jj` because the repo is jj-colocated (so
-/// `git` sees the same history) and `git` is the one that is present on any
-/// measurement host. Both fields are `null` if the command is unavailable or
-/// the run happens outside a repository — a provenance file without git identity is
-/// still worth more than none.
+/// Calls `git` rather than `jj`. The repository is jj-colocated, so `git` sees
+/// the same history, and `git` is the one present on every measurement host.
+///
+/// Both fields are `null` if `git` is missing or the run happens outside a
+/// repository. A provenance file with no git identity is still better than
+/// none, so this never fails the run.
 fn git_provenance() -> Value {
     let commit = capture(&["rev-parse", "HEAD"]);
-    // `--porcelain` prints one line per modified path; empty output == clean.
+    // `--porcelain` prints one line per modified path, so empty output means a
+    // clean tree.
     let dirty = capture(&["status", "--porcelain"]).map(|s| !s.is_empty());
     json!({
         "commit": commit,
-        // True when the tree had uncommitted changes — the run is then not
+        // True when the tree held uncommitted changes. The run is then not
         // reproducible from `commit` alone.
         "dirty": dirty,
     })
 }
 
-/// Run `git` with `args` and return trimmed stdout, or `None` on any failure.
+/// Runs `git` with `args` and returns its trimmed stdout, or `None` if the
+/// command fails for any reason.
 fn capture(args: &[&str]) -> Option<String> {
     let out = Command::new("git").args(args).output().ok()?;
     out.status
@@ -247,10 +259,11 @@ fn capture(args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
 }
 
-/// Hostname and CPU count — the "which machine" half of a timing result.
+/// Returns the hostname and CPU count, which identify the machine a timing was
+/// taken on.
 fn host_provenance() -> Value {
-    // /proc is authoritative on Linux (the measurement host); HOSTNAME is a
-    // best-effort fallback and is not exported by every shell.
+    // On Linux, the measurement host, /proc is authoritative. HOSTNAME is a
+    // fallback and not every shell exports it.
     let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname")
         .map(|s| s.trim().to_owned())
         .ok()
@@ -309,8 +322,8 @@ mod tests {
         assert_eq!(cell["params"]["groups"], json!([[0], [1]]));
     }
 
-    /// The sweep's reproducibility claim: every (repetition, node) seed that
-    /// the runner will use is written down.
+    /// Every `(repetition, node)` seed the runner will use must appear in the
+    /// file. That is what makes the sweep reproducible.
     #[test]
     fn records_one_seed_per_node_per_repetition() {
         let scenarios = [text_cell(100, Locality::Append)];
@@ -323,8 +336,8 @@ mod tests {
         assert_eq!(seeds["base"], format!("{DIVERGENCE_SEED_BASE:#018x}"));
     }
 
-    /// A recorded seed must be the one the runner actually seeds with —
-    /// otherwise the provenance file documents a replay that does not reproduce.
+    /// A recorded seed must equal the one the runner uses. If it does not, the
+    /// file documents a replay that would not reproduce the run.
     #[test]
     fn recorded_seed_matches_runner_seed_fn() {
         let scenarios = [text_cell(100, Locality::RandomPosition)];
@@ -337,8 +350,8 @@ mod tests {
         assert_eq!(recorded["seed"], format!("{:#018x}", seed_for(cfg, 0, 2)));
     }
 
-    /// Map-put scenarios do not consume the PRNG, so claiming seeds for them
-    /// would be noise.
+    /// A map-put scenario never draws from the PRNG, so recording seeds for one
+    /// would be misleading.
     #[test]
     fn omits_seeds_for_map_put_scenarios() {
         let scenarios = crate::topology::builtin_scenarios();
@@ -377,8 +390,8 @@ mod tests {
         );
     }
 
-    /// The in-process lane knows its own library and records it, so a
-    /// `--dry-run` provenance file is already complete for that lane.
+    /// The in-process lane knows its own library and records it, so its
+    /// `--dry-run` provenance file needs nothing added later.
     #[test]
     fn in_process_run_records_its_crdt() {
         let scenarios = vec![text_cell(4, Locality::Append)];
