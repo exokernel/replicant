@@ -15,7 +15,7 @@
 
 [![CI](https://github.com/exokernel/replicant/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/exokernel/replicant/actions/workflows/ci.yml)
 
-A CRDT benchmarking framework built on gRPC, with pluggable CRDT backends. Replicant spins up replica nodes, drives sync workloads between them, and collects latency/throughput metrics via OpenTelemetry.
+A CRDT benchmarking framework with pluggable CRDT backends, that uses gRPC for communication. Replicant spins up replica nodes, drives sync workloads between them, and collects latency and throughput metrics via OpenTelemetry.
 
 Three CRDT libraries are supported behind one `CrdtAdapter` trait, selected per deployment with `--crdt`:
 
@@ -25,10 +25,10 @@ Three CRDT libraries are supported behind one `CrdtAdapter` trait, selected per 
 | `yrs` | [Yrs](https://github.com/y-crdt/y-crdt) (Rust port of [Yjs](https://yjs.dev/)) | YATA |
 | `loro` | [Loro](https://loro.dev/) | Fugue-descended |
 
-The same scenario file runs against all three — the library is a deployment parameter, not a scenario field — so a comparison holds the workload fixed. The orchestrator takes the same `--crdt` flag for its own in-process replicas; passing it alongside `--replicas` is an error rather than a silent no-op, since the library of an externally-managed stack is fixed by how it was launched. Every adapter is validated by a shared, generic conformance suite (`crates/replica/src/adapter/conformance.rs`); see [Adding a CRDT backend](#adding-a-crdt-backend).
+The idea is to compare the peformance of different CRDT libraries against the same parametrized synthetic workloads. The same scenario file runs against all three libraries, so a comparison holds the workload fixed. Each CRDT backend implements a generic protobuf interface. Each concrete implementation is called an `adapter`. Every adapter is validated by a shared, generic conformance suite (`crates/replica/src/adapter/conformance.rs`); see [Adding a CRDT backend](#adding-a-crdt-backend).
 
 > [!IMPORTANT]
-> **Work in progress.** Replicant is an early-stage research framework. Any specific numbers or patterns surfaced by the notebooks are descriptions of what one or two sweeps produced on a single host — not claims about CRDT performance in general. Treat figures as illustrative; see [TODO.md](TODO.md) for the framework gaps (statistical rigor, memory instrumentation, multi-host) that need to land before any of it would be defensible as more than that. Cross-library comparisons carry an extra caveat: only Automerge ships a stateful peer sync protocol, so for Yrs and Loro the per-peer sync bookkeeping is supplied by Replicant itself — see [Adding a CRDT backend](#adding-a-crdt-backend).
+> **Work in progress.** Replicant is an early-stage research framework.
 
 ## Crates
 
@@ -49,13 +49,13 @@ just ci       # full gate: fmt check → lint → test → smoke → scenario-gr
 just docs     # build and open rustdoc
 ```
 
-## Containerized run
+## Containerized runs
 
-The orchestrator can drive a stack of containerized replicas wired to a real OTel collector and Prometheus. Two runtimes are supported: docker compose (single host) and a local kind cluster (k8s, single host). Both run the same replica image; only the recipe and wiring differ.
+The orchestrator can drive a sequence of workload scenarios against a set of containerized replicas. Each replicas is wired to a real OTel collector and Prometheus so that results can be captured and observed. Two runtime stacks are supported: docker compose (single host) and a local Kind cluster (k8s, single host). Both run the same replica image; only the recipe and wiring differ.
 
-`--replicas` accepts comma-separated `client_addr[=peer_addr]` entries — the first is what the orchestrator dials, the second (defaults to the first when omitted) is what each replica passes to its peers in `ConnectPeer`. The two diverge whenever replicas live in a different network namespace from the orchestrator.
+The `--replicas` flag accepts comma-separated `client_addr[=peer_addr]` entries — the first is what the orchestrator dials, the second (defaults to the first when omitted) is what each replica uses to connect to its peers via the `ConnectPeer` call. The two diverge whenever replicas live in a different network namespace from the orchestrator.
 
-Replica state is cleared between trials and between scenarios via a `Replica.Reset` RPC, so a single orchestrator invocation against an externally-managed stack can sweep multiple scenarios with `--trials N` — no need to bounce containers/pods between runs. The `just bench-docker` and `just bench-k8s` recipes wrap this: one stack per distinct `node_count` bucket, Reset between trials within a bucket, output to `results/results-{docker,k8s}.csv` for the analysis notebooks plus a `results-{docker,k8s}.meta.json` provenance file (see [Run provenance](#run-provenance)).
+Replica state is cleared between trials and between scenarios via a `Replica.Reset` RPC, so a single orchestrator invocation against an externally-managed stack can sweep multiple scenarios with N trials per scenario (via the `--trials N` flag) — no need to bounce containers/pods between runs.
 
 ### docker compose
 
@@ -408,10 +408,7 @@ offline and then merging: partition-heal with singleton groups, so
 hand-written — `just gen-scenarios` writes them and `just check-scenarios`
 (part of `just ci`) fails if a file drifts from its generator.
 
-Two correctness mechanisms back text workloads, both born of a real bug
-(replicas that diverge from an empty document each lazily created a *private*
-text object; the heal then resolved a map-key conflict and silently discarded
-one side's entire text — while fingerprints converged):
+Two correctness mechanisms back text workloads:
 
 - **Shared-object bootstrap** (`Replica.EnsureText`): before any edges are
   wired, every replica authors a bit-identical bootstrap change (fixed actor,
@@ -433,12 +430,13 @@ running trials. The `bench-docker` / `bench-k8s` recipes write it
 automatically as `results/results-{docker,k8s}.meta.json`.
 
 `run.crdt` names the CRDT library, and is the one field to read regardless of
-lane. The in-process lane fills it in itself from `--crdt`; for an external
-stack the orchestrator cannot know which library it is talking to (the
-replicas were launched long before it connected), so it writes `null` and the
-bench scripts patch it afterwards. Schema version 2 added the field. Sweeps worth
-citing are archived with their provenance files under the tracked [`data/`](data/)
-directory (e.g. [`data/divergence-pilot-2026-08-06/`](data/divergence-pilot-2026-08-06/));
+lane (i.e. in-process, docker, k8s). The in-process lane fills it in itself from
+`--crdt`; for an external stack the orchestrator cannot know which library it is
+talking to (the replicas were launched long before it connected), so it writes
+`null` and the bench scripts patch it afterwards. Sweeps worth citing are
+archived with their provenance files under the tracked [`data/`](data/)
+directory (e.g.
+[`data/divergence-pilot-2026-08-06/`](data/divergence-pilot-2026-08-06/));
 `results/` remains gitignored scratch.
 
 ## Adding a CRDT backend
@@ -448,7 +446,7 @@ one module under `crates/replica/src/adapter/`, and one arm in the replica
 binary's `--crdt` match. The scaffolding is already generic over the trait, so
 nothing else needs touching.
 
-**An adapter is done when the conformance suite says so.**
+**An adapter is done when the conformance suite passes.**
 `crates/replica/src/adapter/conformance.rs` holds functions generic over
 `A: CrdtAdapter + Default`; each adapter module wraps the ones it claims with a
 `#[test]`. The suite distinguishes two kinds:
@@ -464,8 +462,8 @@ are added. Rule of thumb: a function is universal until an adapter demonstrates
 otherwise, and when a *second* adapter needs the identical mirror test, the
 mirror was the universal form all along.
 
-Two things the existing adapters learned the hard way, both worth checking
-early in a new one:
+It's worth mentioning a couple of things that the author learned the while
+implementing the existing adapters, worth checking early in a new one:
 
 - **Whether the library's native "version" is a valid convergence
   fingerprint.** It is for Automerge (change-hash heads) and Loro (causal

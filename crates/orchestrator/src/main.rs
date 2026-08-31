@@ -45,8 +45,11 @@ struct Args {
     output: OutputFormat,
 
     /// Write OTel metrics as JSON to this file once all scenarios finish. Covers
-    /// sync message counts, operation latencies, and document sizes. Metrics are
-    /// discarded if this is omitted.
+    /// sync message counts, operation latencies, and document sizes.
+    ///
+    /// This takes precedence over OTLP export. Without it, the orchestrator
+    /// exports over OTLP when `OTEL_EXPORTER_OTLP_ENDPOINT` is set, and drops
+    /// its metrics when it is not. See [`init_metrics`].
     #[arg(long)]
     metrics_file: Option<PathBuf>,
 
