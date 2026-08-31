@@ -183,7 +183,7 @@ Each CSV is cached alongside it as `<stem>.parquet` and refreshed when the CSV i
 
 ## Requirements
 
-- Rust (toolchain pinned via `rust-toolchain.toml` to 1.97.0; rustup auto-installs)
+- Rust (toolchain pinned via `rust-toolchain.toml` to 1.98.0; rustup auto-installs)
 - [`just`](https://github.com/casey/just)
 - `protoc` (Protocol Buffers compiler)
 - Docker + Compose v2 (optional, for `smoke-docker`)
