@@ -191,6 +191,10 @@ Each CSV is cached alongside it as `<stem>.parquet` and refreshed when the CSV i
 
 ## Scenarios
 
+The offline-divergence sweep — what it measures, its grid and cells, its
+validity gates, and a glossary of the terms the orchestrator code uses — is
+documented in [`docs/divergence-sweep.md`](docs/divergence-sweep.md).
+
 ### Orchestration flow
 
 By default the orchestrator runs all replicas as in-process Tokio tasks (no

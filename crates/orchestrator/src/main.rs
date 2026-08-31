@@ -22,6 +22,7 @@ use opentelemetry_sdk::metrics::exporter::PushMetricExporter;
 use opentelemetry_sdk::metrics::{SdkMeterProvider, Temporality};
 
 mod contention;
+mod partition_heal;
 mod provenance;
 mod runner;
 mod topology;
@@ -289,7 +290,7 @@ async fn run_scenario_once(
     let result = match &scenario.body {
         ScenarioBody::Topology(config) => runner::run(config, source).await?,
         ScenarioBody::PartitionHeal(config) => {
-            runner::run_partition_heal(config, source, repetition).await?
+            partition_heal::run_partition_heal(config, source, repetition).await?
         }
     };
     tracing::info!(

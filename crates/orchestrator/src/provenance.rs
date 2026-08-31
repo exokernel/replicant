@@ -21,7 +21,8 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
 use crate::contention::{self, AchievedContention};
-use crate::runner::{DIVERGENCE_SEED_BASE, ReplicaEndpoint, seed_for};
+use crate::partition_heal::{DIVERGENCE_SEED_BASE, seed_for};
+use crate::runner::ReplicaEndpoint;
 use crate::topology::{PartitionConfig, ScenarioBody, ScenarioFile, Workload};
 
 /// Bumped whenever the emitted shape changes incompatibly, so downstream

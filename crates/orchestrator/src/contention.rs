@@ -1,68 +1,76 @@
-//! Achieved-contention metric for the divergence sweep.
+//! Measures the anchor contention that a cell's workload actually produces.
 //!
-//! The [`Locality`](crate::topology::Locality) axis is *intended* to sweep
-//! anchor contention: `Append` contests one anchor, `SameRegion` is supposed to
-//! pile every op onto a single shared anchor, `RandomPosition` sits between.
-//! That is a claim about the generated op stream, and nothing checked it — so
-//! this module measures what the stream actually achieves.
+//! The [`Locality`](crate::topology::Locality) axis is meant to control anchor
+//! contention. `Append` should contest one anchor. `SameRegion` should put
+//! every operation on one shared anchor. `RandomPosition` should sit between
+//! them. Those are claims about the generated operation stream, so this module
+//! checks them.
+//!
+//! No CRDT runs here. This module replays the same seeded position draws that
+//! the runner uses (see [`seed_for`]) and counts the outcome. The numbers
+//! describe the workload of one cell and repetition. They say nothing about any
+//! library's behaviour.
+//!
+//! `docs/divergence-sweep.md` defines anchor, contested anchor, and concurrent
+//! sibling.
 //!
 //! # Model
 //!
-//! Sequence CRDTs anchor each insert to an existing element identity. An insert
-//! at position `p` anchors to the identity at `p - 1`, or to a HEAD sentinel
-//! when `p == 0`. Two ops are *concurrent siblings* when they anchor to the same
-//! identity but were issued by replicas that had not synced — that is the
-//! interleaving work a merge has to resolve, and the quantity the `Locality`
-//! docs make claims about.
+//! A sequence CRDT attaches each insert to the identity of an existing element.
+//! An insert at position `p` attaches to the identity at `p - 1`. An insert at
+//! position 0 attaches to a HEAD sentinel. Two operations are *concurrent
+//! siblings* when they attach to the same identity and were issued by replicas
+//! that had not synced. Ordering those siblings is the merge work the sweep
+//! measures.
 //!
-//! This replays the same seeded position draws the runner uses (via
-//! [`seed_for`]), so the numbers describe the exact op stream a given cell and
-//! repetition will produce. It is a property of the workload, not a measurement
-//! of any CRDT implementation.
+//! # Why counting `pos == 0` is enough
 //!
-//! # Why counting `pos == 0` is sufficient
+//! Both replicas of a singleton-group partition start from an empty document
+//! and never sync during the divergence phase. Every element identity is
+//! therefore created by one replica and visible only to that replica. No
+//! identity from replica A can ever be an anchor for replica B. HEAD is the
+//! only identity the two replicas share, so HEAD is the only anchor that can be
+//! contested. Counting the operations drawn at `pos == 0` is the whole
+//! simulation.
 //!
-//! Both replicas of a singleton-group partition start from an empty document and
-//! never sync during the divergence phase. So every element identity is created
-//! by, and visible only to, the replica that made it: no identity from replica A
-//! can ever be an anchor for replica B. HEAD is the only identity they share,
-//! and therefore the only anchor that can possibly be contested — which reduces
-//! the whole simulation to counting ops drawn at `pos == 0`.
-//!
-//! That is a load-bearing argument, so it is not merely asserted:
-//! [`simulate_general`] materialises the sequences and finds contested anchors
-//! the slow way, and the tests assert the two agree.
+//! That argument is load-bearing, so it is tested rather than asserted.
+//! `simulate_general` builds the sequences and finds contested anchors
+//! without the shortcut, and a test requires the two to agree.
 //!
 //! # Scope
 //!
-//! All-singleton groups only (the divergence-n2 family). With multi-node groups
-//! the replicas inside a group sync during the partition, so identities do cross
-//! replicas and a faithful simulation would need the real sync schedule — the
-//! same limitation `run_partition_heal` documents for its own length counter.
-//! [`simulate`] returns `None` rather than guess.
+//! All-singleton groups only, which is the divergence-n2 family. In a
+//! multi-node group the replicas sync with each other during the partition, so
+//! identities do cross replicas, and a correct simulation would need the real
+//! sync schedule. [`simulate`] returns `None` instead of guessing. The length
+//! counter in `run_partition_heal` has the same limit.
 
-use crate::runner::seed_for;
+use crate::partition_heal::seed_for;
 use crate::topology::{PartitionConfig, SplitMix64, Workload};
 
-/// What a cell's op stream actually achieves, as opposed to intends.
+/// The contention one cell's operation stream actually produces.
+///
+/// Compare these numbers against what the cell's
+/// [`Locality`](crate::topology::Locality) setting intends.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AchievedContention {
-    /// Anchors receiving children from more than one replica. Everything else
-    /// merges without interleaving.
+    /// Number of anchors that received inserts from more than one replica.
+    /// Every other anchor merges without interleaving.
     pub contested_anchors: usize,
-    /// Children at the most-contested anchor, summed across replicas. `0` when
-    /// no anchor is contested. This is the headline number the `Locality`
-    /// variants make competing claims about.
+    /// Inserts at the most contested anchor, added up across replicas. `0` when
+    /// no anchor is contested. This is the main number the `Locality` variants
+    /// disagree about.
     pub max_concurrent_siblings: usize,
-    /// Ops anchored at HEAD per replica, in group order — the per-side
-    /// breakdown behind `max_concurrent_siblings`.
+    /// Operations anchored at HEAD, one entry per replica, in group order. This
+    /// is the per-replica breakdown of `max_concurrent_siblings`.
     pub head_children: Vec<usize>,
 }
 
-/// Simulate achieved contention for one repetition of `config`.
+/// Returns the contention one repetition of `config` will produce.
 ///
-/// `None` when the metric is not defined for the cell: non-text workloads (no
-/// anchors) or non-singleton groups (see the module docs on scope).
+/// Returns `None` when the metric has no meaning for the cell. That happens for
+/// non-text workloads, which have no anchors, and for non-singleton groups. See
+/// the Scope section of the module documentation.
 pub fn simulate(config: &PartitionConfig, repetition: usize) -> Option<AchievedContention> {
     if config.workload != Workload::TextSplice || !all_singleton(config) {
         return None;
@@ -85,7 +93,7 @@ pub fn simulate(config: &PartitionConfig, repetition: usize) -> Option<AchievedC
     Some(summarise(&head_children))
 }
 
-/// Roll per-replica HEAD-child counts into the reported summary.
+/// Turns per-replica HEAD-child counts into the reported summary.
 fn summarise(head_children: &[usize]) -> AchievedContention {
     let contributors = head_children.iter().filter(|&&c| c > 0).count();
     let contested = contributors >= 2;
@@ -105,11 +113,12 @@ fn all_singleton(config: &PartitionConfig) -> bool {
     !config.groups.is_empty() && config.groups.iter().all(|g| g.nodes.len() == 1)
 }
 
-/// Reference implementation: materialise each replica's sequence and find
+/// Reference implementation. Builds each replica's sequence and finds the
 /// contested anchors directly, without the HEAD-only shortcut.
 ///
-/// `O(ops^2)` for random positions because it inserts into a `Vec`, so this is
-/// for tests and small cells only — its job is to keep [`simulate`] honest.
+/// This exists to keep [`simulate`] honest. It costs `O(ops^2)` for random
+/// positions, because it inserts into a `Vec`, so use it only in tests and only
+/// on small cells.
 #[cfg(test)]
 fn simulate_general(config: &PartitionConfig, repetition: usize) -> Option<AchievedContention> {
     if config.workload != Workload::TextSplice || !all_singleton(config) {

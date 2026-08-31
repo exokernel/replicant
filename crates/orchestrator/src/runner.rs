@@ -1,4 +1,15 @@
-use std::collections::{HashMap, HashSet};
+//! Spawns replicas, wires them into a topology, drives writes, and waits for
+//! convergence.
+//!
+//! Two scenario shapes use this machinery. [`run`] runs a steady-state topology
+//! scenario. [`crate::partition_heal`] runs the divergence sweep and builds on
+//! the helpers defined here.
+//!
+//! A replica is either an in-process Tokio task or an externally managed
+//! process reached over gRPC. [`NodeSource`] selects between them, and the rest
+//! of the module is written against the gRPC client either way.
+
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -17,10 +28,7 @@ use common::proto::{
 use replica::adapter::Crdt;
 use replica::server::{ReplicaService, ReplicaState, SyncService};
 
-use crate::topology::{
-    Connections, Group, HealTopology, PartitionConfig, RunResult, SplitMix64, TopologyConfig,
-    Workload, WritePattern,
-};
+use crate::topology::{Group, RunResult, TopologyConfig, Workload, WritePattern};
 
 // ── Replica endpoints ──────────────────────────────────────────────────────
 
@@ -148,7 +156,7 @@ async fn connect_external(endpoints: &[ReplicaEndpoint]) -> Result<Vec<ReplicaCl
 /// validates that the endpoint count matches `n` and connects to each. The
 /// returned `JoinSet` is non-empty only for the in-process case — `External`
 /// runs leave it empty, so subsequent `check_tasks` calls degrade to no-ops.
-async fn acquire_nodes(
+pub(crate) async fn acquire_nodes(
     source: NodeSource,
     n: usize,
     tasks: &mut JoinSet<()>,
@@ -174,7 +182,7 @@ async fn acquire_nodes(
 /// latency rather than `n × round-trip`. For in-process replicas this is
 /// effectively a no-op; for external (docker/k8s) replicas it replaces what
 /// used to require a full container bounce between trials.
-async fn reset_all(clients: &[ReplicaClient<Channel>]) -> Result<()> {
+pub(crate) async fn reset_all(clients: &[ReplicaClient<Channel>]) -> Result<()> {
     let mut set: JoinSet<Result<()>> = JoinSet::new();
     for client in clients {
         let mut c = client.clone();
@@ -199,9 +207,9 @@ async fn reset_all(clients: &[ReplicaClient<Channel>]) -> Result<()> {
 ///
 /// Edges are wired concurrently, so the wall time is one connection setup
 /// rather than `edges.len()` of them. Every caller now wires outside a timed
-/// window — [`run_partition_heal`] pre-wires its whole post-heal graph — so
+/// window — [`crate::partition_heal::run_partition_heal`] pre-wires its whole post-heal graph — so
 /// this is about keeping setup cheap, not about measurement validity.
-async fn connect_edges(
+pub(crate) async fn connect_edges(
     clients: &[ReplicaClient<Channel>],
     endpoints: &[ReplicaEndpoint],
     edges: &[(usize, usize)],
@@ -238,7 +246,7 @@ async fn connect_edges(
 /// Issued concurrently — for the unblock this is inside the measured heal
 /// window, and serial RPCs would reintroduce exactly the edge-count-scaled
 /// cost this design removes.
-async fn set_links_blocked(
+pub(crate) async fn set_links_blocked(
     clients: &[ReplicaClient<Channel>],
     edges: &[(usize, usize)],
     blocked: bool,
@@ -273,7 +281,7 @@ async fn set_links_blocked(
 /// of each pair. Concurrent for the same reason as [`set_links_blocked`].
 ///
 /// Must run only after every endpoint is unblocked.
-async fn kick_sync_edges(
+pub(crate) async fn kick_sync_edges(
     clients: &[ReplicaClient<Channel>],
     edges: &[(usize, usize)],
 ) -> Result<()> {
@@ -312,7 +320,7 @@ async fn kick_sync_edges(
 ///
 /// Groups that wrote no ops are skipped — they are legitimately empty and
 /// would match each other.
-async fn verify_groups_diverged(
+pub(crate) async fn verify_groups_diverged(
     clients: &mut [ReplicaClient<Channel>],
     groups: &[Group],
 ) -> Result<()> {
@@ -340,7 +348,11 @@ async fn verify_groups_diverged(
 }
 
 /// Apply a single `MapPut` on the root map.
-async fn map_put(client: &mut ReplicaClient<Channel>, key: &str, val: &str) -> Result<()> {
+pub(crate) async fn map_put(
+    client: &mut ReplicaClient<Channel>,
+    key: &str,
+    val: &str,
+) -> Result<()> {
     client
         .apply_op(Request::new(OpRequest {
             op: Some(op_request::Op::MapPut(MapPut {
@@ -361,7 +373,7 @@ async fn map_put(client: &mut ReplicaClient<Channel>, key: &str, val: &str) -> R
 /// replica's current text length, so it stays valid under any write pattern
 /// without the orchestrator tracking per-node document length. Phase 1's
 /// generator replaces this fixed anchor with the swept locality rule.
-async fn text_splice(
+pub(crate) async fn text_splice(
     client: &mut ReplicaClient<Channel>,
     obj: &str,
     pos: usize,
@@ -381,7 +393,7 @@ async fn text_splice(
 }
 
 /// Name of the shared text object every `TextSplice` workload writes to.
-const TEXT_OBJ: &str = "text";
+pub(crate) const TEXT_OBJ: &str = "text";
 
 /// Bootstrap the shared text object on every node in `indices`.
 ///
@@ -390,7 +402,7 @@ const TEXT_OBJ: &str = "text";
 /// with no sync required. Must run after `reset_all` and **before any edges
 /// are wired**: once sync is flowing, a peer's ops could land first and the
 /// replica-side determinism guard would reject the bootstrap.
-async fn ensure_text_all(
+pub(crate) async fn ensure_text_all(
     clients: &mut [ReplicaClient<Channel>],
     indices: impl Iterator<Item = usize>,
 ) -> Result<()> {
@@ -413,7 +425,7 @@ async fn ensure_text_all(
 /// theoretical — a shared-object bug once made every heal converge cleanly
 /// while silently discarding one side's entire text, and only a length check
 /// like this one could have caught it.
-async fn verify_text_length(
+pub(crate) async fn verify_text_length(
     clients: &mut [ReplicaClient<Channel>],
     indices: &[usize],
     expected: usize,
@@ -438,26 +450,6 @@ async fn verify_text_length(
     Ok(())
 }
 
-/// Fixed base for divergence-sweep seeds. Recorded (as this constant) so a
-/// cell's op streams are reproducible; the per-replica seed folds in the cell
-/// parameters, the node index, and the repetition so every stream is distinct.
-pub(crate) const DIVERGENCE_SEED_BASE: u64 = 0x5EED_D1F5_0FF5_E7A1;
-
-/// Derive the deterministic per-replica PRNG seed for one repetition of a cell.
-///
-/// `seed = f(cell, replica_id, repetition)`: distinct replicas, cells, and
-/// repetitions get independent streams, while identical inputs always replay
-/// the same stream (the reproducibility guarantee the sweep records). The
-/// mixed value is passed through one SplitMix64 round to avalanche the fields.
-pub(crate) fn seed_for(config: &PartitionConfig, node: usize, repetition: usize) -> u64 {
-    let mixed = DIVERGENCE_SEED_BASE
-        ^ (config.ops_per_group as u64).wrapping_mul(0x1_0000_0001)
-        ^ ((config.locality as u64) << 3)
-        ^ ((node as u64) << 32)
-        ^ (repetition as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    SplitMix64::new(mixed).next_u64()
-}
-
 /// Apply write number `seq` to `client` under the configured `workload`.
 ///
 /// `seq` disambiguates `MapPut` keys; the text workload ignores it (each op is
@@ -477,7 +469,7 @@ async fn apply_write(
 /// Poll nodes at `indices` until all have equal, non-empty fingerprints.
 ///
 /// Returns fractional ms from `start` to convergence.
-async fn wait_for_nodes(
+pub(crate) async fn wait_for_nodes(
     clients: &mut [ReplicaClient<Channel>],
     indices: &[usize],
     start: Instant,
@@ -520,7 +512,7 @@ async fn wait_for_nodes(
 /// clean shutdown or panic — means something went wrong. Calling this after
 /// each major phase surfaces failures promptly rather than letting them appear
 /// as confusing "connection refused" RPC errors.
-fn check_tasks(tasks: &mut JoinSet<()>) -> Result<()> {
+pub(crate) fn check_tasks(tasks: &mut JoinSet<()>) -> Result<()> {
     if let Some(result) = tasks.try_join_next() {
         match result {
             Err(e) => bail!("server task panicked: {e}"),
@@ -531,7 +523,7 @@ fn check_tasks(tasks: &mut JoinSet<()>) -> Result<()> {
 }
 
 /// Return the full-mesh intra-group edges for a slice of node indices.
-fn intra_group_edges(nodes: &[usize]) -> Vec<(usize, usize)> {
+pub(crate) fn intra_group_edges(nodes: &[usize]) -> Vec<(usize, usize)> {
     nodes
         .iter()
         .flat_map(|&i| nodes.iter().filter(move |&&j| j > i).map(move |&j| (i, j)))
@@ -542,7 +534,7 @@ fn intra_group_edges(nodes: &[usize]) -> Vec<(usize, usize)> {
 ///
 /// `nodes` is the in-scope slice — `0..n` for a topology run, or a group's
 /// `nodes` for one phase of a partition-heal run.
-fn target_node(pattern: &WritePattern, i: usize, nodes: &[usize]) -> usize {
+pub(crate) fn target_node(pattern: &WritePattern, i: usize, nodes: &[usize]) -> usize {
     match pattern {
         WritePattern::Concentrated => nodes[0],
         WritePattern::RoundRobin => nodes[i % nodes.len()],
@@ -625,229 +617,13 @@ pub async fn run(config: &TopologyConfig, source: NodeSource) -> Result<RunResul
         diameter,
     })
 }
-
-/// Run a partition-then-heal scenario.
-///
-/// The partition is simulated at the application layer, not by withholding
-/// connections:
-///
-/// 1. **Setup** — the *entire* post-heal topology (intra-group edges plus the
-///    heal edges) is wired, then every cross-group link is blocked on both
-///    endpoints. Blocked links carry nothing: outbound flushes skip them and
-///    inbound messages are dropped unprocessed.
-/// 2. **Divergence** — each group writes independently. The blocks make the
-///    groups mutually invisible despite the open streams.
-/// 3. **Heal** — the blocks are cleared on both endpoints of every healed
-///    link and a `KickSync` starts the handshake. Time from the first unblock
-///    to global convergence is the measurement.
-///
-/// Wiring the graph up front is what makes the heal measurement mean
-/// something. Opening a sync stream costs a TCP connect plus an HTTP/2
-/// handshake, and that cost scales with the number of edges being opened; when
-/// the heal *was* the wiring, a `FullMesh` heal paid it on every cross-group
-/// pair while a `Bridge` heal paid it once. Comparing the two then compared
-/// connection setup as much as merge cost — on the docker lane it was up to
-/// 70% of the measured window. Now setup happens before the clock starts and
-/// the heal is a flag flip, so `convergence_ms` is the sync protocol and the
-/// CRDT merge, which is what the scenario claims to measure.
-pub async fn run_partition_heal(
-    config: &PartitionConfig,
-    source: NodeSource,
-    repetition: usize,
-) -> Result<RunResult> {
-    config.validate()?;
-
-    let n = config.node_count;
-    let mut tasks = JoinSet::new();
-    let (endpoints, mut clients) = acquire_nodes(source, n, &mut tasks).await?;
-
-    // Reset before wiring peers so each trial starts from a clean slate even
-    // when the same external stack is reused across many scenarios/trials.
-    reset_all(&clients).await?;
-
-    // Text workloads: bootstrap the shared text object on every node while the
-    // document is still empty and no edges exist. This is what makes the heal
-    // an *interleaving* of both sides' sequences — without a shared object
-    // identity, partitioned replicas each create their own and the heal is a
-    // map-key conflict that discards one side's text wholesale.
-    if config.workload == Workload::TextSplice {
-        ensure_text_all(&mut clients, 0..n).await?;
-    }
-
-    // Intra-group edges, plus the cross-group edges the heal will open.
-    let intra: Vec<(usize, usize)> = config
-        .groups
-        .iter()
-        .flat_map(|g| intra_group_edges(&g.nodes))
-        .collect();
-    let intra_set: HashSet<(usize, usize)> = intra.iter().copied().collect();
-    let heal_edges = heal_edges(&config.heal_topology, &config.groups, n, &intra_set);
-
-    // Block every cross-group link BEFORE wiring it, so the streams open
-    // silently — `connect_to_peer`'s opening handshake is itself skipped on a
-    // blocked link. Blocking is by peer ID and does not require the stream to
-    // exist yet, which is what makes this ordering safe.
-    set_links_blocked(&clients, &heal_edges, true).await?;
-
-    // Wire the full post-heal topology. All of this is outside every timed
-    // window; the heal below only flips flags.
-    let mut all_edges = intra.clone();
-    all_edges.extend(heal_edges.iter().copied());
-    connect_edges(&clients, &endpoints, &all_edges).await?;
-    check_tasks(&mut tasks)?;
-
-    // Apply ops to each group independently (the offline-divergence phase).
-    //
-    // For `MapPut`, keys are globally unique across groups (`op_idx`). For
-    // `TextSplice`, each op's position is drawn *operationally* against the
-    // issuing replica's own simulated text length via a per-replica seeded
-    // PRNG (`seed = f(cell, replica, repetition)`), so positions are always
-    // valid and the two sides diverge independently. During the partition a
-    // replica's document only grows from ops sent directly to it, so the
-    // per-target length counter equals its real text length for the singleton
-    // groups the divergence-n2 family uses; for multi-node groups it may
-    // under-count (peers' synced ops), but the drawn position stays `<= len`
-    // and therefore a valid anchor.
-    let mut op_idx = 0;
-    // Per physical node: (seeded PRNG, simulated text length).
-    let mut gen_state: HashMap<usize, (SplitMix64, usize)> = HashMap::new();
-    for group in &config.groups {
-        for i in 0..config.ops_per_group {
-            let target = target_node(&config.write_pattern, i, &group.nodes);
-            match config.workload {
-                Workload::MapPut => {
-                    map_put(
-                        &mut clients[target],
-                        &format!("k{op_idx}"),
-                        &format!("v{op_idx}"),
-                    )
-                    .await?;
-                }
-                Workload::TextSplice => {
-                    let state = gen_state.entry(target).or_insert_with(|| {
-                        (SplitMix64::new(seed_for(config, target, repetition)), 0)
-                    });
-                    let pos = config.locality.draw_pos(&mut state.0, state.1);
-                    state.1 += 1;
-                    text_splice(&mut clients[target], TEXT_OBJ, pos, "x").await?;
-                }
-            }
-            op_idx += 1;
-        }
-    }
-
-    check_tasks(&mut tasks)?;
-
-    // Wait for each group to reach internal consistency before healing.
-    // The start instant is throwaway — this is a gate, not a measurement.
-    for group in &config.groups {
-        if group.nodes.len() > 1 {
-            wait_for_nodes(
-                &mut clients,
-                &group.nodes,
-                Instant::now(),
-                Duration::from_secs(5),
-            )
-            .await?;
-        }
-    }
-    check_tasks(&mut tasks)?;
-
-    // The partition must actually have held: if any cross-group state leaked
-    // during the divergence phase, the groups already agree and the heal
-    // measures nothing. Cheaper and more direct than inferring it downstream
-    // from a suspiciously fast convergence.
-    verify_groups_diverged(&mut clients, &config.groups).await?;
-
-    // Heal: unblock both endpoints of every healed link, then kick the
-    // handshake. Both steps are inside the window — they are the heal — but
-    // both are flag flips and one round of message generation, not connection
-    // setup, and neither scales the way opening N streams did.
-    //
-    // The unblock must complete on ALL endpoints before any kick: a kick that
-    // reached a still-blocked peer would be dropped inbound, and the sender's
-    // protocol state would then be waiting on a reply that never comes.
-    let heal_start = Instant::now();
-    set_links_blocked(&clients, &heal_edges, false).await?;
-    let wiring_ms = heal_start.elapsed().as_secs_f64() * 1000.0;
-    kick_sync_edges(&clients, &heal_edges).await?;
-
-    let all_nodes: Vec<usize> = (0..n).collect();
-    let convergence_ms = wait_for_nodes(
-        &mut clients,
-        &all_nodes,
-        heal_start,
-        Duration::from_secs(10),
-    )
-    .await?;
-    check_tasks(&mut tasks)?;
-
-    // Validity gate, outside the measurement window: the healed text must
-    // contain *both* sides' inserts (ops are insert-only, one char each).
-    // This is the check that distinguishes a real sequence interleave from a
-    // heal that converged by discarding a replica's work.
-    if config.workload == Workload::TextSplice {
-        verify_text_length(
-            &mut clients,
-            &all_nodes,
-            config.groups.len() * config.ops_per_group,
-        )
-        .await?;
-    }
-
-    // Report structural fields for the actual post-heal graph (intra-group
-    // edges + heal edges). `topology_kind = "partition_heal"` flags the
-    // scenario shape so analyses can separate heal-driven convergence from
-    // steady-state runs; edge_count and diameter let downstream plots tell
-    // the FullMesh-heal and Bridge-heal variants apart on structural axes.
-    let final_edges = all_edges;
-    let final_graph = Connections::Custom {
-        edges: final_edges.clone(),
-    };
-    Ok(RunResult {
-        convergence_ms,
-        wiring_ms,
-        total_ops: config.groups.len() * config.ops_per_group,
-        topology_kind: "partition_heal",
-        edge_count: final_edges.len(),
-        diameter: final_graph.diameter(n),
-    })
-}
-
-/// Compute the heal-phase edges for a partition-heal scenario.
-///
-/// Caller owns the set of intra-group edges already wired during the partition
-/// phase; this function returns *only* the cross-group edges to add at heal.
-///
-/// * `FullMesh` — every pair (i, j) with `i < j` that isn't already in `intra_set`.
-/// * `Bridge` — exactly one edge `(min, max)` between `groups[0].nodes[0]` and
-///   `groups[1].nodes[0]`. Assumes `groups.len() == 2` (enforced by
-///   [`PartitionConfig::validate`]).
-fn heal_edges(
-    heal: &HealTopology,
-    groups: &[Group],
-    n: usize,
-    intra_set: &HashSet<(usize, usize)>,
-) -> Vec<(usize, usize)> {
-    match heal {
-        HealTopology::FullMesh => Connections::FullMesh
-            .edges(n)
-            .into_iter()
-            .filter(|e| !intra_set.contains(e))
-            .collect(),
-        HealTopology::Bridge => {
-            let a = groups[0].nodes[0];
-            let b = groups[1].nodes[0];
-            vec![if a < b { (a, b) } else { (b, a) }]
-        }
-    }
-}
-
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::partition_heal::run_partition_heal;
+    use crate::topology::PartitionConfig;
 
     // ── check_tasks ────────────────────────────────────────────────────────
 
@@ -907,111 +683,6 @@ mod tests {
         let deduped: std::collections::HashSet<_> = edges.iter().copied().collect();
         assert_eq!(n, deduped.len());
         assert!(edges.iter().all(|(i, j)| i < j));
-    }
-
-    // ── heal_edges ─────────────────────────────────────────────────────────
-
-    fn intra_for(groups: &[Group]) -> HashSet<(usize, usize)> {
-        groups
-            .iter()
-            .flat_map(|g| intra_group_edges(&g.nodes))
-            .collect()
-    }
-
-    fn two_groups(a: Vec<usize>, b: Vec<usize>) -> Vec<Group> {
-        vec![Group { nodes: a }, Group { nodes: b }]
-    }
-
-    #[test]
-    fn heal_edges_full_mesh_returns_only_cross_group_pairs() {
-        // n=4, groups [0,1] & [2,3]. Intra: (0,1),(2,3). Cross: (0,2),(0,3),(1,2),(1,3).
-        let groups = two_groups(vec![0, 1], vec![2, 3]);
-        let intra = intra_for(&groups);
-        let mut edges = heal_edges(&HealTopology::FullMesh, &groups, 4, &intra);
-        edges.sort_unstable();
-        assert_eq!(edges, vec![(0, 2), (0, 3), (1, 2), (1, 3)]);
-        // Sanity: union of intra + heal == full-mesh edges (i.e., no overlap and complete cover).
-        let mut all: Vec<_> = intra.iter().copied().chain(edges.iter().copied()).collect();
-        all.sort_unstable();
-        assert_eq!(all, Connections::FullMesh.edges(4));
-    }
-
-    #[test]
-    fn heal_edges_bridge_is_single_edge_between_group_zeros() {
-        let groups = two_groups(vec![0, 1], vec![2, 3]);
-        let intra = intra_for(&groups);
-        let edges = heal_edges(&HealTopology::Bridge, &groups, 4, &intra);
-        assert_eq!(edges, vec![(0, 2)]);
-    }
-
-    #[test]
-    fn heal_edges_bridge_normalizes_edge_ordering() {
-        // Reverse group ordering: groups[0].nodes[0]=2, groups[1].nodes[0]=0.
-        // The bridge edge must still be (min, max) = (0, 2).
-        let groups = two_groups(vec![2, 3], vec![0, 1]);
-        let intra = intra_for(&groups);
-        let edges = heal_edges(&HealTopology::Bridge, &groups, 4, &intra);
-        assert_eq!(edges, vec![(0, 2)]);
-    }
-
-    #[test]
-    fn heal_edges_bridge_picks_first_node_of_each_group() {
-        // groups[0].nodes[0]=1 (not the minimum 5 in group 0!), groups[1].nodes[0]=3.
-        let groups = two_groups(vec![1, 5, 7], vec![3, 0, 2]);
-        let intra = intra_for(&groups);
-        let edges = heal_edges(&HealTopology::Bridge, &groups, 8, &intra);
-        assert_eq!(edges, vec![(1, 3)]);
-    }
-
-    /// Post-heal graph for Bridge is two cliques joined by one edge — diameter
-    /// is `1 (intra-group) + 1 (bridge) + 1 (intra-group) = 3` for full-mesh
-    /// groups of size ≥ 2. The `Connections::Custom` diameter pass that the
-    /// runner uses must agree with this hand computation.
-    #[test]
-    fn bridge_post_heal_diameter_two_full_mesh_groups_is_three() {
-        let groups = two_groups(vec![0, 1], vec![2, 3]);
-        let intra: Vec<_> = groups
-            .iter()
-            .flat_map(|g| intra_group_edges(&g.nodes))
-            .collect();
-        let intra_set: HashSet<_> = intra.iter().copied().collect();
-        let heal = heal_edges(&HealTopology::Bridge, &groups, 4, &intra_set);
-
-        let mut all = intra;
-        all.extend(heal.iter().copied());
-        let graph = Connections::Custom { edges: all };
-        assert_eq!(graph.diameter(4), 3);
-    }
-
-    #[test]
-    fn bridge_post_heal_diameter_grows_with_group_size() {
-        // n=8, two cliques of size 4. Diameter from any far-node-in-g0 to
-        // any far-node-in-g1 is 1 + 1 + 1 = 3 (clique → bridge → clique).
-        let groups = two_groups(vec![0, 1, 2, 3], vec![4, 5, 6, 7]);
-        let intra: Vec<_> = groups
-            .iter()
-            .flat_map(|g| intra_group_edges(&g.nodes))
-            .collect();
-        let intra_set: HashSet<_> = intra.iter().copied().collect();
-        let heal = heal_edges(&HealTopology::Bridge, &groups, 8, &intra_set);
-        let mut all = intra;
-        all.extend(heal.iter().copied());
-        assert_eq!(Connections::Custom { edges: all }.diameter(8), 3);
-    }
-
-    #[test]
-    fn bridge_post_heal_edge_count_matches_intra_plus_one() {
-        // n=6, groups of size 3. Intra edges per group = 3 (clique on 3) → 6 total.
-        // Bridge adds 1. Final edge count = 7.
-        let groups = two_groups(vec![0, 1, 2], vec![3, 4, 5]);
-        let intra: Vec<_> = groups
-            .iter()
-            .flat_map(|g| intra_group_edges(&g.nodes))
-            .collect();
-        assert_eq!(intra.len(), 6);
-        let intra_set: HashSet<_> = intra.iter().copied().collect();
-        let heal = heal_edges(&HealTopology::Bridge, &groups, 6, &intra_set);
-        assert_eq!(intra.len() + heal.len(), 7);
     }
 
     // ── relay across non-mesh topologies ───────────────────────────────────
@@ -1162,23 +833,6 @@ mod tests {
         check_tasks(&mut tasks).unwrap();
     }
 
-    /// End-to-end divergence cell through the real gRPC stack: partitioned
-    /// singleton groups, seeded text splices, heal, converge — and the
-    /// in-runner text-length gate must pass, proving the heal interleaved
-    /// both sides' sequences rather than discarding one (the shared-object
-    /// regression). Runs all three localities; same_region is the shape that
-    /// originally exposed the bug.
-    #[tokio::test]
-    async fn divergence_heal_preserves_both_sides_text() {
-        for locality in ["append", "random_position", "same_region"] {
-            let config = text_cfg(25, locality);
-            let result = run_partition_heal(&config, NodeSource::InProcess(Crdt::Automerge), 1)
-                .await
-                .unwrap_or_else(|e| panic!("locality={locality}: {e:#}"));
-            assert_eq!(result.total_ops, 50, "locality={locality}");
-        }
-    }
-
     // ── app-layer partition ────────────────────────────────────────────────
 
     async fn fingerprint_of(client: &mut ReplicaClient<Channel>) -> Vec<u8> {
@@ -1268,7 +922,7 @@ mod tests {
         .await
         .unwrap();
 
-        let groups = two_groups(vec![0], vec![1]);
+        let groups = vec![Group { nodes: vec![0] }, Group { nodes: vec![1] }];
         let err = verify_groups_diverged(&mut clients, &groups)
             .await
             .unwrap_err();
@@ -1283,7 +937,7 @@ mod tests {
         map_put(&mut clients[0], "a", "1").await.unwrap();
         map_put(&mut clients[1], "b", "2").await.unwrap();
 
-        let groups = two_groups(vec![0], vec![1]);
+        let groups = vec![Group { nodes: vec![0] }, Group { nodes: vec![1] }];
         assert!(verify_groups_diverged(&mut clients, &groups).await.is_ok());
     }
 
@@ -1365,44 +1019,6 @@ mod tests {
             "wiring {} exceeds the window it is measured inside ({})",
             result.wiring_ms,
             result.convergence_ms
-        );
-    }
-
-    // ── seed_for (divergence generator) ────────────────────────────────────
-
-    fn text_cfg(ops: usize, locality: &str) -> PartitionConfig {
-        toml::from_str(&format!(
-            "node_count = 2\n\
-             write_pattern = \"concentrated\"\n\
-             workload = \"text_splice\"\n\
-             locality = \"{locality}\"\n\
-             ops_per_group = {ops}\n\
-             groups = [{{ nodes = [0] }}, {{ nodes = [1] }}]"
-        ))
-        .expect("valid partition config")
-    }
-
-    #[test]
-    fn seed_for_is_deterministic() {
-        let c = text_cfg(100, "random_position");
-        assert_eq!(seed_for(&c, 0, 1), seed_for(&c, 0, 1));
-    }
-
-    #[test]
-    fn seed_for_varies_by_replica_repetition_and_cell() {
-        let c = text_cfg(100, "random_position");
-        let base = seed_for(&c, 0, 1);
-        assert_ne!(base, seed_for(&c, 1, 1), "distinct replica must reseed");
-        assert_ne!(base, seed_for(&c, 0, 2), "distinct repetition must reseed");
-        assert_ne!(
-            base,
-            seed_for(&text_cfg(1000, "random_position"), 0, 1),
-            "distinct ops-per-side must reseed"
-        );
-        assert_ne!(
-            base,
-            seed_for(&text_cfg(100, "same_region"), 0, 1),
-            "distinct locality must reseed"
         );
     }
 }

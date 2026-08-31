@@ -90,45 +90,42 @@ pub enum Workload {
     TextSplice,
 }
 
-/// Edit-locality rule for `TextSplice` workloads — the position each insert
-/// targets, drawn operationally against the issuing replica's own text length.
+/// Chooses the position of each insert in a `TextSplice` workload.
 ///
-/// Designed as the anchor-contention axis of the RQ-1 sweep (see trace-replay
-/// notes): `Append` contests only the base seam; `SameRegion` prepends at a
-/// fixed base identity so every op contests the same anchor (O(n) concurrent
-/// siblings); `RandomPosition` is uniform in between. Ignored by the `MapPut`
-/// workload.
+/// The position is drawn against the issuing replica's own text length, so it
+/// is always valid. The `MapPut` workload ignores this setting.
+///
+/// This is the anchor-contention axis of the sweep. `Append` contests only the
+/// seam between the two replicas' runs. `SameRegion` inserts at a fixed shared
+/// anchor, so every operation contests the same anchor. `RandomPosition` falls
+/// between the two. [`crate::contention`] measures what a cell's stream
+/// actually achieves. `docs/divergence-sweep.md` explains the axis and reports
+/// the measured contention per variant.
 ///
 /// # Precondition: the text object must be shared before the partition
 ///
-/// [`crate::contention`] confirms the generator produces the intended
-/// contention (2 / ~18 / 20k concurrent siblings at 1e4 ops/side). But the
-/// axis only reaches the CRDT if both replicas splice into the *same* text
-/// object. The replica adapter creates objects lazily on first use, so
-/// replicas that diverge from an empty document each create their own
-/// `ROOT["text"]` — the heal then resolves a map-key conflict (one side's
-/// text is discarded wholesale) instead of interleaving sequences, and every
-/// locality measures the same. A standalone Automerge 0.9 probe shows the
-/// difference at 1e4 ops/side: with separate objects all three localities
-/// merge in ~70-78 ms; with a shared base object append / random_position /
-/// same_region merge in 73 / 90 / 208 ms — contention is a real cost driver
-/// once the experiment is wired correctly. Scenarios must therefore
-/// establish the text object on all replicas *before* partitioning, and
-/// post-heal checks should assert both sides' inserts survived (final length
-/// == total ops for insert-only workloads).
+/// This axis only reaches the CRDT if both replicas splice into the *same* text
+/// object. The replica adapter creates an object on first use. Replicas that
+/// diverge from an empty document therefore each create their own
+/// `ROOT["text"]`. The heal then resolves a map-key conflict and discards one
+/// side's text completely, instead of interleaving two sequences, and every
+/// locality measures the same thing.
+///
+/// A scenario must therefore create the text object on every replica *before*
+/// partitioning. A post-heal check must confirm that both sides' inserts
+/// survived. For insert-only workloads that check is `final length == total
+/// operations`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Locality {
-    /// Insert at the current end (`pos = len`). Default — the mostly-sequential
-    /// two-authors-at-the-end case and the sweep's low-contention floor.
+    /// Insert at the current end (`pos = len`). This is the two-authors-typing-
+    /// at-the-end case and the low-contention floor of the sweep.
     #[default]
     Append,
-    /// Insert at a uniformly-random position in `[0, len]`.
+    /// Insert at a uniformly random position in `[0, len]`.
     RandomPosition,
-    /// Insert at a fixed shared anchor (`pos = 0`, pure prepend) — maximal
-    /// contention, the predicted stressor corner. Confirmed ~2.9× `Append`
-    /// merge cost in a standalone Automerge probe once the text object is
-    /// actually shared (see the type-level docs).
+    /// Insert at a fixed shared anchor (`pos = 0`, always prepend). This is the
+    /// maximum-contention corner of the sweep.
     SameRegion,
 }
 
