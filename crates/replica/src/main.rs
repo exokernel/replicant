@@ -1,9 +1,9 @@
-//! `replicant-replica` — one gRPC replica process.
+//! `replicant-replica`: one gRPC replica process.
 //!
-//! Spins up a [`common::CrdtAdapter`] (selected by `--crdt`) behind
-//! [`ReplicaService`] (control RPCs) and [`SyncService`] (peer sync streams)
-//! on the configured port, with a stdout OTel metrics exporter for
-//! development visibility.
+//! Builds the [`common::CrdtAdapter`] that `--crdt` selects. Serves it on
+//! `--port` through [`ReplicaService`] (control RPCs) and [`SyncService`]
+//! (peer sync streams). Exports metrics over OTLP when the OTLP endpoint is
+//! set (see `init_metrics`).
 
 use clap::Parser as _;
 use common::NodeId;
@@ -13,17 +13,11 @@ use replica::adapter::Crdt;
 use replica::server::{ReplicaService, ReplicaState, SyncService};
 use tonic::transport::Server;
 
-/// clap parser for `--crdt`.
+/// Returns the clap parser for `--crdt`.
 ///
-/// `PossibleValuesParser` gives `--help` and the error message the accepted
-/// list, and `.map` turns the validated string back into a [`Crdt`] so the
-/// args struct stays typed. Both are derived from [`Crdt::ALL`], so a new
-/// backend cannot be accepted while going unmentioned in `--help`.
-///
-/// This lives in the binary rather than on `Crdt` itself: a `ValueEnum`
-/// derive would put a CLI concern in a library crate for its binaries'
-/// benefit. The cost is these few lines in each binary that takes the flag,
-/// which is the right side of that trade — each binary owns its own CLI.
+/// `PossibleValuesParser` puts the accepted names in `--help` and in the error
+/// message. `.map` turns the checked string into a [`Crdt`]. Both come from
+/// [`Crdt::ALL`], so `--help` always lists every backend.
 fn crdt_parser() -> impl clap::builder::TypedValueParser<Value = Crdt> {
     use clap::builder::TypedValueParser as _;
     clap::builder::PossibleValuesParser::new(Crdt::ALL.map(|c| c.as_str())).map(|s| {
@@ -32,10 +26,10 @@ fn crdt_parser() -> impl clap::builder::TypedValueParser<Value = Crdt> {
     })
 }
 
-/// clap adapter for [`NodeId`]'s checked constructor.
+/// Parses `--actor` with [`NodeId::new`].
 ///
-/// `value_parser` needs an owned error type; `anyhow::Error` is not `Clone`,
-/// which clap requires, so the message is flattened to a `String`.
+/// clap requires a `Clone` error type. `anyhow::Error` is not `Clone`, so the
+/// error becomes a `String`.
 fn parse_node_id(s: &str) -> Result<NodeId, String> {
     NodeId::new(s).map_err(|e| e.to_string())
 }
@@ -45,9 +39,8 @@ fn parse_node_id(s: &str) -> Result<NodeId, String> {
 struct Args {
     /// Stable actor ID for this replica (used in metric labels and peer routing)
     ///
-    /// Parsed into a [`common::NodeId`], so an id that could not be sent as
-    /// the `x-peer-id` gRPC header is rejected here rather than on first peer
-    /// connect.
+    /// Parsed into a [`common::NodeId`]. An ID that is not a legal `x-peer-id`
+    /// header value fails here, at startup.
     #[arg(long, value_parser = parse_node_id)]
     actor: NodeId,
 
@@ -62,8 +55,8 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Parse first: `--help`, `--version`, and bad arguments should exit before
-    // any exporter or subscriber is built.
+    // Parse first. `--help`, `--version`, and bad arguments must exit before
+    // the exporter and the subscriber are built.
     let args = Args::parse();
 
     tracing_subscriber::fmt()
@@ -90,13 +83,13 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Build a metrics provider.
+/// Builds the metrics provider.
 ///
-/// Attaches an OTLP gRPC exporter when `OTEL_EXPORTER_OTLP_ENDPOINT` (or the
-/// metrics-specific `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`) is set; the OTLP
-/// builder reads the env var itself. Without it, no reader is attached:
-/// instruments still record but nothing is exported, which keeps standalone
-/// `cargo run --bin replica` quiet for local development.
+/// If `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` is
+/// set, attaches an OTLP gRPC exporter. The OTLP builder reads the variable
+/// itself. If neither is set, attaches no reader. The instruments still
+/// record, but nothing is exported, so a local `cargo run --bin replica` stays
+/// quiet.
 fn init_metrics() -> anyhow::Result<SdkMeterProvider> {
     let env_set = std::env::var_os("OTEL_EXPORTER_OTLP_ENDPOINT").is_some()
         || std::env::var_os("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT").is_some();

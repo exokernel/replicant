@@ -1,9 +1,9 @@
-//! [`common::CrdtAdapter`] implementations, one per backing CRDT library.
+//! [`common::CrdtAdapter`] implementations, one per CRDT library.
 //!
-//! Each submodule owns its own adapter struct and the `#[test]` wrappers
-//! that claim generic conformance-suite functions from [`conformance`]. A
-//! new adapter is done when every generic function it wraps passes — see
-//! that module's doc comment for what "generic" and "wraps" mean here.
+//! Each submodule holds one adapter struct. It also holds the `#[test]`
+//! wrappers that run the generic functions of the `conformance` test module
+//! against that adapter. A new adapter is complete when every generic function
+//! it wraps passes. The `conformance` module doc defines "generic" and "wraps".
 
 pub mod automerge;
 pub mod loro;
@@ -13,25 +13,22 @@ pub use automerge::AutomergeAdapter;
 pub use loro::LoroAdapter;
 pub use yrs::YrsAdapter;
 
-/// Which [`common::CrdtAdapter`] implementation backs a replica.
+/// Selects the [`common::CrdtAdapter`] implementation that backs a replica.
 ///
-/// Shared by both binaries rather than defined per-binary: the replica
-/// process takes it as `--crdt`, and the orchestrator takes the same flag for
-/// its in-process lane. Two copies of this enum would be two lists to keep in
-/// step, and the one that drifted would silently benchmark the wrong library.
+/// Both binaries use this one enum. The replica takes it as `--crdt`. The
+/// orchestrator takes the same flag for its in-process lane.
 ///
-/// A new variant needs an arm in [`Crdt::build`] and an entry in
-/// [`Crdt::ALL`]; [`Crdt::as_str`] and [`FromStr`] are exhaustive matches, so
-/// the compiler catches the rest.
+/// To add a variant, add an arm to [`Crdt::build`] and an entry to
+/// [`Crdt::ALL`]. [`Crdt::as_str`] is an exhaustive match, so the compiler
+/// finds the remaining change.
 ///
-/// The names in [`Crdt::as_str`] are also what `deploy/docker/gen-compose.py`
-/// and the k8s StatefulSet's `CRDT` environment variable emit, so renaming a
-/// variant is a deploy-side change too.
+/// The names from [`Crdt::as_str`] also appear in `deploy/docker/gen-compose.py`
+/// and in the `CRDT` environment variable of the k8s StatefulSet. If you rename
+/// a variant, change the deploy files too.
 ///
-/// Deliberately *not* deriving `clap::ValueEnum`: that would put a CLI
-/// concern in a library crate for its binaries' benefit. [`FromStr`] plus
-/// [`Crdt::ALL`] give each binary everything it needs to build its own
-/// `value_parser` without this module knowing that a command line exists.
+/// This enum does not derive `clap::ValueEnum`, because this crate has no CLI
+/// code. Each binary builds its own parser from [`Crdt::ALL`] and
+/// [`std::str::FromStr`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Crdt {
     Automerge,
@@ -40,17 +37,15 @@ pub enum Crdt {
 }
 
 impl Crdt {
-    /// Every variant, for callers that need to enumerate them — a CLI's
-    /// accepted-values list, or a sweep over all backends.
+    /// Every variant. Use it to list the accepted CLI values or to sweep all
+    /// backends.
     pub const ALL: [Crdt; 3] = [Crdt::Automerge, Crdt::Yrs, Crdt::Loro];
 
-    /// Construct the selected adapter.
+    /// Builds the selected adapter.
     ///
-    /// Boxing here is what lets callers keep a single setup path: the three
-    /// adapters are different concrete types, so a `match` that also built the
-    /// server would have to repeat that setup once per variant.
-    /// `ReplicaState` stores a `Box<dyn CrdtAdapter>` regardless, so this
-    /// costs nothing it was not already paying.
+    /// The adapters are different concrete types. Boxing them lets the caller
+    /// use one setup path for all of them. `ReplicaState` stores a
+    /// `Box<dyn CrdtAdapter>`, so the box adds no cost.
     pub fn build(self) -> Box<dyn common::CrdtAdapter> {
         match self {
             Crdt::Automerge => Box::new(AutomergeAdapter::new()),
@@ -59,11 +54,11 @@ impl Crdt {
         }
     }
 
-    /// The library's name as it appears on the command line, in the deploy
+    /// Returns the library name used on the command line, in the deploy
     /// generators, and in the run-provenance file.
     ///
-    /// One spelling everywhere: `Debug` would print `Loro`, which does not
-    /// match the `--crdt loro` a reader would type to reproduce the run.
+    /// Use this name, not `Debug`. `Debug` prints `Loro`, but the flag is
+    /// `--crdt loro`.
     pub fn as_str(self) -> &'static str {
         match self {
             Crdt::Automerge => "automerge",
@@ -82,8 +77,8 @@ impl std::fmt::Display for Crdt {
 impl std::str::FromStr for Crdt {
     type Err = String;
 
-    /// The inverse of [`Crdt::as_str`]. The error lists the accepted values,
-    /// since the only callers are argument parsers reporting to a human.
+    /// Parses a name from [`Crdt::as_str`]. The error message lists the
+    /// accepted values, because a person reads it.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Crdt::ALL
             .into_iter()

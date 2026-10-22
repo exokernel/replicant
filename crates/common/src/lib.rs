@@ -1,10 +1,11 @@
 //! Shared types for the replicant project.
 //!
-//! - [`proto`] — generated tonic/prost code for the `replicant.v1` gRPC API.
-//! - [`ScalarVal`] / [`Op`] — library-agnostic value and operation models,
-//!   with `TryFrom` impls from their proto counterparts.
-//! - [`CrdtAdapter`] — the trait every CRDT backend (Automerge, Yrs, Loro)
-//!   implements, called by the replica scaffolding.
+//! - [`proto`]: generated tonic/prost code for the `replicant.v1` gRPC API.
+//! - [`NodeId`]: the identity of a replica.
+//! - [`ScalarVal`] and [`Op`]: library-agnostic values and operations. Each
+//!   has a `TryFrom` impl from its proto type.
+//! - [`CrdtAdapter`]: the trait that each CRDT backend (Automerge, Yrs, Loro)
+//!   implements. The replica scaffolding calls it.
 
 use anyhow::Context as _;
 
@@ -15,43 +16,31 @@ pub mod proto {
 
 // ── Node identity ──────────────────────────────────────────────────────────
 
-/// A replica's stable identity — `node-0`, `node-1`, and so on.
+/// The stable identity of a replica, for example `node-0` or `node-1`.
 ///
-/// One type covers both roles: a replica's own `actor_id` and the id it uses
-/// for a peer are the same namespace seen from two directions, so a separate
-/// `PeerId` would only invite conversions between two types that must always
-/// agree.
+/// The same type names a replica's own `actor_id` and the peers it connects
+/// to. Both are in one namespace.
 ///
-/// # Why a newtype
+/// # Invariant
 ///
-/// The id is sent as the `x-peer-id` gRPC metadata header on every outbound
-/// sync stream, so it must be a legal HTTP header value. That invariant used
-/// to be an `assert!` in `ReplicaState::new` relied on by an `.expect()` some
-/// five hundred lines away in `connect_to_peer` — two halves of one rule held
-/// together by a comment. [`NodeId::new`] is now the only way to make one, so
-/// the invariant travels with the value.
+/// A `NodeId` is always a legal HTTP header value. The replica sends it as the
+/// `x-peer-id` gRPC metadata header on each outbound sync stream.
+/// [`NodeId::new`] is the only constructor, and it checks this.
 ///
-/// It also makes the ids and addresses that appear side by side in connection
-/// setup impossible to transpose: `fn connect(id: NodeId, addr: String)` no
-/// longer accepts its arguments in the wrong order, where two `String`s did
-/// and failed at runtime.
+/// # Lookup by `&str`
 ///
-/// # Ergonomics
-///
-/// `Borrow<str>` is implemented so a `HashMap<NodeId, _>` can still be probed
-/// with a plain `&str`, which is what keeps the change from rippling into
-/// [`CrdtAdapter`]'s `peer: &str` parameters. Adapters treat the id as an
-/// opaque map key, so widening the trait would touch every implementation for
-/// no gain in safety.
+/// `NodeId` implements `Borrow<str>`. You can query a `HashMap<NodeId, _>`
+/// with a plain `&str`. This lets [`CrdtAdapter`] keep its `peer: &str`
+/// parameters. Adapters use the id only as an opaque map key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeId(String);
 
 impl NodeId {
-    /// Validate and wrap a node identifier.
+    /// Validates and wraps a node identifier.
     ///
-    /// Rejects the empty string and anything that is not a legal HTTP header
-    /// value, so a misconfigured id fails where it enters the system rather
-    /// than on first peer connect.
+    /// Rejects the empty string and any value that is not a legal HTTP header
+    /// value. A bad id thus fails where it enters the system, not at the first
+    /// peer connection.
     pub fn new(id: impl Into<String>) -> anyhow::Result<Self> {
         let id = id.into();
         if id.is_empty() {
@@ -62,15 +51,14 @@ impl NodeId {
         Ok(Self(id))
     }
 
+    /// Returns the id as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
-    /// The id as a gRPC metadata value, for the `x-peer-id` header.
+    /// Returns the id as a gRPC metadata value, for the `x-peer-id` header.
     ///
-    /// Infallible by construction: [`NodeId::new`] already parsed it. The
-    /// `expect` is one method away from the check that guarantees it rather
-    /// than in another file, which is the point of the newtype.
+    /// Cannot fail: [`NodeId::new`] already parsed the id as a header value.
     pub fn header_value(&self) -> tonic::metadata::AsciiMetadataValue {
         self.0
             .parse()
@@ -97,9 +85,10 @@ impl AsRef<str> for NodeId {
     }
 }
 
-/// Lets `HashMap<NodeId, V>` and `HashSet<NodeId>` be queried with `&str`.
-/// Required for `Borrow` to be sound here: `NodeId`'s `Hash` and `Eq` delegate
-/// to the inner `String`, so the borrowed and owned forms agree.
+/// Lets you query `HashMap<NodeId, V>` and `HashSet<NodeId>` with `&str`.
+///
+/// This is correct only because `NodeId`'s `Hash` and `Eq` delegate to the
+/// inner `String`. Do not give `NodeId` a custom `Hash` or `Eq`.
 impl std::borrow::Borrow<str> for NodeId {
     fn borrow(&self) -> &str {
         &self.0
@@ -123,15 +112,20 @@ impl TryFrom<String> for NodeId {
 
 /// A scalar value that can be stored in a CRDT document.
 ///
-/// `Eq` is derivable because there is no float variant — equality here is
-/// total, unlike the CRDT libraries' own scalar types, all three of which
-/// carry a float and so can only be `PartialEq`.
+/// There is no float variant, so `ScalarVal` implements `Eq`. Adding a float
+/// would remove `Eq`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScalarVal {
+    /// A UTF-8 string.
     Str(String),
+    /// An unsigned integer. Yrs and Loro store it as `i64`, so values above
+    /// `i64::MAX` do not round-trip there.
     Uint(u64),
+    /// A signed integer.
     Int(i64),
+    /// A boolean.
     Bool(bool),
+    /// An opaque byte string.
     Bytes(Vec<u8>),
 }
 
@@ -186,50 +180,77 @@ impl TryFrom<proto::ScalarValue> for ScalarVal {
 /// A CRDT document operation.
 ///
 /// `obj` names a top-level object under ROOT. The empty string refers to ROOT
-/// itself. List and text objects are created by the adapter lazily on first
-/// access.
+/// itself, which is a map. Map ops accept the empty name. List and text ops
+/// must name an object. The adapter creates a named list or text object on
+/// first access.
 ///
-/// Indices use `usize` to match the Automerge API; the proto layer converts
-/// from `u64` on ingress, rejecting values that do not fit rather than
-/// truncating them.
+/// Indices are `usize`, as in the Automerge API. The conversion from proto
+/// rejects a `u64` that does not fit in `usize`. It does not truncate.
 #[derive(Debug, Clone)]
 pub enum Op {
+    /// Sets `key` to `value` in a map.
     MapPut {
+        /// The map. Empty means ROOT.
         obj: String,
+        /// The key to set.
         key: String,
+        /// The new value.
         value: ScalarVal,
     },
+    /// Removes `key` from a map.
     MapDelete {
+        /// The map. Empty means ROOT.
         obj: String,
+        /// The key to remove.
         key: String,
     },
+    /// Inserts one value into a list.
     ListInsert {
+        /// The list. Must not be empty.
         obj: String,
+        /// The position of the new element. The element at `index` and all
+        /// later elements move one position right.
         index: usize,
+        /// The value to insert.
         value: ScalarVal,
     },
+    /// Removes one element from a list.
     ListDelete {
+        /// The list. Must not be empty.
         obj: String,
+        /// The position of the element to remove.
         index: usize,
     },
-    /// Matches `Transactable::splice`: insert/delete in one operation.
+    /// Deletes and inserts list elements in one operation. Matches
+    /// Automerge's `Transactable::splice`.
     ListSplice {
+        /// The list. Must not be empty.
         obj: String,
+        /// The position where the deletion starts and the insertion goes.
         pos: usize,
+        /// The number of elements to delete, starting at `pos`.
         del_count: usize,
+        /// The values to insert at `pos`, after the deletion.
         values: Vec<ScalarVal>,
     },
-    /// Matches `Transactable::splice_text`.
+    /// Deletes and inserts text in one operation. Matches Automerge's
+    /// `Transactable::splice_text`.
     TextSplice {
+        /// The text object. Must not be empty.
         obj: String,
+        /// The character position where the deletion starts and the insertion
+        /// goes.
         pos: usize,
+        /// The number of characters to delete, starting at `pos`.
         del_count: usize,
+        /// The text to insert at `pos`, after the deletion.
         insert: String,
     },
 }
 
 impl Op {
-    /// The operation name used as the `op` metric attribute.
+    /// Returns the operation name. The replica uses it as the `op` metric
+    /// attribute.
     pub fn name(&self) -> &'static str {
         match self {
             Op::MapPut { .. } => "map_put",
@@ -242,11 +263,10 @@ impl Op {
     }
 }
 
-/// Convert a proto `u64` index to `usize`.
+/// Converts a proto `u64` index to `usize`.
 ///
-/// Fails rather than truncating on targets where `usize` is narrower than 64
-/// bits: a silently wrapped index would address the wrong element instead of
-/// reporting a bad request.
+/// Fails if the value does not fit, on targets where `usize` is narrower than
+/// 64 bits. A truncated index would address the wrong element.
 fn to_index(v: u64, field: &str) -> anyhow::Result<usize> {
     usize::try_from(v).with_context(|| format!("{field} ({v}) does not fit in usize"))
 }
@@ -285,8 +305,8 @@ impl TryFrom<proto::OpRequest> for Op {
                 Ok(Op::ListSplice {
                     obj: p.obj,
                     pos: to_index(p.pos, "ListSplice.pos")?,
-                    // `del_count` is a proto uint32; widen before the check so
-                    // one conversion helper covers every index-like field.
+                    // `del_count` is a proto uint32. Widen it so that one
+                    // helper converts every index-like field.
                     del_count: to_index(p.del_count.into(), "ListSplice.del_count")?,
                     values,
                 })
@@ -303,135 +323,131 @@ impl TryFrom<proto::OpRequest> for Op {
 
 // ── CrdtAdapter trait ──────────────────────────────────────────────────────
 
-/// Library-agnostic interface between the replica scaffolding and a CRDT
-/// implementation.
+/// The library-agnostic interface between the replica scaffolding and a CRDT
+/// library.
 ///
-/// All timing and metric emission for comparable metrics (`replicant.*`) live
-/// in the scaffolding layer, *outside* calls to this trait. Adapter impls
-/// must not emit those metrics directly.
+/// The scaffolding times each call and emits the comparable `replicant.*`
+/// metrics. Adapters must not emit these metrics.
 ///
-/// All methods take `&mut self`, including the reads. The requirement comes
-/// from Automerge, whose `AutoCommit` commits any pending transaction before
-/// answering a read; Yrs and Loro would both be satisfied by `&self`. Kept
-/// as the wider bound so the trait admits either shape.
+/// All methods take `&mut self`, including the reads. Automerge needs this:
+/// its `AutoCommit` commits any pending transaction before it answers a read.
+/// Yrs and Loro need only `&self`.
 ///
-/// `Send + 'static` allows the adapter to be held behind `Box<dyn
-/// CrdtAdapter>` and moved into a Tokio task.
+/// `Send + 'static` lets the scaffolding keep the adapter in a
+/// `Box<dyn CrdtAdapter>` and move it into a Tokio task.
 pub trait CrdtAdapter: Send + 'static {
-    /// Apply a single document operation.
+    /// Applies one document operation.
     fn apply_op(&mut self, op: &Op) -> anyhow::Result<()>;
 
-    /// Return the current document heads as sorted opaque byte vectors.
+    /// Returns the current document heads as sorted, opaque byte vectors.
     ///
-    /// What an entry *is* varies by library and the trait makes no claim
-    /// about it: a 32-byte `ChangeHash` for Automerge, a (peer, counter)
-    /// pair from the causal frontier for Loro, a (client, clock) pair from
-    /// the state vector for Yrs — which, note, is not a DAG frontier at all.
-    /// Sorting is required of every implementation, so that equality
-    /// comparison is order-independent even where the underlying collection
-    /// is a hash map with unspecified iteration order.
+    /// The content of an entry depends on the library. The trait makes no
+    /// claim about it:
+    ///
+    /// - Automerge: a 32-byte `ChangeHash`.
+    /// - Loro: a (peer, counter) pair from the causal frontier.
+    /// - Yrs: a (client, clock) pair from the state vector. This is not a DAG
+    ///   frontier.
+    ///
+    /// Every implementation must sort the result. Then two results compare
+    /// equal regardless of the iteration order of the underlying collection.
     fn get_heads(&mut self) -> Vec<Vec<u8>>;
 
-    /// Return an opaque fingerprint of the current document state.
+    /// Returns an opaque fingerprint of the current document state.
     ///
-    /// The orchestrator compares fingerprints for byte equality to check
-    /// convergence without interpreting their content.
+    /// The orchestrator compares fingerprints byte for byte to detect
+    /// convergence. It does not interpret their content.
     fn state_fingerprint(&mut self) -> Vec<u8>;
 
-    /// Return the serialized document size in bytes.
+    /// Returns the serialized document size in bytes.
     fn doc_size_bytes(&mut self) -> usize;
 
-    /// Generate the next outbound sync message for `peer`, if any.
+    /// Generates the next outbound sync message for `peer`, if there is one.
     ///
-    /// Returns `None` once this replica has nothing further to tell `peer`
-    /// given what it has sent so far — a fixed point that must actually be
-    /// reachable, not merely converged toward, or the scaffolding's
-    /// push-after-every-op flush loop (the replica's `flush_to_peers`) spins
-    /// forever and pollutes the sync message-count/byte telemetry. How an
-    /// adapter tracks "what I've told `peer`" to answer this is
-    /// implementation-defined: Automerge threads a `sync::State` per peer;
-    /// other libraries may track a remembered peer state vector, a per-peer
-    /// drain cursor over locally-produced update bytes, or something else
-    /// native to their own sync model. This method makes no claim about which
-    /// message a given call represents (handshake-initiating vs. a data
-    /// delta) — that is opaque protocol framing internal to the returned
-    /// bytes, decoded only by the adapter's own `sync_receive`.
+    /// Returns `None` when this replica has nothing more to send to `peer`,
+    /// given what it already sent. This `None` must actually occur. The
+    /// replica's `flush_to_peers` loop calls this method until it returns
+    /// `None`. If `None` never comes, the loop never stops and the sync
+    /// message and byte metrics are wrong.
     ///
-    /// Note that convergence itself is *not* detected through this method —
-    /// the orchestrator polls [`Self::state_fingerprint`] for byte equality
-    /// across replicas independently of what any adapter believes about its
-    /// peers. `None` here only starves the push loop; it is not the
-    /// convergence oracle.
+    /// Each adapter decides how to track what it sent to `peer`. Automerge
+    /// keeps a `sync::State` per peer. Other adapters can keep the peer's last
+    /// known state vector, or another record that suits their sync model.
+    ///
+    /// The returned bytes are opaque. Only the same adapter's
+    /// [`Self::sync_receive`] decodes them. The caller cannot tell whether a
+    /// message is a handshake or a data delta.
+    ///
+    /// This method does not detect convergence. The orchestrator compares
+    /// [`Self::state_fingerprint`] across replicas for that. `None` only stops
+    /// the push loop.
     fn sync_generate(&mut self, peer: &str) -> Option<Vec<u8>>;
 
-    /// Process an inbound sync message from `peer`.
+    /// Processes an inbound sync message from `peer`.
     fn sync_receive(&mut self, peer: &str, msg: Vec<u8>) -> anyhow::Result<()>;
 
-    /// Discard the per-peer sync protocol state for `peer`, so the next
-    /// [`Self::sync_generate`] restarts whatever this adapter's native
-    /// protocol does to (re)establish sync with a peer it has no bookkeeping
-    /// for — a fresh handshake for a request/response protocol, a
-    /// from-scratch diff for a state-vector-cache design, etc. Document state
-    /// is untouched.
+    /// Discards the per-peer sync state for `peer`. Does not change the
+    /// document.
     ///
-    /// Used when healing a simulated partition: while a link is blocked,
-    /// messages may have been generated and then dropped (e.g. one racing the
-    /// block's onset), leaving this side's per-peer bookkeeping believing the
-    /// peer received data it never saw. Whatever an adapter caches about a
-    /// peer's progress, a stale cache of that kind can stall the exchange
-    /// indefinitely, and discarding it must always be safe: re-deriving from
-    /// scratch costs at most some re-sent data the peer already holds, never
-    /// incorrectness.
+    /// After this call, the next [`Self::sync_generate`] starts sync with
+    /// `peer` again from nothing. For a request/response protocol, this is a
+    /// new handshake. For an adapter that caches the peer's state vector, this
+    /// is a diff from the empty state.
     ///
-    /// Must be a no-op if no state exists for `peer`.
+    /// The orchestrator calls this when it heals a simulated partition. While
+    /// a link is blocked, the replica can generate a message that is then
+    /// dropped. The per-peer state then records data that the peer never
+    /// received, and sync can stop. Discarding the state is always safe. The
+    /// worst result is that the adapter sends again some data that the peer
+    /// already has.
+    ///
+    /// Must do nothing if there is no state for `peer`.
     fn sync_reset(&mut self, peer: &str);
 
-    /// Discard all document and per-peer sync state, returning the adapter
-    /// to its initial empty state.
+    /// Discards all document state and all per-peer sync state. The adapter
+    /// is then equal to a new, empty adapter.
     ///
-    /// Used by the replica's `Reset` RPC so externally-managed replicas can be
-    /// recycled between trials without bouncing the container.
+    /// The replica's `Reset` RPC calls this. It lets an externally managed
+    /// replica run many trials without a container restart.
     fn reset(&mut self);
 
-    /// Deterministically create the named text object under ROOT so that every
-    /// replica calling this on an *empty* document ends up with the same
-    /// object identity, without any sync having happened.
+    /// Creates the named text object under ROOT, so that every replica has
+    /// the same object identity without any sync.
     ///
-    /// This is the precondition for text workloads on partitioned replicas:
-    /// if each side instead creates the object lazily on first write, the two
-    /// creations are concurrent map-key puts and the eventual merge keeps only
-    /// one — silently discarding the other side's entire text rather than
-    /// interleaving it.
+    /// Call this on an empty document, before any writes. Each replica that
+    /// does so gets the same object. Text workloads on partitioned replicas
+    /// need this. If each side instead creates the object on its first write,
+    /// the two creations are concurrent puts of the same map key. The merge
+    /// keeps only one of them, and all text on the other side is lost.
     ///
-    /// Must be idempotent when the object already exists (whether created
-    /// locally or received via sync). Must fail rather than guess when the
-    /// document has prior changes but no such object — how an implementation
-    /// achieves cross-replica identity from a later state is adapter-specific
-    /// and generally unsafe.
+    /// Constraints:
     ///
-    /// Adapters whose library names root objects globally may implement this
-    /// as a no-op lookup — both non-Automerge adapters written so far do,
-    /// by different mechanisms: Yrs's `get_or_insert_text` is identity-stable
-    /// by name, and a Loro root container's id is *derived* from `(name,
-    /// type)` and always exists. Where that holds there is no creation op,
-    /// hence no concurrent creation and no losing side.
+    /// - Must succeed and do nothing if the object already exists, whether it
+    ///   was created locally or received through sync.
+    /// - Must fail if the document has changes but does not have this object.
+    ///   Do not try to create a shared identity from a later state.
+    ///
+    /// If the library names root objects globally, this can be a lookup that
+    /// does nothing. Yrs and Loro both work this way. Yrs's
+    /// `get_or_insert_text` gives the same identity for the same name. Loro
+    /// derives a root container's id from `(name, type)`, and the container
+    /// always exists. In both cases there is no creation op, so no concurrent
+    /// creation can occur.
     fn ensure_text(&mut self, obj: &str) -> anyhow::Result<()>;
 
-    /// Character length of the named text object.
+    /// Returns the length in characters of the named text object.
     ///
-    /// The orchestrator uses this as a post-convergence validity check: for
-    /// insert-only workloads the final length must equal the total op count,
-    /// proving no replica's inserts were discarded on merge. Fingerprint
-    /// equality alone cannot distinguish "converged on everything" from
-    /// "converged after throwing half the work away".
+    /// The orchestrator uses this to check results after convergence. For an
+    /// insert-only workload, the final length must equal the total op count.
+    /// This proves that the merge discarded no replica's inserts. Equal
+    /// fingerprints alone cannot prove this.
     ///
-    /// Errors if no such text object exists — where the backing library can
-    /// represent that. Loro cannot: every `(name, Text)` root id exists by
-    /// construction, so an untouched name reads as an empty text and returns
-    /// `Ok(0)`. Callers must therefore treat this as a length query and not
-    /// as an existence check. The orchestrator's `verify_text_length` already
-    /// does: it compares the length against the scenario's op count, so a
-    /// wrong object name still fails, as a mismatch rather than an error.
+    /// Returns an error if the text object does not exist, where the library
+    /// can express that. Loro cannot: every `(name, Text)` root container
+    /// exists, so an unused name returns `Ok(0)`. Thus callers must use this
+    /// as a length query, not as an existence check. The orchestrator's
+    /// `verify_text_length` does this. With a wrong object name, it fails
+    /// on a length mismatch instead of an error.
     fn text_length(&mut self, obj: &str) -> anyhow::Result<usize>;
 }
 
@@ -453,22 +469,18 @@ mod tests {
             let id = NodeId::new(name).unwrap();
             assert_eq!(id.as_str(), name);
             assert_eq!(id.to_string(), name);
-            // The header conversion must not panic for anything `new` accepts
-            // — that equivalence is the whole reason the type exists.
+            // The header conversion must not panic for any id that `new`
+            // accepts.
             let _ = id.header_value();
         }
     }
 
     #[test]
     fn node_id_rejects_what_would_break_the_peer_header() {
-        // Empty, plus the control characters that make a value illegal to
-        // send as an HTTP header — a newline is the interesting one, since an
-        // id spliced into a header could otherwise inject a second header.
-        // Each of these used to be caught by an assert in `ReplicaState` if
-        // the value arrived through the constructor, and not at all if it
-        // arrived over the wire as a peer id.
-        // (Horizontal tab and bytes 0x80-0xFF are *legal* in a header value,
-        // so they are not in this list — see the test below.)
+        // The empty string, and control characters that are illegal in an
+        // HTTP header value. A newline is the important case: it could inject
+        // a second header. Horizontal tab and bytes 0x80-0xFF are legal in a
+        // header value, so they are not in this list. See the next test.
         for bad in ["", "node\n0", "node\r\n0", "node\u{0}0"] {
             assert!(
                 NodeId::new(bad).is_err(),
@@ -477,11 +489,11 @@ mod tests {
         }
     }
 
-    /// Non-ASCII is *accepted*, and deliberately so: bytes 0x80-0xFF are legal
-    /// obs-text in an HTTP header value, so such an id can be sent as
-    /// `x-peer-id` and the type's invariant holds. Asserted rather than left
-    /// implicit because "ASCII" appears in the underlying type's name
-    /// (`AsciiMetadataValue`) and reads like a stricter promise than it is.
+    /// `NodeId` accepts non-ASCII ids. Bytes 0x80-0xFF are legal obs-text in
+    /// an HTTP header value, so the id can still go in `x-peer-id`.
+    ///
+    /// The name `AsciiMetadataValue` suggests a stricter rule. This test
+    /// records the actual rule.
     #[test]
     fn node_id_allows_non_ascii_because_the_header_does() {
         let id = NodeId::new("nodé-0").unwrap();
@@ -490,9 +502,8 @@ mod tests {
 
     #[test]
     fn node_id_maps_can_be_probed_with_a_str() {
-        // The `Borrow<str>` impl is what keeps `CrdtAdapter`'s `peer: &str`
-        // parameters unchanged; without it every lookup would need an
-        // allocation.
+        // The `Borrow<str>` impl makes this work. Without it, each lookup
+        // would allocate a `NodeId`.
         let mut m = std::collections::HashMap::new();
         m.insert(NodeId::new("node-1").unwrap(), 7);
         assert_eq!(m.get("node-1"), Some(&7));

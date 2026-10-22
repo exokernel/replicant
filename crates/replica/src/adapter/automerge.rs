@@ -8,19 +8,21 @@ use automerge::{
 };
 use common::{CrdtAdapter, Op, ScalarVal};
 
-/// Fixed actor id under which [`CrdtAdapter::ensure_text`] authors the
-/// bootstrap change. Every replica uses the same actor, the same single op,
-/// empty deps (the document must be empty), and commit time 0 — so the change
-/// bytes, its hash, and the created object's identity (`OpId(1, this actor)`)
-/// are identical everywhere without any sync. The adapter's own actor is
-/// restored immediately after, so all real ops remain attributed per replica.
+/// Fixed actor id for the bootstrap change that [`CrdtAdapter::ensure_text`]
+/// authors.
+///
+/// Every replica authors that change with this actor, the same single op,
+/// empty deps (the document must be empty), and commit time 0. So the change
+/// bytes, its hash, and the new object's id (`OpId(1, this actor)`) are the
+/// same on every replica, with no sync. The adapter restores its own actor
+/// right after, so every real op stays attributed to its replica.
 const BOOTSTRAP_ACTOR: &[u8] = b"replicant-bootstrap";
 
 /// [`common::CrdtAdapter`] implementation backed by `automerge::AutoCommit`.
 ///
-/// Each instance owns a single document and one `sync::State` per peer.
-/// Objects under ROOT are created lazily on first access and cached in
-/// `objects` to avoid repeated lookups through the Automerge `get` API.
+/// Each instance owns one document and one `sync::State` per peer. Objects
+/// under ROOT are created lazily on first access. `objects` caches their ids,
+/// so later ops skip the lookup through Automerge's `get` API.
 pub struct AutomergeAdapter {
     doc: AutoCommit,
     /// Per-peer sync state. Keyed by stable peer ID.
@@ -36,7 +38,7 @@ impl Default for AutomergeAdapter {
 }
 
 impl AutomergeAdapter {
-    /// Create a new, empty Automerge document with no peer state.
+    /// Creates an empty Automerge document with no peer state.
     pub fn new() -> Self {
         Self {
             doc: AutoCommit::new(),
@@ -45,9 +47,9 @@ impl AutomergeAdapter {
         }
     }
 
-    /// Convert a [`ScalarVal`] to the Automerge scalar type.
+    /// Converts a [`ScalarVal`] to an Automerge scalar.
     ///
-    /// Primitives are copied; `Str` and `Bytes` clone their backing buffer.
+    /// Primitives are copied. `Str` and `Bytes` clone their buffer.
     fn to_am_scalar(v: &ScalarVal) -> AmScalarValue {
         match v {
             ScalarVal::Str(s) => AmScalarValue::Str(s.as_str().into()),
@@ -58,34 +60,36 @@ impl AutomergeAdapter {
         }
     }
 
-    /// Return the `ObjId` for a named top-level object, creating it if needed.
+    /// Returns the `ObjId` of a named top-level object, and creates the object
+    /// if it does not exist.
     ///
-    /// Empty `obj` resolves to ROOT. `obj_type` is only consulted on first
-    /// access; subsequent calls return the cached id regardless of type.
+    /// An empty `obj` resolves to ROOT. `obj_type` is used only on first
+    /// access. Later calls return the cached id whatever the type.
     ///
     /// # Invariant
-    /// Callers must use the same `obj_type` for a given `obj` name across all
-    /// calls. Passing a different type for an already-cached name returns the
-    /// cached id silently, which will cause Automerge operations to fail or
-    /// corrupt state if the types are incompatible.
+    ///
+    /// Callers must pass the same `obj_type` for a given name on every call.
+    /// If the type differs for a cached name, this returns the cached id with
+    /// no error, and Automerge ops on it then fail or corrupt state. A
+    /// `debug_assert!` catches this in debug builds.
     fn resolve_obj(&mut self, obj: &str, obj_type: ObjType) -> anyhow::Result<ObjId> {
         if obj.is_empty() {
             return Ok(ROOT);
         }
         if let Some(id) = self.objects.get(obj) {
             debug_assert!(
-                // Verify the cached object still has the expected type. This
-                // catches callers that reuse a name with a different ObjType.
+                // Check that the cached object still has the expected type.
+                // This catches a caller that reuses a name with another type.
                 self.doc.object_type(id).is_ok_and(|t| t == obj_type),
                 "resolve_obj: '{obj}' was cached as a different type than {obj_type:?}"
             );
             return Ok(id.clone());
         }
-        // An object under this name may already exist without being cached:
-        // created by a peer and received via sync, or by `ensure_text`.
-        // Creating a new one here would put a *concurrent* object at the same
-        // key, and the eventual merge would keep only one — silently dropping
-        // every op applied to the loser. Reuse before create.
+        // The object can exist without being cached: a peer created it and
+        // sync delivered it, or `ensure_text` created it. Creating a new one
+        // here would put a concurrent object at the same key. The merge keeps
+        // only one of the two and silently drops every op applied to the
+        // other. So reuse before create.
         let id = match self.lookup_obj(obj) {
             Some((id, t)) if t == obj_type => id,
             Some((_, t)) => {
@@ -100,7 +104,7 @@ impl AutomergeAdapter {
         Ok(id)
     }
 
-    /// Look up an existing object under `ROOT[obj]`, returning its id and type.
+    /// Looks up the object at `ROOT[obj]` and returns its id and type.
     fn lookup_obj(&self, obj: &str) -> Option<(ObjId, ObjType)> {
         match self.doc.get(ROOT, obj) {
             Ok(Some((Value::Object(t), id))) => Some((id, t)),
@@ -149,8 +153,8 @@ impl CrdtAdapter for AutomergeAdapter {
                     .splice_text(id, *pos, *del_count as isize, insert)?;
             }
         }
-        // Commit the open transaction so op_duration_ms captures the full
-        // apply+commit cost, and sync_generate sees exactly this change.
+        // Commit the open transaction now. Then `op_duration_ms` includes the
+        // commit cost, and the next `sync_generate` sees exactly this change.
         self.doc.commit();
         Ok(())
     }
@@ -167,15 +171,15 @@ impl CrdtAdapter for AutomergeAdapter {
     }
 
     fn state_fingerprint(&mut self) -> Vec<u8> {
-        // Sorted concatenation of all head hashes. Equal on two replicas iff
-        // they have the same DAG frontier.
+        // The sorted, concatenated head hashes. Two replicas have equal
+        // fingerprints if and only if they have the same DAG frontier.
         self.get_heads().into_iter().flatten().collect()
     }
 
     fn doc_size_bytes(&mut self) -> usize {
-        // save() produces the full binary encoding — there is no cheaper
-        // size query in Automerge. Acceptable here because this is called
-        // once per op for the benchmark size gauge.
+        // `save()` produces the full binary encoding. Automerge has no cheaper
+        // size query. The cost is acceptable because this runs once per op,
+        // for the size gauge.
         self.doc.save().len()
     }
 
@@ -196,9 +200,9 @@ impl CrdtAdapter for AutomergeAdapter {
     }
 
     fn sync_reset(&mut self, peer: &str) {
-        // Dropping the entry is the whole reset: the next generate/receive
-        // lazily creates a fresh `sync::State`, which starts the protocol
-        // from the full handshake.
+        // Removing the entry is the whole reset. The next generate or receive
+        // creates a fresh `sync::State`, which starts the protocol from the
+        // full handshake.
         self.sync_states.remove(peer);
     }
 
@@ -212,17 +216,17 @@ impl CrdtAdapter for AutomergeAdapter {
         }
         match self.lookup_obj(obj) {
             Some((id, ObjType::Text)) => {
-                // Already present (bootstrapped earlier, or received via sync).
+                // Already present: bootstrapped earlier, or received via sync.
                 self.objects.insert(obj.to_owned(), id);
                 return Ok(());
             }
             Some((_, t)) => bail!("ensure_text: '{obj}' exists with type {t:?}"),
             None => {}
         }
-        // Authoring the bootstrap change is only deterministic from the empty
-        // document: any prior change would land in `deps`, and two replicas
-        // authoring different deps under the same (actor, seq) would corrupt
-        // the DAG rather than deduplicate.
+        // The bootstrap change is deterministic only on an empty document. A
+        // prior change would go into `deps`. Two replicas that author
+        // different deps under the same (actor, seq) corrupt the DAG instead
+        // of deduplicating.
         if !self.doc.get_heads().is_empty() {
             bail!("ensure_text: document already has changes; bootstrap must be the first change");
         }
@@ -232,9 +236,9 @@ impl CrdtAdapter for AutomergeAdapter {
             .doc
             .put_object(ROOT, obj, ObjType::Text)
             .with_context(|| format!("bootstrapping text object '{obj}'"))?;
-        // Time 0 keeps the change bytes identical across replicas and runs;
-        // the default commit would also use 0, but the determinism guarantee
-        // is the whole point here, so pin it explicitly.
+        // Time 0 keeps the change bytes identical across replicas and runs.
+        // The default commit also uses 0, but determinism is the purpose of
+        // this change, so set it explicitly.
         self.doc.commit_with(CommitOptions::default().with_time(0));
         self.doc.set_actor(own_actor);
         self.objects.insert(obj.to_owned(), id);

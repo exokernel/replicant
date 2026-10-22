@@ -1,55 +1,36 @@
 //! Generic conformance suite for any [`CrdtAdapter`] implementation.
 //!
 //! Every function here is generic over the adapter. Each adapter module
-//! (`automerge.rs`, `yrs.rs`, `loro.rs`) wraps the ones it claims with a
-//! `#[test]`. A body deliberately left unwrapped for a given adapter is a
-//! documented characterization difference, not an oversight — see that
-//! adapter's test module for the mirror test asserting what it does instead.
+//! (`automerge.rs`, `yrs.rs`, `loro.rs`) wraps the functions it supports in a
+//! `#[test]`. If an adapter does not wrap a function, that is a known
+//! difference, not an omission. The adapter's own test module then has a
+//! mirror test that asserts what the adapter does instead.
 //!
-//! A new adapter is done when every generic function here that it wraps
-//! passes.
+//! A new adapter is complete when every function that it wraps passes.
 //!
-//! # Two kinds of function live here
+//! # Two kinds of function
 //!
-//! - **Universal**: properties any adapter must satisfy regardless of which
-//!   library backs it. Every adapter wraps these.
-//! - **Characterization** (marked `ACCOMMODATION` in their doc comments):
-//!   properties true of *some* libraries, kept generic rather than moved
-//!   into one adapter module because the body has no library-specific
-//!   imports and a future adapter may share the property. That bet has paid
-//!   out once already — `save_bytes_not_canonical_across_converged_replicas`
-//!   was written as Automerge-only and Loro turned out to need it as the
-//!   thing it is *not*.
+//! - **Universal**: a property that every adapter must have. Every adapter
+//!   wraps these.
+//! - **Characterization** (marked `ACCOMMODATION` in the doc comment): a
+//!   property that only some libraries have. These stay here, not in one
+//!   adapter module, because the body uses no library-specific code and a
+//!   future adapter can have the same property.
 //!
-//! # Keeping the line in the right place
+//! # Moving a function between the two kinds
 //!
-//! The split is empirical, not predicted: a function is universal until an
-//! adapter demonstrates otherwise. It moves in both directions.
-//!
-//! Adding Loro as the third adapter moved three properties *toward*
-//! universal and one *away* from it, and the deciding rule in each case was
-//! the same — when a second adapter needed the identical mirror test, the
-//! mirror was the universal form and the original was the characterization:
-//!
-//! - `reset_returns_adapter_to_a_fresh_state`,
-//!   `reset_drops_stale_peer_state` and
-//!   `reset_allows_clean_re_sync_with_equal_fingerprint` began as
-//!   hand-written Yrs-local replacements for two Automerge-shaped tests.
-//!   Loro needed the same replacements verbatim, so they were lifted here
-//!   and the Automerge-only assertions they dropped stayed behind under the
-//!   original names.
-//! - `each_op_variant_mutates_the_doc` used to assert both "the fingerprint
-//!   moved" and "the document grew". Loro's snapshot can shrink on a
-//!   delete, so the size half split off into
-//!   `doc_size_grows_with_every_op`.
+//! A function is universal until an adapter fails it for a valid reason.
+//! When a second adapter needs the same mirror test as the first, move the
+//! mirror here as the universal function. Keep the original as the
+//! characterization.
 
 use common::{CrdtAdapter, Op, ScalarVal};
 
-/// Pump sync messages between two adapters until both return `None`,
-/// meaning each side believes the other is caught up.
+/// Sends sync messages between two adapters until both return `None`.
+/// `None` means that each side believes the other is up to date.
 pub(crate) fn sync_until_quiescent<A: CrdtAdapter>(a: &mut A, a_id: &str, b: &mut A, b_id: &str) {
-    // Bounded to prevent a buggy adapter from looping forever; well above
-    // any reasonable handshake length for these tiny docs.
+    // The bound stops a faulty adapter from looping forever. A handshake on
+    // these small documents takes far fewer rounds.
     for _ in 0..64 {
         if !sync_once(a, a_id, b, b_id) {
             return;
@@ -58,12 +39,11 @@ pub(crate) fn sync_until_quiescent<A: CrdtAdapter>(a: &mut A, a_id: &str, b: &mu
     panic!("sync did not reach quiescence within 64 rounds");
 }
 
-/// Exchange at most one message in each direction between two adapters.
+/// Sends at most one message in each direction between two adapters.
 ///
-/// Returns whether anything moved, which is what every caller's termination
-/// condition is built from. Deliberately consumes each generated message
-/// rather than cloning it to inspect afterwards: the 1e4 divergence cells
-/// produce large updates, and the clone was pure waste.
+/// Returns `true` if any message was sent. Callers use this to decide when to
+/// stop. Each message moves into the receiver and is not cloned, because the
+/// 1e4 divergence cells make large messages.
 pub(crate) fn sync_once<A: CrdtAdapter>(a: &mut A, a_id: &str, b: &mut A, b_id: &str) -> bool {
     let mut moved = false;
     if let Some(msg) = a.sync_generate(b_id) {
@@ -77,17 +57,18 @@ pub(crate) fn sync_once<A: CrdtAdapter>(a: &mut A, a_id: &str, b: &mut A, b_id: 
     moved
 }
 
-/// The canonical peer id for replica `i` in a line-topology fixture.
+/// Returns the peer id for replica `i` in a line topology.
 fn line_id(i: usize) -> String {
     format!("node-{i}")
 }
 
-/// Exchange one message in each direction across every edge of a line
-/// topology `0 <-> 1 <-> .. <-> n-1`. Returns whether anything moved.
+/// Sends one message in each direction on every edge of the line topology
+/// `0 <-> 1 <-> .. <-> n-1`. Returns `true` if any message was sent.
 ///
-/// Approximates the server's post-`apply_op` `flush_to_peers` for a
-/// non-mesh graph, which is the shape that makes integration order — and so
-/// any order-dependence in a library's encoder — actually observable.
+/// This approximates what the server's `flush_to_peers` does after
+/// `apply_op`. In a line, unlike a full mesh, replicas integrate changes in
+/// different orders. A library encoder that depends on that order then
+/// produces different bytes.
 pub(crate) fn sync_line_once<A: CrdtAdapter>(replicas: &mut [A]) -> bool {
     let mut moved = false;
     for j in 0..replicas.len().saturating_sub(1) {
@@ -97,7 +78,7 @@ pub(crate) fn sync_line_once<A: CrdtAdapter>(replicas: &mut [A]) -> bool {
     moved
 }
 
-/// Drive a line topology to quiescence.
+/// Runs `sync_line_once` until no message is sent.
 pub(crate) fn sync_line_until_quiescent<A: CrdtAdapter>(replicas: &mut [A]) {
     for _ in 0..64 {
         if !sync_line_once(replicas) {
@@ -107,13 +88,13 @@ pub(crate) fn sync_line_until_quiescent<A: CrdtAdapter>(replicas: &mut [A]) {
     panic!("line topology did not reach quiescence within 64 rounds");
 }
 
-/// Build `n` fresh replicas, apply `op_count` round-robin map writes, and
-/// pump the line after every write until the whole line is quiescent.
+/// Applies `op_count` map writes round-robin across `replicas` in a line
+/// topology, and asserts that all replicas converge.
 ///
-/// The fixture behind every save-byte-canonicity test. Those tests differ
-/// only in what they assert about the resulting encodings, so sharing the
-/// setup keeps the three claims — Automerge non-canonical, Yrs canonical,
-/// Loro canonical modulo peer-id width — comparable by construction.
+/// The line syncs one round after each write, then syncs until quiescent.
+///
+/// Every save-byte canonicity test uses this setup. The tests differ only in
+/// what they assert about the encodings, so their results are comparable.
 pub(crate) fn converged_line<A: CrdtAdapter>(replicas: &mut [A], op_count: usize) {
     let n = replicas.len();
     for i in 0..op_count {
@@ -134,6 +115,7 @@ pub(crate) fn converged_line<A: CrdtAdapter>(replicas: &mut [A], op_count: usize
     }
 }
 
+/// Builds an `Op::MapPut`.
 pub(crate) fn map_put(obj: &str, key: &str, value: impl Into<ScalarVal>) -> Op {
     Op::MapPut {
         obj: obj.to_owned(),
@@ -142,16 +124,15 @@ pub(crate) fn map_put(obj: &str, key: &str, value: impl Into<ScalarVal>) -> Op {
     }
 }
 
+/// A write that syncs from one replica to another gives equal heads and an
+/// equal, non-empty fingerprint on both.
 pub(crate) fn identical_ops_yield_equal_fingerprints<A: CrdtAdapter + Default>() {
-    // Two fresh adapters that apply the exact same op sequence should
-    // produce the same heads and the same fingerprint — no sync involved.
     let mut a = A::default();
     let mut b = A::default();
-    // ACCOMODATION: Automerge
-    // Change identifiers may depend on per-instance actor id, which is random per
-    // adapter, so we have to drive convergence through sync rather than
-    // assuming identical ops produce identical hashes. Apply on `a`, sync
-    // to `b`, then check.
+    // The test does not apply the same op on both replicas. A change id can
+    // include the per-instance actor id, which is random, so the same op on
+    // two replicas can give two different changes. Apply on `a`, then sync
+    // to `b`.
     a.apply_op(&map_put("doc", "k", "v")).unwrap();
     sync_until_quiescent(&mut a, "a", &mut b, "b");
 
@@ -163,6 +144,8 @@ pub(crate) fn identical_ops_yield_equal_fingerprints<A: CrdtAdapter + Default>()
     );
 }
 
+/// Two replicas that write different keys differ before sync and are equal
+/// after sync.
 pub(crate) fn disjoint_edits_converge_after_sync<A: CrdtAdapter + Default>() {
     let mut a = A::default();
     let mut b = A::default();
@@ -181,10 +164,11 @@ pub(crate) fn disjoint_edits_converge_after_sync<A: CrdtAdapter + Default>() {
     assert_eq!(a.state_fingerprint(), b.state_fingerprint());
 }
 
+/// Two replicas that write the same key concurrently converge after sync.
+///
+/// The merged history has two heads. `get_heads` must return them in a fixed
+/// order, so that a byte comparison of heads and fingerprints still works.
 pub(crate) fn concurrent_edits_to_same_key_converge<A: CrdtAdapter + Default>() {
-    // Both replicas write to the same key with no prior sync. The DAG
-    // ends up with two heads; get_heads must sort them so byte-equal
-    // fingerprint comparison still works.
     let mut a = A::default();
     let mut b = A::default();
     a.apply_op(&map_put("doc", "k", "from-a")).unwrap();
@@ -198,10 +182,12 @@ pub(crate) fn concurrent_edits_to_same_key_converge<A: CrdtAdapter + Default>() 
     assert_eq!(a.state_fingerprint(), b.state_fingerprint());
 }
 
+/// A write after sync, with no second sync, makes the fingerprints and heads
+/// differ.
+///
+/// This is the negative case. Without it, a fingerprint that always returns
+/// the same value would pass every convergence test.
 pub(crate) fn post_sync_divergence_is_detected<A: CrdtAdapter + Default>() {
-    // Negative case: if a writes after sync without re-syncing, the
-    // fingerprints must differ. Without this, a buggy fingerprint that
-    // returns a constant value would still pass the convergence tests.
     let mut a = A::default();
     let mut b = A::default();
     a.apply_op(&map_put("doc", "k", "v0")).unwrap();
@@ -213,20 +199,14 @@ pub(crate) fn post_sync_divergence_is_detected<A: CrdtAdapter + Default>() {
     assert_ne!(a.get_heads(), b.get_heads());
 }
 
-/// Map ops addressed at ROOT — the empty `obj` name — must work and converge.
+/// Map ops on ROOT (the empty `obj` name) work and converge.
 ///
-/// Universal, and it should have been here from the start. Every other
-/// function in this suite names its map explicitly (`map_put("doc", ...)`),
-/// so nothing exercised the empty name until the deploy generators were
-/// wired up and a docker run against Loro failed with "object name must not
-/// be empty". The orchestrator's own `map_put` helper has always sent
-/// `obj: ""`, so this was a live gap between what the suite tested and what
-/// the system does — not a hypothetical one, and it would have hit Yrs
-/// identically had a Yrs scenario ever been runnable.
+/// The orchestrator's `map_put` sends `obj: ""`. All other functions in this
+/// suite name their map, so this function is the only one that tests the
+/// shape the orchestrator really sends.
 ///
-/// The lesson worth keeping: a conformance suite written *alongside* one
-/// adapter tests the shapes that adapter's author had in mind. Cross-check
-/// against what the callers actually emit, not only against the trait.
+/// When you add a test here, check it against what the callers send, not
+/// only against the trait.
 pub(crate) fn root_map_ops_are_supported<A: CrdtAdapter + Default>() {
     let mut a = A::default();
     let mut b = A::default();
@@ -242,8 +222,9 @@ pub(crate) fn root_map_ops_are_supported<A: CrdtAdapter + Default>() {
     sync_until_quiescent(&mut a, "a", &mut b, "b");
     assert_eq!(a.state_fingerprint(), b.state_fingerprint());
 
-    // ROOT must be the *same* object on both sides, not one per replica: a
-    // concurrent delete of the key `a` wrote has to land on `a`'s entry.
+    // ROOT must be one object on both replicas, not one object per replica.
+    // So when `b` deletes the key that `a` wrote, the delete must reach
+    // `a`'s entry.
     b.apply_op(&Op::MapDelete {
         obj: String::new(),
         key: "k".into(),
@@ -260,9 +241,10 @@ pub(crate) fn root_map_ops_are_supported<A: CrdtAdapter + Default>() {
     );
 }
 
-/// One of each [`Op`] variant, in dependency order (deletes need something
-/// to delete). Shared by the two functions below so they exercise exactly
-/// the same sequence.
+/// Returns one op of each [`Op`] variant.
+///
+/// Each delete comes after the insert it removes. The two functions below
+/// both use this list, so they test the same sequence.
 fn op_variants() -> Vec<Op> {
     vec![
         map_put("m", "k", "v"),
@@ -294,14 +276,13 @@ fn op_variants() -> Vec<Op> {
     ]
 }
 
-/// Every `Op` variant must move the fingerprint. Guards against a new
-/// variant being added to the enum but not wired up in `apply_op` — the
-/// match is exhaustive so the compiler catches a *missing* arm, but it
-/// would not catch an arm that silently no-ops.
+/// Every `Op` variant changes the fingerprint.
 ///
-/// This is the universal half of what used to be one test; the doc-size
-/// half moved to `doc_size_grows_with_every_op` when `LoroAdapter` showed
-/// it is not universal.
+/// The compiler finds a missing match arm in `apply_op`. It does not find an
+/// arm that does nothing. This test finds that.
+///
+/// `doc_size_grows_with_every_op` is the size check. It is a separate
+/// function because it is not universal.
 pub(crate) fn each_op_variant_mutates_the_doc<A: CrdtAdapter + Default>() {
     let mut a = A::default();
     let mut prev_fp = a.state_fingerprint();
@@ -314,20 +295,19 @@ pub(crate) fn each_op_variant_mutates_the_doc<A: CrdtAdapter + Default>() {
     }
 }
 
-/// ACCOMMODATION: adapters whose `doc_size_bytes` reads an append-only
-/// encoding (Automerge's `save()`, Yrs's full update — both of which encode
-/// history, with deletions represented as *additional* data). For those,
-/// document size is monotonically non-decreasing, and a delete that failed
-/// to record anything would show up here as a flat size.
+/// Every `Op` variant makes the document larger.
 ///
-/// It is not universal. Loro's `ExportMode::Snapshot` carries a state
-/// section alongside the history section, so removing a map key can free
-/// more state bytes than the deletion op adds history bytes: measured
-/// 252 -> 250 across a `MapPut` then `MapDelete`. See
-/// `loro_doc_size_can_shrink_on_delete` for the mirror assertion. That is
-/// a property of the encoding, not evidence the op was dropped — which is
-/// exactly why the fingerprint check above, not this one, is the universal
-/// guard.
+/// ACCOMMODATION: Automerge and Yrs. Their `doc_size_bytes` reads an
+/// append-only encoding of history (`save()` and the full update). A delete
+/// adds data, so the size never goes down. A delete that records nothing
+/// shows here as a size that does not change.
+///
+/// Loro fails this test, and that is correct. Its snapshot also holds the
+/// current state, so a map delete can free more state bytes than it adds in
+/// history (252 to 250 bytes for a `MapPut` and a `MapDelete`). See
+/// `loro_doc_size_can_shrink_on_delete`. Use
+/// `each_op_variant_mutates_the_doc` as the universal check that an op had an
+/// effect.
 pub(crate) fn doc_size_grows_with_every_op<A: CrdtAdapter + Default>() {
     let mut a = A::default();
     let mut prev_size = a.doc_size_bytes();
@@ -344,13 +324,13 @@ pub(crate) fn doc_size_grows_with_every_op<A: CrdtAdapter + Default>() {
     }
 }
 
+/// Repeated calls to `state_fingerprint` and `get_heads`, with no write
+/// between them, return the same bytes.
+///
+/// If the fingerprint included other state, such as a counter or a
+/// transaction id, the orchestrator's convergence check would see a
+/// divergence that is not real.
 pub(crate) fn reads_are_stable_without_writes<A: CrdtAdapter + Default>() {
-    // state_fingerprint() and get_heads() must be pure with respect to
-    // document state: repeated calls without intervening writes return
-    // identical bytes. Guards against the fingerprint accidentally
-    // including incidental state (a counter, a transaction id, etc.)
-    // that the orchestrator's convergence check would mistake for a
-    // real divergence.
     let mut a = A::default();
     a.apply_op(&map_put("doc", "k", "v")).unwrap();
 
@@ -367,11 +347,12 @@ pub(crate) fn reads_are_stable_without_writes<A: CrdtAdapter + Default>() {
     assert_eq!(h2, h3);
 }
 
+/// After two replicas converge, `sync_generate` returns `None` on both sides.
+///
+/// The orchestrator's convergence loop needs this. If sync keeps sending
+/// messages after convergence, this test fails here. Otherwise the fault
+/// shows only as a flaky integration test.
 pub(crate) fn sync_is_idempotent_once_converged<A: CrdtAdapter + Default>() {
-    // After sync_until_quiescent, both sides should immediately report
-    // "nothing to send." The orchestrator's convergence-detection loop
-    // depends on this; a regression that makes sync chatty would only
-    // show up downstream as a flaky integration test.
     let mut a = A::default();
     let mut b = A::default();
     a.apply_op(&map_put("doc", "k", "v")).unwrap();
@@ -381,10 +362,12 @@ pub(crate) fn sync_is_idempotent_once_converged<A: CrdtAdapter + Default>() {
     assert!(b.sync_generate("a").is_none());
 }
 
+/// Three replicas converge when they sync pair by pair: `a <-> b`,
+/// `b <-> c`, then `a <-> c`.
+///
+/// Each pair uses its own per-peer sync state. A fault that mixes up two
+/// peers' entries in the per-peer map makes this test fail.
 pub(crate) fn three_replicas_converge_through_a_hub<A: CrdtAdapter + Default>() {
-    // Line topology: a <-> b <-> c, then a <-> c directly. Each pair
-    // uses its own per-peer sync state, so this catches cross-talk bugs in
-    // the per-peer state map.
     let mut a = A::default();
     let mut b = A::default();
     let mut c = A::default();
@@ -400,13 +383,12 @@ pub(crate) fn three_replicas_converge_through_a_hub<A: CrdtAdapter + Default>() 
     assert_eq!(b.state_fingerprint(), c.state_fingerprint());
 }
 
-/// Reset returns the adapter to its initial empty state: no heads, a
-/// fingerprint and doc size indistinguishable from a never-used adapter.
+/// After `reset`, the adapter has no heads, and its fingerprint and doc size
+/// are equal to those of a new adapter.
 ///
-/// Compared against a fresh `A::default()` rather than against emptiness:
-/// "the empty document encodes to zero bytes" is an Automerge/Loro
-/// coincidence (both flatten an empty head list), not a contract — Yrs's
-/// empty-document update is a fixed 2-byte marker.
+/// The test compares against a new `A::default()`, not against empty bytes.
+/// The trait does not say that an empty document has an empty fingerprint.
+/// For Yrs it does not: the empty document encodes to a fixed 2-byte marker.
 pub(crate) fn reset_returns_adapter_to_a_fresh_state<A: CrdtAdapter + Default>() {
     let mut fresh = A::default();
     let fresh_fp = fresh.state_fingerprint();
@@ -436,20 +418,16 @@ pub(crate) fn reset_returns_adapter_to_a_fresh_state<A: CrdtAdapter + Default>()
     );
 }
 
-/// Reset must *drop* per-peer bookkeeping, not merely hide it behind an
-/// empty document.
+/// `reset` deletes per-peer sync state.
 ///
-/// Stated as "after reset, a new write is still offered to a peer this
-/// adapter had already caught up with pre-reset". If the stale entry
-/// leaked, the post-reset write would be compared against the pre-reset
-/// progress and could be wrongly suppressed.
+/// After `reset`, a new write must go to a peer that was up to date before
+/// the reset. If the old per-peer entry stayed, the adapter could compare
+/// the new write against old progress and not send it.
 ///
-/// Deliberately does *not* assert that a freshly-reset adapter has
-/// something to send with no content to report — that holds only for a
-/// protocol that opens with a content-free handshake (Automerge's
-/// `sync::State`), and both vector-diffing adapters legitimately stay
-/// silent. See `reset_clears_doc_and_sync_state` for the Automerge-only
-/// version that does assert it.
+/// This test does not assert that a reset adapter with no writes has a
+/// message to send. Only a protocol that starts with a handshake does that
+/// (Automerge). The version-vector adapters (Yrs, Loro) correctly send
+/// nothing. `reset_clears_doc_and_sync_state` is the Automerge-only check.
 pub(crate) fn reset_drops_stale_peer_state<A: CrdtAdapter + Default>() {
     let mut a = A::default();
     a.apply_op(&map_put("doc", "k", "v")).unwrap();
@@ -467,16 +445,17 @@ pub(crate) fn reset_drops_stale_peer_state<A: CrdtAdapter + Default>() {
     );
 }
 
-/// End-to-end at the adapter layer: a writes, syncs with b, both reset, a
-/// writes different data, sync, and both converge again — proving the old
-/// per-peer state is gone rather than merely stale.
+/// Two replicas that sync, reset, and write again converge again.
 ///
-/// Convergence is asserted on fingerprints, not sizes. Sizes do not
-/// generalize: two adapters carry a random per-instance id (Yrs's var-int
-/// `ClientID`, Loro's `PeerID`) whose encoded width can differ for
-/// logically identical content. See
-/// `reset_allows_clean_re_sync_to_another_replica` for the Automerge-only
-/// size-equality version.
+/// The sequence is: `a` writes and syncs with `b`. Both reset. `a` writes
+/// different data, and the two sync. Convergence shows that the old per-peer
+/// state is gone.
+///
+/// The test compares fingerprints, not sizes. Yrs and Loro use a random
+/// per-instance id with a variable-length encoding, so two equal documents
+/// can have different sizes.
+/// `reset_allows_clean_re_sync_to_another_replica` is the Automerge-only
+/// size check.
 pub(crate) fn reset_allows_clean_re_sync_with_equal_fingerprint<A: CrdtAdapter + Default>() {
     let mut a = A::default();
     let mut b = A::default();
@@ -503,20 +482,18 @@ pub(crate) fn reset_allows_clean_re_sync_with_equal_fingerprint<A: CrdtAdapter +
     );
 }
 
-/// ACCOMMODATION: Automerge-only. Retains the two assertions that the
-/// generic `reset_returns_adapter_to_a_fresh_state` and
-/// `reset_drops_stale_peer_state` deliberately dropped, because both are
-/// true of a stateful handshake protocol and of no other adapter written
-/// so far:
+/// `reset` clears the document and the per-peer sync state.
 ///
-/// - a freshly-reset adapter's fingerprint is literally empty (Automerge
-///   flattens an empty head list; Yrs's is a 2-byte marker);
-/// - `sync_generate` for a never-seen peer always has *something* to say,
-///   even with an empty document, because `sync::State` opens with a
-///   content-free handshake. Both vector-diffing adapters stay silent
-///   there by design — always greeting every idle peer is exactly the
-///   unforced per-link overhead the sync-protocol design discussion ruled
-///   out.
+/// ACCOMMODATION: Automerge only. This test keeps two assertions that the
+/// universal `reset_returns_adapter_to_a_fresh_state` and
+/// `reset_drops_stale_peer_state` do not make:
+///
+/// - The fingerprint of a reset adapter is empty. Automerge's fingerprint is
+///   the flattened head list, which is empty. Yrs's is a 2-byte marker.
+/// - `sync_generate` for an unknown peer always returns a message, even for
+///   an empty document. Automerge's `sync::State` starts with a handshake.
+///   The version-vector adapters (Yrs, Loro) send nothing when there is
+///   nothing to send.
 pub(crate) fn reset_clears_doc_and_sync_state<A: CrdtAdapter + Default>() {
     let mut a = A::default();
     a.apply_op(&map_put("doc", "k", "v")).unwrap();
@@ -545,24 +522,23 @@ pub(crate) fn reset_clears_doc_and_sync_state<A: CrdtAdapter + Default>() {
         fresh_size,
         "doc not reset to empty size"
     );
-    // A new sync conversation against the same peer-id should start from
-    // scratch — if per-peer sync state leaked across reset, the second call
-    // would observe quiescence and return None.
+    // Sync with the same peer id must start again from the beginning. If
+    // the per-peer state stayed after reset, this call would return None.
     assert!(
         a.sync_generate("peer-x").is_some(),
         "reset must drop per-peer sync state"
     );
 }
 
-/// ACCOMMODATION: Automerge-only. The generic
-/// `reset_allows_clean_re_sync_with_equal_fingerprint` covers the
-/// convergence property; what this adds is the stricter size claim — a
-/// post-reset document must be byte-for-byte the size of a from-scratch
-/// one-write document. That holds only where the per-instance identifier
-/// is fixed-width (Automerge's 16-byte UUID `ActorId`). Yrs's `ClientID`
-/// and Loro's `PeerID` are both var-int encoded, so two independently
-/// random ids can legitimately need a different number of bytes for the
-/// same logical content — observed as a 29-vs-30-byte failure for Yrs.
+/// After sync, reset, and one new write, the document has the same size as
+/// a new document with only that write.
+///
+/// ACCOMMODATION: Automerge only. The universal
+/// `reset_allows_clean_re_sync_with_equal_fingerprint` checks convergence.
+/// This test adds the size check. The size check needs a fixed-width
+/// per-instance id, such as Automerge's 16-byte `ActorId`. Yrs's `ClientID`
+/// and Loro's `PeerID` have a variable-length encoding, so two random ids can
+/// give different sizes for the same content (29 and 30 bytes for Yrs).
 pub(crate) fn reset_allows_clean_re_sync_to_another_replica<A: CrdtAdapter + Default>() {
     let mut a = A::default();
     let mut b = A::default();
@@ -578,9 +554,8 @@ pub(crate) fn reset_allows_clean_re_sync_to_another_replica<A: CrdtAdapter + Def
     a.apply_op(&map_put("doc", "after", "new")).unwrap();
     sync_until_quiescent(&mut a, "a", &mut b, "b");
     assert_eq!(a.state_fingerprint(), b.state_fingerprint());
-    // The fresh post-reset doc must match a from-scratch baseline that
-    // only ever saw the "after" write — i.e. the size profile is that
-    // of a one-write document, not a two-write one.
+    // The reset document must have the size of a new document with only
+    // the "after" write, not the size of a two-write document.
     let mut baseline = A::default();
     baseline.apply_op(&map_put("doc", "after", "new")).unwrap();
     assert_eq!(
@@ -592,19 +567,18 @@ pub(crate) fn reset_allows_clean_re_sync_to_another_replica<A: CrdtAdapter + Def
 
 // ── ensure_text / text_length (shared-object bootstrap) ────────────────
 
-/// The core determinism guarantee: two replicas that bootstrap
-/// independently — no sync — produce the bit-identical change and
-/// therefore the same heads. Everything else about the divergence
-/// workload rests on this.
+/// Two replicas that call `ensure_text` without sync make the same change
+/// and so have the same heads.
 ///
-/// ACCOMMODATION: Automerge-only. This asserts `ensure_text` authors a
-/// change (heads non-empty). It is only true of adapters whose root-level
-/// object creation is itself an operation subject to the same merge
-/// semantics as any other op — which is why Automerge needs the
-/// BOOTSTRAP_ACTOR trick in the first place. Libraries whose root-level
-/// containers are identity-stable by name with no possible creation
-/// collision (Yrs: see `adapter::yrs`) legitimately fail this — see that
-/// adapter's own characterization test for the mirror-image assertion.
+/// The divergence workload depends on this. It makes all replicas share one
+/// text object.
+///
+/// ACCOMMODATION: Automerge only. The test asserts that `ensure_text` makes
+/// a change (the heads are not empty). That is true only where creating a
+/// root object is an op that merges like any other op. This is why Automerge
+/// needs `BOOTSTRAP_ACTOR`. In Yrs and Loro, a root object is identified by
+/// its name, so creation cannot collide and makes no change. Each of those
+/// adapters has a mirror test.
 pub(crate) fn ensure_text_is_deterministic_across_replicas<A: CrdtAdapter + Default>() {
     let mut a = A::default();
     let mut b = A::default();
@@ -620,6 +594,7 @@ pub(crate) fn ensure_text_is_deterministic_across_replicas<A: CrdtAdapter + Defa
     assert_eq!(a.state_fingerprint(), b.state_fingerprint());
 }
 
+/// A second `ensure_text` call on the same name makes no change.
 pub(crate) fn ensure_text_is_idempotent<A: CrdtAdapter + Default>() {
     let mut a = A::default();
     a.ensure_text("text").unwrap();
@@ -628,11 +603,12 @@ pub(crate) fn ensure_text_is_idempotent<A: CrdtAdapter + Default>() {
     assert_eq!(a.get_heads(), heads, "second call must not author a change");
 }
 
-/// Regression for the divergence-sweep bug: two replicas that diverge
-/// while partitioned must merge into ONE text containing both sides'
-/// inserts. Without the shared bootstrap, each side lazily created its
-/// own object, the merge kept one, and half the workload vanished —
-/// while fingerprints happily converged.
+/// Two replicas that call `ensure_text` and then edit while partitioned
+/// merge into one text that holds the inserts from both sides.
+///
+/// Without `ensure_text`, each replica can create its own text object. The
+/// merge then keeps one object and loses the other side's inserts, but the
+/// fingerprints still converge. Only the text length shows the loss.
 pub(crate) fn partitioned_text_edits_interleave_after_bootstrap<A: CrdtAdapter + Default>() {
     let mut a = A::default();
     let mut b = A::default();
@@ -645,8 +621,9 @@ pub(crate) fn partitioned_text_edits_interleave_after_bootstrap<A: CrdtAdapter +
         del_count: 0,
         insert: "x".into(),
     };
-    // Simulate divergence: 10 prepends each side, no sync in between
-    // (the same_region shape — every op contests the shared HEAD anchor).
+    // Divergence: each side inserts at position 0 ten times, with no sync.
+    // This is the same_region shape, where every op contests the same
+    // anchor.
     for _ in 0..10 {
         a.apply_op(&splice(0)).unwrap();
         b.apply_op(&splice(0)).unwrap();
@@ -664,15 +641,16 @@ pub(crate) fn partitioned_text_edits_interleave_after_bootstrap<A: CrdtAdapter +
     assert_eq!(b.text_length("text").unwrap(), 20);
 }
 
-/// The counterpart guard: without bootstrap the lazy-creation collision
-/// still exists, and text_length is exactly the check that exposes it.
-/// Locks in WHY ensure_text is mandatory for partitioned text workloads —
-/// if a future Automerge changes this behaviour, we want to know.
+/// Without `ensure_text`, two partitioned replicas each create a text
+/// object, and the merge keeps only one.
 ///
-/// ACCOMMODATION: Automerge-only, for the same reason as
-/// `ensure_text_is_deterministic_across_replicas` — this hazard requires
-/// root-object creation to be a mergeable op with a losing side, which is
-/// not true of every adapter.
+/// This shows why partitioned text workloads must call `ensure_text`.
+/// `text_length` is the check that finds the loss. If a future Automerge
+/// release removes the collision, this test fails.
+///
+/// ACCOMMODATION: Automerge only, for the same reason as
+/// `ensure_text_is_deterministic_across_replicas`. The collision needs root
+/// object creation to be an op that can lose a merge.
 pub(crate) fn without_bootstrap_partitioned_text_loses_a_side<A: CrdtAdapter + Default>() {
     let mut a = A::default();
     let mut b = A::default();
@@ -696,10 +674,13 @@ pub(crate) fn without_bootstrap_partitioned_text_loses_a_side<A: CrdtAdapter + D
     );
 }
 
-/// ACCOMMODATION: the trait does not specify `ensure_text`'s error text,
-/// only Automerge's "document already has changes" precondition happens to
-/// say "first change". Adapters without that precondition (Yrs: root types
-/// have no such ordering constraint) have no analogous error to test.
+/// `ensure_text` fails on a document that already has changes but does not
+/// have the object.
+///
+/// ACCOMMODATION: Automerge only. Automerge's bootstrap must be the first
+/// change in the document, and its error says "first change". The trait
+/// does not specify this error. Yrs and Loro have no such precondition, so
+/// they have no error to test.
 pub(crate) fn ensure_text_rejects_non_empty_doc_without_the_object<A: CrdtAdapter + Default>() {
     let mut a = A::default();
     a.apply_op(&map_put("doc", "k", "v")).unwrap();
@@ -707,8 +688,8 @@ pub(crate) fn ensure_text_rejects_non_empty_doc_without_the_object<A: CrdtAdapte
     assert!(err.to_string().contains("first change"), "{err}");
 }
 
-/// A synced-in object satisfies ensure_text — the late replica adopts it
-/// rather than authoring a bootstrap of its own.
+/// `ensure_text` on a replica that already received the object by sync
+/// uses that object and makes no change.
 pub(crate) fn ensure_text_adopts_synced_in_object<A: CrdtAdapter + Default>() {
     let mut a = A::default();
     let mut b = A::default();
@@ -727,10 +708,12 @@ pub(crate) fn ensure_text_adopts_synced_in_object<A: CrdtAdapter + Default>() {
     assert_eq!(a.get_heads(), b.get_heads(), "no extra change authored");
 }
 
-/// The adapter's object resolution must reuse an object that arrived via
-/// sync instead of creating a concurrent one — the connected-topology
-/// flavour of the same collision (a round-robin writer's first op racing
-/// the sync of another node's creation).
+/// A replica's first local write to an object that arrived by sync uses
+/// that object and does not create a second one.
+///
+/// This is the same collision in a connected topology. A round-robin
+/// writer's first op can arrive just after another node's creation of the
+/// object.
 pub(crate) fn first_local_write_reuses_synced_in_object<A: CrdtAdapter + Default>() {
     let mut a = A::default();
     let mut b = A::default();
@@ -744,8 +727,8 @@ pub(crate) fn first_local_write_reuses_synced_in_object<A: CrdtAdapter + Default
     a.apply_op(&splice("aa")).unwrap();
     sync_until_quiescent(&mut a, "a", &mut b, "b");
 
-    // b's first local write: the object exists in its doc but not its
-    // cache. It must splice into that object, not create a rival.
+    // b's first local write. The object is in b's document but not in b's
+    // cache. The write must go into that object and not create a new one.
     b.apply_op(&splice("bb")).unwrap();
     sync_until_quiescent(&mut a, "a", &mut b, "b");
 
@@ -755,17 +738,16 @@ pub(crate) fn first_local_write_reuses_synced_in_object<A: CrdtAdapter + Default
 
 // ── sync_reset (partition-heal support) ────────────────────────────────
 
-/// After quiescence, generate returns `None` — the state believes the
-/// peer is caught up. `sync_reset` must forget that, so the next generate
-/// restarts the handshake. This is what lets a healed link re-establish
-/// sync without reconnecting the stream.
+/// After `sync_reset`, `sync_generate` returns a message again for a peer
+/// that was up to date.
 ///
-/// This is a contract-level assertion, not a mechanism-level one: it
-/// exercises "quiesced -> reset -> generate has something to say again"
-/// without assuming *how* an adapter tracks quiescence. Automerge threads
-/// a `sync::State`; other adapters may cache a remembered peer state
-/// vector or something else native to their protocol — either satisfies
-/// this test.
+/// When the replicas are quiescent, `sync_generate` returns `None`.
+/// `sync_reset` makes the adapter forget the peer's progress. This lets a
+/// healed link start sync again without a new stream.
+///
+/// The test checks the trait contract only. It does not assume how the
+/// adapter tracks the peer. Automerge keeps a `sync::State`. Yrs and Loro
+/// keep the peer's last known version vector.
 pub(crate) fn sync_reset_forgets_quiescence<A: CrdtAdapter + Default>() {
     let mut a = A::default();
     let mut b = A::default();
@@ -778,22 +760,23 @@ pub(crate) fn sync_reset_forgets_quiescence<A: CrdtAdapter + Default>() {
         a.sync_generate("b").is_some(),
         "reset must restart the handshake"
     );
-    // Document state is untouched by the protocol reset.
+    // The protocol reset does not change the document.
     assert!(!a.get_heads().is_empty());
 }
 
-/// The heal scenario end-to-end at the adapter layer: a message is
-/// generated and then lost (the block races the flush), leaving `a`'s
-/// protocol state believing `b` received data it never saw. Resetting
-/// both sides' states — what unblocking does — must let a fresh exchange
-/// converge anyway.
+/// Two replicas converge after a lost message if both call `sync_reset`.
+///
+/// This is the heal scenario at the adapter layer. A block can occur while a
+/// flush is in progress, so a message can be generated and then lost. `a`
+/// then believes that `b` has data that `b` never received. Unblocking
+/// calls `sync_reset` on both sides, and a new exchange must converge.
 pub(crate) fn sync_reset_recovers_from_a_lost_message<A: CrdtAdapter + Default>() {
     let mut a = A::default();
     let mut b = A::default();
     a.apply_op(&map_put("doc", "k", "v")).unwrap();
 
-    // Generated but never delivered: a's per-peer sync state records these
-    // heads as sent.
+    // Generated but not delivered. a's per-peer sync state now records
+    // these heads as sent.
     let lost = a.sync_generate("b");
     assert!(lost.is_some(), "there was a change to send");
     drop(lost);
@@ -808,27 +791,29 @@ pub(crate) fn sync_reset_recovers_from_a_lost_message<A: CrdtAdapter + Default>(
     assert!(!b.get_heads().is_empty(), "b must have received the change");
 }
 
-/// Resetting a peer that has no state must be a no-op, not a panic —
-/// unblock fires for peers that never exchanged a message.
+/// `sync_reset` for a peer with no state does nothing and does not panic.
+///
+/// Unblocking calls it for peers that never sent a message.
 pub(crate) fn sync_reset_unknown_peer_is_noop<A: CrdtAdapter + Default>() {
     let mut a = A::default();
     a.sync_reset("never-seen");
     assert!(a.get_heads().is_empty());
 }
 
-/// ACCOMMODATION: adapters in which an object name can fail to resolve.
+/// `text_length` fails for a name that was never written and for a name
+/// that holds a list.
 ///
-/// Two separate assumptions, both Automerge- and Yrs-true and both
-/// Loro-false: that a never-written name is a *missing* object rather than
-/// an empty one, and that one name can be claimed by one type at a time.
-/// Loro derives a root container id from `(name, type)` and treats every
-/// such id as existing, so neither failure is representable — see
+/// ACCOMMODATION: Automerge and Yrs. The test makes two assumptions:
+///
+/// - A name that was never written is a missing object, not an empty one.
+/// - One name holds one type at a time.
+///
+/// Neither is true for Loro. Loro identifies a root container by
+/// `(name, type)`, and every such container exists. See
 /// `loro_text_length_of_an_untouched_name_is_zero_not_an_error`.
 ///
-/// The error *text* is a weaker accommodation on top: the trait does not
-/// specify it, only that the call must fail. "not Text" happens to be
-/// worded the same way by convention in the two adapters that can fail
-/// this way; nothing requires that to stay true.
+/// The trait requires only that the call fails, not the error text. The
+/// check for "not Text" works because both adapters use that wording.
 pub(crate) fn text_length_errors_on_missing_or_wrong_type<A: CrdtAdapter + Default>() {
     let mut a = A::default();
     assert!(a.text_length("nope").is_err());
@@ -842,46 +827,36 @@ pub(crate) fn text_length_errors_on_missing_or_wrong_type<A: CrdtAdapter + Defau
     assert!(err.to_string().contains("not Text"), "{err}");
 }
 
-/// ACCOMMODATION: Automerge-only — confirmed, not merely untested elsewhere.
-/// Locks in a known Automerge property: two replicas with identical
-/// logical state (same heads, same fingerprint, same readable values)
-/// can produce *different* save() byte streams. The encoding preserves
-/// change-list storage order, which depends on integration order, and
-/// that order varies by graph position in non-mesh topologies with
-/// distributed writes.
+/// Converged replicas in a line can have different `save()` bytes.
 ///
-/// The notebook's per-scenario doc-size table treats this as expected
-/// and presents the spread as informational rather than an assertion.
-/// If a future Automerge release ever canonicalizes save(), this test
-/// will start failing and the table can be tightened to strict
-/// equality. Tried against `YrsAdapter` directly
-/// (`yrs_save_bytes_are_canonical_across_converged_replicas`) and it
-/// asserts the opposite: Yrs's full-update encoding sorts blocks by
-/// client id before writing, so it is canonical across converged
-/// replicas regardless of graph position. Kept generic here rather than
-/// moved into `automerge.rs` for the same reason as the other
-/// Automerge-only functions above: the body has no Automerge-specific
-/// imports, so a future adapter with the same non-canonical-save
-/// property (plausible for a from-scratch RGA implementation) can wrap
-/// it directly without extraction work.
+/// ACCOMMODATION: Automerge only. Two replicas with the same heads,
+/// fingerprint, and values can produce different `save()` bytes. The
+/// encoding keeps changes in the order the replica integrated them. In a
+/// topology that is not a full mesh, that order depends on the replica's
+/// position in the graph.
 ///
-/// Loro is a third answer rather than a vote for either: its snapshot is
-/// structurally canonical, and converged replicas differ only when their
-/// random `PeerID`s encode to different widths (measured at 12-16% of
-/// trials, flat in history length). Asserting this function for Loro would
-/// be a coin flip, so it wraps the pinned-peer-id form instead — see
-/// `loro_snapshot_is_canonical_across_converged_replicas_with_pinned_peer_ids`.
-/// Three adapters, three different behaviours here: worth remembering
-/// before treating any per-replica doc-size spread as one phenomenon.
+/// The analysis notebook's doc-size table shows this spread as information,
+/// not as an error. If a future Automerge release makes `save()` canonical,
+/// this test fails. Then change the table to require equal sizes.
+///
+/// The other adapters behave differently:
+///
+/// - Yrs sorts blocks by client id before it writes, so its encoding is
+///   canonical. See `yrs_save_bytes_are_canonical_across_converged_replicas`.
+/// - Loro's snapshot is canonical except for the encoded width of the random
+///   `PeerID`. Sizes differ in 12-16% of trials, so this test would pass or
+///   fail at random. See
+///   `loro_snapshot_is_canonical_across_converged_replicas_with_pinned_peer_ids`.
+///
+/// So a spread of doc sizes across replicas has a different cause for each
+/// library.
 pub(crate) fn save_bytes_not_canonical_across_converged_replicas<A: CrdtAdapter + Default>() {
     let n = 5;
     let mut replicas: Vec<A> = (0..n).map(|_| A::default()).collect();
     converged_line(&mut replicas, 10);
 
-    // save() bytes are allowed to differ — and empirically they do.
-    // Asserting they vary documents the current Automerge behavior so a
-    // future-upgrade regression toward canonical save() is loud rather
-    // than silent.
+    // The sizes are permitted to differ, and they do. The assertion makes a
+    // future change to canonical save() fail this test.
     let sizes: Vec<usize> = replicas.iter_mut().map(A::doc_size_bytes).collect();
     assert!(
         sizes.iter().min() != sizes.iter().max(),

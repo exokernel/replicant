@@ -1,11 +1,10 @@
 //! OTel metric instruments for the replica.
 //!
-//! All instruments use the `replicant.*` namespace. Attributes are passed at
-//! record time (not baked into the instrument) so one instance covers every
-//! actor/op/peer combination.
+//! All instruments use the `replicant.*` namespace. Attributes are given at
+//! record time, so one instrument covers every actor, op, and peer.
 //!
-//! The scaffolding layer owns these instruments; adapter implementations must
-//! not record metrics directly.
+//! The replica scaffolding owns these instruments. Adapters must not record
+//! metrics.
 
 use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter};
 
@@ -23,10 +22,11 @@ pub struct Metrics {
     /// Attributes: `actor`, `peer`.
     pub sync_rx: Counter<u64>,
 
-    /// Flushes skipped because the peer's outbound channel was full. The
-    /// change stays pending for a later flush, so this counts delay, not loss —
-    /// but a non-zero value means a peer is not draining fast enough and
-    /// convergence timings for that run include the resulting stalls.
+    /// Flushes skipped because the peer's outbound channel was full.
+    ///
+    /// The change stays pending for a later flush, so this counts delay, not
+    /// loss. A non-zero value means a peer does not drain fast enough. The
+    /// convergence times for that run then include those stalls.
     /// Attributes: `actor`, `peer`.
     pub sync_deferred: Counter<u64>,
 
