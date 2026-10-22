@@ -8,8 +8,8 @@ if ((BASH_VERSINFO[0] < 4)); then
     exit 1
 fi
 
-# Must match `Crdt::ALL` in crates/replica/src/adapter.rs and CRDT_CHOICES in
-# deploy/docker/gen-compose.py.
+# Must match `Crdt::ALL` in crates/replica/src/adapter.rs, `crdts` in the
+# Justfile, and CRDT_CHOICES in deploy/docker/gen-compose.py.
 CRDT_CHOICES="automerge yrs loro"
 
 # Used by the scripts that source this file.

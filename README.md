@@ -107,7 +107,7 @@ A backend has these parts:
 - One variant in `replica::adapter::Crdt`. Its doc comment lists the rest of
   the Rust changes.
 - The library name in the accepted-value lists in the `Justfile`,
-  `deploy/docker/gen-compose.py`, and `scripts/lib/bench-common.sh`.
+  `deploy/docker/gen-compose.py`, and `scripts/lib/stack.sh`.
 
 The rest of the code is generic over the trait.
 

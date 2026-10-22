@@ -6,6 +6,9 @@
 python := if path_exists(justfile_directory() / ".venv/bin/python3") == "true" { ".venv/bin/python3" } else { "python3" }
 default_scenario := "scenarios/full-mesh-n5.toml"
 
+# Every CRDT library. Must match `Crdt::ALL` in crates/replica/src/adapter.rs.
+crdts := "automerge yrs loro"
+
 # List the recipes
 default:
     @just --list --unsorted
@@ -60,10 +63,10 @@ doc-check:
 docs:
     cargo doc --workspace --no-deps --open
 
-# Run the built-in regression scenarios (2, 3, and 4 nodes) in-process
+# Run the built-in regression scenarios (2, 3, and 4 nodes) in-process, with each CRDT library
 [group('develop')]
 smoke:
-    cargo run --bin orchestrator
+    for crdt in {{ crdts }}; do cargo run --bin orchestrator -- --crdt "$crdt" || exit 1; done
 
 # Full gate, as run by CI
 [group('develop')]

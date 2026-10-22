@@ -1,16 +1,13 @@
 name: CI
 
-# paths-ignore: skip runs when a push touches ONLY documentation or
-# analysis-side artifacts — nothing the gate or docker smoke reads. A push
-# mixing docs with any code change still runs (the filter skips only when
-# every changed file matches). Deliberately a blacklist rather than a code
-# whitelist so newly-added source directories trigger CI by default.
+# CI does not run when every changed file matches paths-ignore. A push that
+# also changes code still runs. The list names what to skip, not what to run,
+# so a new source directory triggers CI by default.
 #
-# In the ignore set: markdown anywhere; archived measurement data (data/ is
-# CSVs + JSON + a README, consumed by notebooks, not by CI); the notebooks
-# and their requirements (CI installs its own pyyaml directly); repo-meta
-# dotfiles. NOT ignored: scenarios/ (just check-scenarios), Justfile,
-# Dockerfile, deploy/, proto/, rust-toolchain.toml, and this file itself.
+# Skipped: markdown, the archived data in data/ (only notebooks read it),
+# analysis/ (CI installs its own pyyaml), and repo dotfiles. Not skipped:
+# scenarios/ (`just check-scenarios` reads it), the Justfile, scripts/, the
+# Dockerfile, deploy/, proto/, rust-toolchain.toml, and this file.
 on:
   push:
     branches: [main]
@@ -31,16 +28,15 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-# Superseded runs on the same ref are wasted compute — cancel them.
+# A newer run on the same ref cancels the older one.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  # The same gate as local development: `just ci`. Running the recipe,
-  # not a copy of its steps, keeps CI and the local gate the same. The
-  # toolchain comes from rust-toolchain.toml, which rustup reads, so this
-  # file pins no Rust version.
+  # The local gate, `just ci`. Running the recipe, not a copy of its steps,
+  # keeps CI and the local gate the same. rustup reads the toolchain from
+  # rust-toolchain.toml, so this file pins no Rust version.
   gate:
     name: just ci
     runs-on: ubuntu-latest
@@ -59,13 +55,11 @@ jobs:
       - name: Run the gate
         run: just ci
 
-  # End-to-end deployment check that the local gate deliberately excludes
-  # (needs a docker daemon): build the replica image, bring up an
-  # N-replica compose stack + observability, run one trial against it,
-  # tear down. This is the "deployment plumbing works" claim — a real part
-  # of the framework contribution — exercised on every push instead of
-  # only when someone remembers to run it. The in-docker cargo build is
-  # cold each run, so this job is the slow one.
+  # The deployment check that the local gate leaves out, because it needs a
+  # docker daemon. For each CRDT library, it builds the replica image, starts
+  # a compose stack with observability, runs one trial, and tears down. The
+  # first run builds the image cold. The later runs reuse its layers, so they
+  # are fast.
   smoke-docker:
     name: just smoke-docker
     runs-on: ubuntu-latest
@@ -79,14 +73,16 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: just
-      # gen-compose.py needs pyyaml; the runner's system python3 may not
-      # ship it.
+      # gen-compose.py needs pyyaml. The runner's python3 may not have it.
       - name: Install pyyaml
         run: pip install pyyaml
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
-      # The text scenario is the strongest cheap smoke: beyond the sync
-      # plumbing it exercises the EnsureText shared-object bootstrap and
-      # the post-convergence text-length gate through the real stack.
-      - name: Run docker smoke
-        run: just smoke-docker scenarios/full-mesh-n2-text.toml
+      # The text scenario covers more than the sync path: it also runs the
+      # EnsureText bootstrap and the text-length check through the real stack.
+      # The library list comes from the Justfile, so CI cannot drift from it.
+      - name: Run docker smoke for each CRDT library
+        run: |
+          for crdt in $(just --evaluate crdts); do
+            just smoke-docker scenarios/full-mesh-n2-text.toml "$crdt"
+          done
