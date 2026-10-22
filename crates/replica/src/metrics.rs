@@ -9,18 +9,18 @@
 use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter};
 
 /// Metric instruments recorded by the replica's gRPC handlers.
-pub struct Metrics {
+pub(crate) struct Metrics {
     /// Per-op application latency in milliseconds.
     /// Attributes: `actor`, `op`.
-    pub op_duration_ms: Histogram<f64>,
+    pub(crate) op_duration_ms: Histogram<f64>,
 
     /// Outbound sync messages sent to a peer.
     /// Attributes: `actor`, `peer`.
-    pub sync_tx: Counter<u64>,
+    pub(crate) sync_tx: Counter<u64>,
 
     /// Inbound sync messages received from a peer.
     /// Attributes: `actor`, `peer`.
-    pub sync_rx: Counter<u64>,
+    pub(crate) sync_rx: Counter<u64>,
 
     /// Flushes skipped because the peer's outbound channel was full.
     ///
@@ -28,16 +28,16 @@ pub struct Metrics {
     /// loss. A non-zero value means a peer does not drain fast enough. The
     /// convergence times for that run then include those stalls.
     /// Attributes: `actor`, `peer`.
-    pub sync_deferred: Counter<u64>,
+    pub(crate) sync_deferred: Counter<u64>,
 
     /// Serialized document size in bytes, sampled after each op.
     /// Attributes: `actor`.
-    pub doc_size_bytes: Gauge<u64>,
+    pub(crate) doc_size_bytes: Gauge<u64>,
 }
 
 impl Metrics {
     /// Create all instruments from `meter`. Call once at startup.
-    pub fn new(meter: &Meter) -> Self {
+    pub(crate) fn new(meter: &Meter) -> Self {
         Self {
             op_duration_ms: meter
                 .f64_histogram("replicant.op.duration")

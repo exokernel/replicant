@@ -176,10 +176,8 @@ Every operation stream comes from a seeded PRNG:
 seed = f(cell, replica, repetition)
 ```
 
-Implemented as `seed_for` in
-[`partition_heal.rs`](../crates/orchestrator/src/partition_heal.rs), over the
-hand-rolled `SplitMix64` in
-[`topology.rs`](../crates/orchestrator/src/topology.rs). The PRNG is hand-rolled
+Implemented as `seed_for`, over the hand-rolled `SplitMix64`, both in
+[`workload.rs`](../crates/orchestrator/src/workload.rs). The PRNG is hand-rolled
 so the workload does not depend on an external crate keeping its algorithm
 stable across versions.
 

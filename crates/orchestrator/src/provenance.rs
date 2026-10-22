@@ -21,9 +21,9 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
 use crate::contention::{self, AchievedContention};
-use crate::partition_heal::{DIVERGENCE_SEED_BASE, seed_for};
-use crate::runner::ReplicaEndpoint;
-use crate::topology::{PartitionConfig, ScenarioBody, ScenarioFile, Workload};
+use crate::replicas::ReplicaEndpoint;
+use crate::scenario::{PartitionConfig, ScenarioBody, ScenarioFile, Workload};
+use crate::workload::{DIVERGENCE_SEED_BASE, seed_for};
 
 /// Version of the emitted JSON shape. Raise it whenever the shape changes in a
 /// way an existing reader would misread.
@@ -280,19 +280,18 @@ fn host_provenance() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::topology::{Group, HealTopology, Locality, PartitionConfig, WritePattern};
+    use crate::scenario::WritePattern;
+    use crate::workload::Locality;
 
     fn text_cell(ops: usize, locality: Locality) -> ScenarioFile {
         ScenarioFile {
             name: "divergence-n2-test".to_owned(),
             body: ScenarioBody::PartitionHeal(PartitionConfig {
-                node_count: 2,
-                groups: vec![Group { nodes: vec![0] }, Group { nodes: vec![1] }],
                 ops_per_group: ops,
                 write_pattern: WritePattern::Concentrated,
                 workload: Workload::TextSplice,
                 locality,
-                heal_topology: HealTopology::FullMesh,
+                ..PartitionConfig::for_test(2, &[&[0], &[1]])
             }),
         }
     }
@@ -354,7 +353,7 @@ mod tests {
     /// would be misleading.
     #[test]
     fn omits_seeds_for_map_put_scenarios() {
-        let scenarios = crate::topology::builtin_scenarios();
+        let scenarios = crate::scenario::builtin_scenarios();
         let doc = document(&meta_for(&scenarios, 2));
         for cell in doc["scenarios"].as_array().unwrap() {
             assert!(cell["seeds"].is_null(), "unexpected seeds in {cell}");

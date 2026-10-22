@@ -1,14 +1,14 @@
 //! Measures the anchor contention that a cell's workload actually produces.
 //!
-//! The [`Locality`](crate::topology::Locality) axis is meant to control anchor
+//! The [`Locality`](crate::workload::Locality) axis is meant to control anchor
 //! contention. `Append` should contest one anchor. `SameRegion` should put
 //! every operation on one shared anchor. `RandomPosition` should sit between
 //! them. Those are claims about the generated operation stream, so this module
 //! checks them.
 //!
-//! No CRDT runs here. This module replays the same seeded position draws that
-//! the runner uses (see [`seed_for`]) and counts the outcome. The numbers
-//! describe the workload of one cell and repetition. They say nothing about any
+//! No CRDT runs here. This module reads the same [`PositionStream`] that the
+//! runner sends to the replicas, and counts the outcome. The numbers describe
+//! the workload of one cell and repetition. They say nothing about any
 //! library's behaviour.
 //!
 //! `docs/divergence-sweep.md` defines anchor, contested anchor, and concurrent
@@ -42,16 +42,16 @@
 //! All-singleton groups only, which is the divergence-n2 family. In a
 //! multi-node group the replicas sync with each other during the partition, so
 //! identities do cross replicas, and a correct simulation would need the real
-//! sync schedule. [`simulate`] returns `None` instead of guessing. The length
-//! counter in `run_partition_heal` has the same limit.
+//! sync schedule. [`simulate`] returns `None` instead of guessing.
+//! [`PositionStream`]'s length counter has the same limit.
 
-use crate::partition_heal::seed_for;
-use crate::topology::{PartitionConfig, SplitMix64, Workload};
+use crate::scenario::{PartitionConfig, Workload};
+use crate::workload::PositionStream;
 
 /// The contention one cell's operation stream actually produces.
 ///
 /// Compare these numbers against what the cell's
-/// [`Locality`](crate::topology::Locality) setting intends.
+/// [`Locality`](crate::workload::Locality) setting intends.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AchievedContention {
     /// Number of anchors that received inserts from more than one replica.
@@ -81,16 +81,18 @@ pub fn simulate(config: &PartitionConfig, repetition: usize) -> Option<AchievedC
     let head_children: Vec<usize> = config
         .groups
         .iter()
-        .map(|g| {
-            let node = g.nodes[0];
-            let mut rng = SplitMix64::new(seed_for(config, node, repetition));
-            (0..config.ops_per_group)
-                .filter(|&len| config.locality.draw_pos(&mut rng, len) == 0)
-                .count()
-        })
+        .map(|g| head_children(config, g.nodes[0], repetition))
         .collect();
 
     Some(summarise(&head_children))
+}
+
+/// Counts the inserts that `node` draws at position 0, which anchor at HEAD.
+fn head_children(config: &PartitionConfig, node: usize, repetition: usize) -> usize {
+    let mut stream = PositionStream::new(config, node, repetition);
+    (0..config.ops_per_group)
+        .filter(|_| stream.next_pos() == 0)
+        .count()
 }
 
 /// Turns per-replica HEAD-child counts into the reported summary.
@@ -139,11 +141,11 @@ fn simulate_general(config: &PartitionConfig, repetition: usize) -> Option<Achie
 
     for group in &config.groups {
         let node = group.nodes[0];
-        let mut rng = SplitMix64::new(seed_for(config, node, repetition));
+        let mut stream = PositionStream::new(config, node, repetition);
         let mut seq: Vec<Anchor> = Vec::new();
 
         for i in 0..config.ops_per_group {
-            let pos = config.locality.draw_pos(&mut rng, seq.len());
+            let pos = stream.next_pos();
             let anchor = if pos == 0 { Anchor::Head } else { seq[pos - 1] };
             let entry = anchors.entry(anchor).or_insert_with(|| (Vec::new(), 0));
             if !entry.0.contains(&node) {
@@ -163,13 +165,7 @@ fn simulate_general(config: &PartitionConfig, repetition: usize) -> Option<Achie
     let head_children = config
         .groups
         .iter()
-        .map(|g| {
-            let node = g.nodes[0];
-            let mut rng = SplitMix64::new(seed_for(config, node, repetition));
-            (0..config.ops_per_group)
-                .filter(|&len| config.locality.draw_pos(&mut rng, len) == 0)
-                .count()
-        })
+        .map(|g| head_children(config, g.nodes[0], repetition))
         .collect();
 
     Some(AchievedContention {
@@ -184,17 +180,16 @@ fn simulate_general(config: &PartitionConfig, repetition: usize) -> Option<Achie
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::topology::{Group, HealTopology, Locality, WritePattern};
+    use crate::scenario::WritePattern;
+    use crate::workload::Locality;
 
     fn cell(ops: usize, locality: Locality) -> PartitionConfig {
         PartitionConfig {
-            node_count: 2,
-            groups: vec![Group { nodes: vec![0] }, Group { nodes: vec![1] }],
             ops_per_group: ops,
             write_pattern: WritePattern::Concentrated,
             workload: Workload::TextSplice,
             locality,
-            heal_topology: HealTopology::FullMesh,
+            ..PartitionConfig::for_test(2, &[&[0], &[1]])
         }
     }
 
@@ -287,13 +282,10 @@ mod tests {
         assert!(simulate(&c, 1).is_none(), "map_put has no anchors");
 
         let multi = PartitionConfig {
-            node_count: 4,
-            groups: vec![Group { nodes: vec![0, 1] }, Group { nodes: vec![2, 3] }],
             ops_per_group: 100,
             write_pattern: WritePattern::Concentrated,
             workload: Workload::TextSplice,
-            locality: Locality::Append,
-            heal_topology: HealTopology::FullMesh,
+            ..PartitionConfig::for_test(4, &[&[0, 1], &[2, 3]])
         };
         assert!(
             simulate(&multi, 1).is_none(),

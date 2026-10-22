@@ -1,25 +1,30 @@
 //! The gRPC server for one replica.
 //!
 //! [`ReplicaState`] holds the document, the peer streams, and the metric
-//! instruments. Two services share it. [`ReplicaService`] takes control calls
-//! from the orchestrator. [`SyncService`] accepts sync streams from peer
-//! replicas.
+//! instruments. [`router`] serves it over gRPC with two services: `Replica`
+//! takes control calls from the orchestrator, and `Sync` accepts sync streams
+//! from peer replicas. The `peer` submodule holds the sync stream code for
+//! both directions.
+
+mod peer;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
-use anyhow::Context as _;
 use opentelemetry::KeyValue;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tokio_stream::StreamExt as _;
-use tokio_stream::wrappers::ReceiverStream;
-use tonic::transport::Channel;
+use tonic::transport::Server;
+use tonic::transport::server::Router;
 use tonic::{Request, Response, Status};
 
 use common::NodeId;
-use common::proto::{self, replica_server::Replica, sync_server::Sync};
+use common::proto::{
+    self,
+    replica_server::{Replica, ReplicaServer},
+    sync_server::SyncServer,
+};
 use common::{CrdtAdapter, Op};
 
 use crate::metrics::Metrics;
@@ -30,27 +35,28 @@ use crate::metrics::Metrics;
 ///
 /// It is shared through an `Arc` by both gRPC services and by every
 /// background task.
+///
+/// All locks are `std::sync::Mutex`. No code holds a guard across an
+/// `.await`. Keep it that way. The guards are not `Send`, so the compiler
+/// rejects a guard held across an `.await` in a tonic handler or a spawned
+/// task.
 pub struct ReplicaState {
-    /// This replica's ID. It labels metrics, and it is sent as the
-    /// `x-peer-id` header on outbound sync streams.
+    /// This replica's ID. It is sent as the `x-peer-id` header on outbound
+    /// sync streams.
     actor_id: NodeId,
+    /// The `actor` metric attribute. It is built once, so that recording a
+    /// metric does not allocate.
+    actor_attr: KeyValue,
     /// The CRDT document.
-    ///
-    /// A `std::sync::Mutex` is correct here because no code holds this lock
-    /// across an `.await`. Keep it that way.
     adapter: Mutex<Box<dyn CrdtAdapter>>,
     /// The outbound channel for each connected peer.
-    ///
-    /// This is a `tokio::sync::Mutex`. No code holds it across an `.await`
-    /// at present: [`Self::flush_to_peers`] and [`Self::kick_sync`] copy the
-    /// senders out and release the lock before they send.
-    peer_txs: tokio::sync::Mutex<HashMap<NodeId, mpsc::Sender<Vec<u8>>>>,
+    peer_txs: Mutex<HashMap<NodeId, mpsc::Sender<Vec<u8>>>>,
     /// Handles of the tasks that drive the inbound and outbound sync streams.
     ///
     /// [`Self::reset`] aborts and awaits each task before it clears the
     /// document. Without this, a `sync_receive` from an old connection could
     /// write into the new, empty document.
-    peer_tasks: tokio::sync::Mutex<Vec<JoinHandle<()>>>,
+    peer_tasks: Mutex<Vec<JoinHandle<()>>>,
     /// Peers whose sync links are blocked. This is the partition mechanism
     /// behind the `SetPeerLinks` RPC.
     ///
@@ -62,9 +68,6 @@ pub struct ReplicaState {
     ///
     /// The set is keyed by peer ID, not by stream, so a peer can be blocked
     /// before its stream exists.
-    ///
-    /// A `std::sync::Mutex` is correct here because no code holds this lock
-    /// across an `.await`.
     blocked_peers: Mutex<HashSet<NodeId>>,
     /// The OTel instruments this replica records to.
     metrics: Metrics,
@@ -75,36 +78,47 @@ impl ReplicaState {
     ///
     /// The instruments come from the global OTel meter provider. Initialize
     /// the provider before you call this.
-    pub fn new(actor_id: NodeId, adapter: impl CrdtAdapter) -> Arc<Self> {
-        Self::from_boxed_adapter(actor_id, Box::new(adapter))
-    }
-
-    /// Same as [`Self::new`], but takes an adapter that is already boxed.
     ///
-    /// The replica binary uses this when it selects the adapter at run time
-    /// from the `--crdt` flag.
-    pub fn from_boxed_adapter(actor_id: NodeId, adapter: Box<dyn CrdtAdapter>) -> Arc<Self> {
+    /// [`Crdt::build`](crate::adapter::Crdt::build) returns the boxed adapter.
+    pub fn new(actor_id: NodeId, adapter: Box<dyn CrdtAdapter>) -> Arc<Self> {
         let meter = opentelemetry::global::meter("replicant");
         Arc::new(Self {
+            actor_attr: KeyValue::new("actor", Arc::<str>::from(&actor_id)),
             actor_id,
             adapter: Mutex::new(adapter),
-            peer_txs: tokio::sync::Mutex::new(HashMap::new()),
-            peer_tasks: tokio::sync::Mutex::new(Vec::new()),
+            peer_txs: Mutex::new(HashMap::new()),
+            peer_tasks: Mutex::new(Vec::new()),
             blocked_peers: Mutex::new(HashSet::new()),
             metrics: Metrics::new(&meter),
         })
     }
 
+    // ── Lock helpers ───────────────────────────────────────────────────────
+    //
+    // Each helper panics if its mutex is poisoned. A poisoned mutex means a
+    // thread panicked while it held the lock, so the data can be in a bad
+    // state.
+
     /// Locks the adapter for one trait call.
-    ///
-    /// Do not hold the guard across an `.await`. That rule is what makes a
-    /// `std::sync::Mutex` safe here.
-    ///
-    /// Panics if the mutex is poisoned. A poisoned mutex means a thread
-    /// panicked during a write, so the document can be in a bad state.
     fn adapter(&self) -> MutexGuard<'_, Box<dyn CrdtAdapter>> {
         self.adapter.lock().expect("adapter mutex poisoned")
     }
+
+    fn peer_txs(&self) -> MutexGuard<'_, HashMap<NodeId, mpsc::Sender<Vec<u8>>>> {
+        self.peer_txs.lock().expect("peer_txs mutex poisoned")
+    }
+
+    fn peer_tasks(&self) -> MutexGuard<'_, Vec<JoinHandle<()>>> {
+        self.peer_tasks.lock().expect("peer_tasks mutex poisoned")
+    }
+
+    fn blocked(&self) -> MutexGuard<'_, HashSet<NodeId>> {
+        self.blocked_peers
+            .lock()
+            .expect("blocked_peers mutex poisoned")
+    }
+
+    // ── Adapter calls ──────────────────────────────────────────────────────
 
     /// Applies `op` and returns the adapter time in milliseconds.
     ///
@@ -146,11 +160,10 @@ impl ReplicaState {
         self.adapter().text_length(obj)
     }
 
+    // ── Peer links ─────────────────────────────────────────────────────────
+
     fn is_blocked(&self, peer: &str) -> bool {
-        self.blocked_peers
-            .lock()
-            .expect("blocked_peers mutex poisoned")
-            .contains(peer)
+        self.blocked().contains(peer)
     }
 
     /// Blocks or unblocks sync traffic with `peers`. See
@@ -167,10 +180,7 @@ impl ReplicaState {
     /// could reach a peer that is still blocked, and that peer would drop it.
     fn set_peer_links(&self, peers: &[NodeId], blocked: bool) {
         {
-            let mut set = self
-                .blocked_peers
-                .lock()
-                .expect("blocked_peers mutex poisoned");
+            let mut set = self.blocked();
             for peer in peers {
                 if blocked {
                     set.insert(peer.clone());
@@ -195,11 +205,6 @@ impl ReplicaState {
         );
     }
 
-    /// Returns this replica's ID.
-    pub fn actor_id(&self) -> &NodeId {
-        &self.actor_id
-    }
-
     // ── Metric recorders ───────────────────────────────────────────────────
     //
     // These methods attach the attributes that each instrument expects. Add
@@ -208,69 +213,86 @@ impl ReplicaState {
     fn record_op_duration(&self, op_name: &'static str, elapsed_ms: f64) {
         self.metrics.op_duration_ms.record(
             elapsed_ms,
-            &[
-                KeyValue::new("actor", self.actor_id.to_string()),
-                KeyValue::new("op", op_name),
-            ],
+            &[self.actor_attr.clone(), KeyValue::new("op", op_name)],
         );
     }
 
-    /// Sample the document size and record it on the gauge.
+    /// Samples the document size and records it on the gauge.
     fn record_doc_size(&self) {
         self.metrics.doc_size_bytes.record(
             self.doc_size_bytes() as u64,
-            &[KeyValue::new("actor", self.actor_id.to_string())],
+            std::slice::from_ref(&self.actor_attr),
         );
     }
 
-    fn record_sync_tx(&self, peer_id: &str) {
+    fn record_sync_tx(&self, peer_id: &NodeId) {
         self.metrics.sync_tx.add(1, &self.peer_attrs(peer_id));
     }
 
-    fn record_sync_rx(&self, peer_id: &str) {
+    fn record_sync_rx(&self, peer_id: &NodeId) {
         self.metrics.sync_rx.add(1, &self.peer_attrs(peer_id));
     }
 
-    fn record_sync_deferred(&self, peer_id: &str) {
+    fn record_sync_deferred(&self, peer_id: &NodeId) {
         self.metrics.sync_deferred.add(1, &self.peer_attrs(peer_id));
     }
 
-    fn peer_attrs(&self, peer_id: &str) -> [KeyValue; 2] {
+    /// Returns the `actor` and `peer` attributes. Both share their strings
+    /// with existing values, so this does not allocate.
+    fn peer_attrs(&self, peer_id: &NodeId) -> [KeyValue; 2] {
         [
-            KeyValue::new("actor", self.actor_id.to_string()),
-            KeyValue::new("peer", peer_id.to_owned()),
+            self.actor_attr.clone(),
+            KeyValue::new("peer", Arc::<str>::from(peer_id)),
         ]
     }
 
-    async fn register_peer(&self, peer_id: NodeId, tx: mpsc::Sender<Vec<u8>>) {
-        self.peer_txs.lock().await.insert(peer_id, tx);
+    // ── Peer registry ──────────────────────────────────────────────────────
+
+    fn register_peer(&self, peer_id: NodeId, tx: mpsc::Sender<Vec<u8>>) {
+        self.peer_txs().insert(peer_id, tx);
     }
 
-    async fn deregister_peer(&self, peer_id: &str) {
-        self.peer_txs.lock().await.remove(peer_id);
+    fn deregister_peer(&self, peer_id: &str) {
+        self.peer_txs().remove(peer_id);
     }
 
     /// Stores the handle of a peer stream task, so that [`Self::reset`] can
     /// stop it.
-    async fn register_peer_task(&self, handle: JoinHandle<()>) {
-        self.peer_tasks.lock().await.push(handle);
+    fn register_peer_task(&self, handle: JoinHandle<()>) {
+        self.peer_tasks().push(handle);
     }
 
     /// Closes all peer connections and returns the document to its empty
     /// state.
     ///
     /// The steps must run in this order:
-    /// 1. Abort every peer stream task and await it. The await makes sure
-    ///    that a `sync_receive` in flight has released the adapter lock.
-    /// 2. Clear `peer_txs` and the blocked set. A task that ends normally
-    ///    deregisters its peer, but an aborted task does not.
+    /// 1. Close the peer streams with [`Self::close_peer_streams`]. Its
+    ///    await makes sure that a `sync_receive` in flight has released the
+    ///    adapter lock.
+    /// 2. Clear the blocked set.
     /// 3. Reset the adapter. This step is last, so it also clears any stale
     ///    `sync_receive` that landed after step 1.
     ///
     /// The caller must not call `connect_peer` on this replica while `reset`
     /// runs. A new task could be registered while step 1 drains the list.
-    pub async fn reset(&self) {
-        let handles: Vec<JoinHandle<()>> = self.peer_tasks.lock().await.drain(..).collect();
+    pub(crate) async fn reset(&self) {
+        self.close_peer_streams().await;
+        self.blocked().clear();
+        self.adapter().reset();
+    }
+
+    /// Stops every peer stream task, then forgets all peers. Does not change
+    /// the document.
+    ///
+    /// Call this before a graceful server shutdown. The shutdown waits until
+    /// every open stream ends, and an inbound sync stream otherwise ends only
+    /// when the peer closes it.
+    ///
+    /// The method aborts each task and awaits it. Then it clears `peer_txs`.
+    /// A task that ends normally deregisters its peer, but an aborted task
+    /// does not.
+    pub async fn close_peer_streams(&self) {
+        let handles: Vec<JoinHandle<()>> = self.peer_tasks().drain(..).collect();
         for h in &handles {
             h.abort();
         }
@@ -280,16 +302,13 @@ impl ReplicaState {
             if let Err(e) = h.await
                 && !e.is_cancelled()
             {
-                tracing::warn!(actor = %self.actor_id, "peer task panicked during reset: {e}");
+                tracing::warn!(actor = %self.actor_id, "peer task panicked during shutdown: {e}");
             }
         }
-        self.peer_txs.lock().await.clear();
-        self.blocked_peers
-            .lock()
-            .expect("blocked_peers mutex poisoned")
-            .clear();
-        self.adapter.lock().expect("adapter mutex poisoned").reset();
+        self.peer_txs().clear();
     }
+
+    // ── Outbound sync ──────────────────────────────────────────────────────
 
     /// Sends any pending sync message to each connected peer.
     ///
@@ -300,18 +319,33 @@ impl ReplicaState {
     /// the flush to that peer is deferred. Do not add backpressure here.
     /// `recv_loop` calls this method, so two replicas with full channels
     /// would each stop reading from the other, and both would deadlock.
-    async fn flush_to_peers(&self) {
-        // Copy the senders in one lock acquisition. No lock is held during
-        // the sends.
-        let peers: Vec<(NodeId, mpsc::Sender<Vec<u8>>)> = self
-            .peer_txs
-            .lock()
-            .await
+    fn flush_to_peers(&self) {
+        // Copy the senders under the lock, then send with no lock held.
+        let targets: Vec<(NodeId, mpsc::Sender<Vec<u8>>)> = self
+            .peer_txs()
             .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(p, tx)| (p.clone(), tx.clone()))
             .collect();
+        for (peer_id, tx) in &targets {
+            self.try_flush_peer(peer_id, tx);
+        }
+    }
 
-        for (peer_id, tx) in &peers {
+    /// Sends a sync message to each of `peers`. This starts the handshake
+    /// after a heal, and is the `KickSync` RPC.
+    ///
+    /// A peer with no open stream is skipped. A kick names peers, not edges,
+    /// and in a sparse heal graph only the healed edges have streams.
+    fn kick_sync(&self, peers: &[NodeId]) {
+        // Copy the senders under the lock, then send with no lock held.
+        let targets: Vec<(NodeId, mpsc::Sender<Vec<u8>>)> = {
+            let txs = self.peer_txs();
+            peers
+                .iter()
+                .filter_map(|p| Some((p.clone(), txs.get(p)?.clone())))
+                .collect()
+        };
+        for (peer_id, tx) in &targets {
             self.try_flush_peer(peer_id, tx);
         }
     }
@@ -327,7 +361,7 @@ impl ReplicaState {
     ///   return `None`, and the peer would never get the change. With the
     ///   space reserved first, a full channel leaves the change pending for
     ///   a later flush.
-    fn try_flush_peer(&self, peer_id: &str, tx: &mpsc::Sender<Vec<u8>>) {
+    fn try_flush_peer(&self, peer_id: &NodeId, tx: &mpsc::Sender<Vec<u8>>) {
         if self.is_blocked(peer_id) {
             tracing::trace!(peer = %peer_id, "link blocked; skipping sync flush");
             return;
@@ -343,54 +377,29 @@ impl ReplicaState {
         }
         // If there was nothing to send, dropping the permit frees the slot.
     }
-
-    /// Sends a sync message to each of `peers`. This starts the handshake
-    /// after a heal, and is the `KickSync` RPC.
-    ///
-    /// A peer with no open stream is skipped. A kick names peers, not edges,
-    /// and in a sparse heal graph only the healed edges have streams.
-    async fn kick_sync(&self, peers: &[NodeId]) {
-        let txs = self.peer_txs.lock().await;
-        let targets: Vec<(NodeId, mpsc::Sender<Vec<u8>>)> = peers
-            .iter()
-            .filter_map(|p| txs.get(p).map(|tx| (p.clone(), tx.clone())))
-            .collect();
-        drop(txs);
-        for (peer_id, tx) in &targets {
-            self.try_flush_peer(peer_id, tx);
-        }
-    }
 }
 
 // ── Service structs ────────────────────────────────────────────────────────
 
-/// The gRPC [`Replica`] service. It handles control calls from the
+/// Builds a gRPC server that serves the replica `state`.
+///
+/// The server has two services. [`Replica`] handles control calls from the
 /// orchestrator: apply ops, read state, connect peers, block links, and reset.
+/// [`Sync`](proto::sync_server::Sync) accepts sync streams from peer replicas.
+/// The caller picks the transport, for example with `serve_with_shutdown`.
+pub fn router(state: Arc<ReplicaState>) -> Router {
+    let service = ReplicaService { state };
+    Server::builder()
+        .add_service(ReplicaServer::new(service.clone()))
+        .add_service(SyncServer::new(service))
+}
+
+/// Implements both gRPC services for one replica. This file implements
+/// [`Replica`]; the `peer` submodule implements `Sync`.
 #[derive(Clone)]
-pub struct ReplicaService {
-    /// The replica this service controls.
+struct ReplicaService {
+    /// The replica that this service serves.
     state: Arc<ReplicaState>,
-}
-
-/// The gRPC [`Sync`] service. It accepts sync streams from peer replicas.
-#[derive(Clone)]
-pub struct SyncService {
-    /// The replica that receives the sync messages.
-    state: Arc<ReplicaState>,
-}
-
-impl ReplicaService {
-    /// Creates the service for the replica `state`.
-    pub fn new(state: Arc<ReplicaState>) -> Self {
-        Self { state }
-    }
-}
-
-impl SyncService {
-    /// Creates the service for the replica `state`.
-    pub fn new(state: Arc<ReplicaState>) -> Self {
-        Self { state }
-    }
 }
 
 // ── Replica service ────────────────────────────────────────────────────────
@@ -412,7 +421,7 @@ impl Replica for ReplicaService {
         self.state.record_op_duration(op.name(), elapsed_ms);
         self.state.record_doc_size();
 
-        self.state.flush_to_peers().await;
+        self.state.flush_to_peers();
 
         Ok(Response::new(proto::OpResponse {}))
     }
@@ -435,6 +444,9 @@ impl Replica for ReplicaService {
         }))
     }
 
+    /// Opens a sync stream to a peer, and returns when the stream is ready.
+    ///
+    /// If the connection fails, the call returns `UNAVAILABLE` with the cause.
     async fn connect_peer(
         &self,
         request: Request<proto::PeerRef>,
@@ -443,30 +455,27 @@ impl Replica for ReplicaService {
         // Validate the ID here. A bad ID would otherwise fail later, as a bad
         // metadata header on the outbound stream.
         let peer_id = NodeId::new(peer_id).map_err(|e| Status::invalid_argument(e.to_string()))?;
-        let state = self.state.clone();
-        // `ready_rx` resolves when the stream is open and the peer is in
-        // `peer_txs`. `ConnectPeer` returns only after that, so the caller
-        // can use the stream at once, with no sleep.
-        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-        let task_peer_id = peer_id.clone();
-        let task_state = state.clone();
-        // The wrapper logs the error and makes the task return `()`. All
-        // peer-task handles then have one type, and `reset()` can keep them in
-        // one Vec.
-        let handle = tokio::spawn(async move {
-            if let Err(e) = connect_to_peer(task_state, task_peer_id.clone(), addr, ready_tx).await
-            {
-                tracing::error!(peer = %task_peer_id, "sync stream error: {e:#}");
-            }
-        });
+        // `ready_rx` gets the setup result. On success, the stream is open and
+        // the peer is in `peer_txs`, so the caller can use the stream at once,
+        // with no sleep.
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let handle = tokio::spawn(peer::connect_and_run(
+            self.state.clone(),
+            peer_id,
+            addr,
+            ready_tx,
+        ));
         // Register the handle before awaiting `ready_rx`, so that a
         // concurrent `reset` can abort the task during setup. `ready_rx` then
         // returns an error, and the RPC fails cleanly.
-        state.register_peer_task(handle).await;
-        ready_rx.await.map_err(|_| {
-            Status::internal("connect_to_peer task dropped before signalling ready")
-        })?;
-        Ok(Response::new(proto::Empty {}))
+        self.state.register_peer_task(handle);
+        match ready_rx.await {
+            Ok(Ok(())) => Ok(Response::new(proto::Empty {})),
+            Ok(Err(cause)) => Err(Status::unavailable(cause)),
+            Err(_) => Err(Status::internal(
+                "peer connection task ended before it was ready",
+            )),
+        }
     }
 
     async fn reset(&self, _: Request<proto::Empty>) -> Result<Response<proto::Empty>, Status> {
@@ -517,7 +526,7 @@ impl Replica for ReplicaService {
         request: Request<proto::PeerIds>,
     ) -> Result<Response<proto::Empty>, Status> {
         let peer_ids = to_node_ids(request.into_inner().peer_ids)?;
-        self.state.kick_sync(&peer_ids).await;
+        self.state.kick_sync(&peer_ids);
         Ok(Response::new(proto::Empty {}))
     }
 }
@@ -533,199 +542,24 @@ fn to_node_ids(ids: Vec<String>) -> Result<Vec<NodeId>, Status> {
         .collect()
 }
 
-// ── Sync service ───────────────────────────────────────────────────────────
-
-#[tonic::async_trait]
-impl Sync for SyncService {
-    type StreamStream = ReceiverStream<Result<proto::SyncMessage, Status>>;
-
-    /// Accepts a bidirectional sync stream from a peer.
-    ///
-    /// The caller must set the `x-peer-id` metadata header to its actor ID.
-    /// The adapter applies each received [`proto::SyncMessage`]. Replies go
-    /// back on the same stream.
-    async fn stream(
-        &self,
-        request: Request<tonic::Streaming<proto::SyncMessage>>,
-    ) -> Result<Response<Self::StreamStream>, Status> {
-        let peer_id = request
-            .metadata()
-            .get("x-peer-id")
-            .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| Status::invalid_argument("missing x-peer-id metadata"))?;
-        // A value that arrived as a header is a legal header value, so in
-        // practice this rejects only the empty string.
-        let peer_id = NodeId::new(peer_id).map_err(|e| Status::invalid_argument(e.to_string()))?;
-
-        // Outbound messages go through two channels. Replica code writes raw
-        // bytes to raw_tx. The forwarder task wraps each payload as a gRPC
-        // message and sends it to grpc_tx. Tonic reads grpc_rx as the stream
-        // back to the caller.
-        let (raw_tx, raw_rx) = mpsc::channel::<Vec<u8>>(64);
-        let (grpc_tx, grpc_rx) = mpsc::channel::<Result<proto::SyncMessage, Status>>(64);
-        spawn_payload_forwarder(raw_rx, grpc_tx, Ok);
-
-        // Register raw_tx, so that recv_loop (replies) and flush_to_peers
-        // (changes after each op) can both write to this peer.
-        self.state
-            .register_peer(peer_id.clone(), raw_tx.clone())
-            .await;
-
-        let state = self.state.clone();
-        let inbound = request.into_inner();
-        let handle = tokio::spawn(recv_loop(state.clone(), peer_id, inbound, raw_tx));
-        // Register the handle, so that `reset()` stops this task too.
-        state.register_peer_task(handle).await;
-
-        // Tonic reads grpc_rx and sends each message to the calling peer.
-        Ok(Response::new(ReceiverStream::new(grpc_rx)))
-    }
-}
-
-// ── Sync tasks ─────────────────────────────────────────────────────────────
-
-/// Reads a sync stream from a peer. For each message, it updates the
-/// document, sends a reply, and relays the change to the other peers.
-///
-/// Runs until the stream closes, then deregisters the peer.
-async fn recv_loop(
-    state: Arc<ReplicaState>,
-    peer_id: NodeId,
-    mut inbound: tonic::Streaming<proto::SyncMessage>,
-    tx: mpsc::Sender<Vec<u8>>,
-) {
-    while let Some(result) = inbound.next().await {
-        match result {
-            Ok(msg) => {
-                // Drop the message if the link is blocked. Applying it would
-                // carry changes across the partition. A reply would use up
-                // sync state toward a peer that drops it. The sender now
-                // believes this message arrived. The unblock resets that
-                // state; see `ReplicaState::set_peer_links`.
-                if state.is_blocked(&peer_id) {
-                    tracing::trace!(peer = %peer_id, "link blocked; dropping inbound sync message");
-                    continue;
-                }
-                if let Err(e) = state.sync_receive(&peer_id, msg.payload) {
-                    tracing::error!(peer = %peer_id, "sync_receive failed: {e:#}");
-                    break;
-                }
-                state.record_sync_rx(&peer_id);
-                // Record the doc size here too. apply_op records it only for
-                // local writes. Without this, a replica that only receives
-                // changes would report its size from before the merge, and
-                // the size checks after convergence would fail.
-                state.record_doc_size();
-                // Reply at once if the protocol has something to send back.
-                if let Some(response) = state.sync_generate(&peer_id)
-                    && tx.send(response).await.is_err()
-                {
-                    break;
-                }
-                // Relay the new state to all other peers. Ring, line, and
-                // star topologies need this to converge. It is also safe on a
-                // full mesh: once a peer is up to date, sync_generate returns
-                // None and the relay stops.
-                state.flush_to_peers().await;
-            }
-            Err(status) => {
-                tracing::warn!(peer = %peer_id, "stream error: {status}");
-                break;
-            }
-        }
-    }
-
-    state.deregister_peer(&peer_id).await;
-    tracing::info!(peer = %peer_id, "sync stream closed");
-}
-
-/// Opens a sync stream to `peer_id` at `addr`, then reads it with
-/// [`recv_loop`].
-///
-/// `ConnectPeer` spawns this task. The task signals `ready_tx` when the stream
-/// is open and the peer is in `peer_txs`. `ConnectPeer` waits for that signal,
-/// so it returns only when the stream is ready to use.
-async fn connect_to_peer(
-    state: Arc<ReplicaState>,
-    peer_id: NodeId,
-    addr: String,
-    ready_tx: tokio::sync::oneshot::Sender<()>,
-) -> anyhow::Result<()> {
-    let endpoint = Channel::from_shared(format!("http://{addr}"))
-        .with_context(|| format!("invalid peer address '{addr}'"))?;
-    let channel = endpoint.connect().await?;
-    let mut client = proto::sync_client::SyncClient::new(channel);
-
-    let (raw_tx, raw_rx) = mpsc::channel::<Vec<u8>>(64);
-    let (grpc_tx, grpc_rx) = mpsc::channel::<proto::SyncMessage>(64);
-    spawn_payload_forwarder(raw_rx, grpc_tx, std::convert::identity);
-
-    let mut request = Request::new(ReceiverStream::new(grpc_rx));
-    request
-        .metadata_mut()
-        .insert("x-peer-id", state.actor_id.header_value());
-
-    let response = client.stream(request).await?;
-    let inbound = response.into_inner();
-
-    state.register_peer(peer_id.clone(), raw_tx.clone()).await;
-    tracing::info!(peer = %peer_id, %addr, "sync stream established");
-
-    // Send the first sync message before signalling ready, so the handshake
-    // has started when the caller continues. If the link is blocked,
-    // `try_flush_peer` sends nothing. The stream stays quiet, and `KickSync`
-    // starts the handshake at heal time.
-    state.try_flush_peer(&peer_id, &raw_tx);
-
-    // The stream is open, so let the ConnectPeer RPC return.
-    let _ = ready_tx.send(());
-
-    recv_loop(state, peer_id, inbound, raw_tx).await;
-    Ok(())
-}
-
-/// Spawns a task that wraps each raw payload as a [`proto::SyncMessage`] and
-/// forwards it to `grpc_tx`.
-///
-/// The server side of a stream sends `Result<SyncMessage, Status>`. The client
-/// side sends `SyncMessage`. `wrap` converts to the type the channel needs:
-/// `Ok` for the server side, `identity` for the client side.
-///
-/// The task stops when either channel closes.
-fn spawn_payload_forwarder<T, F>(
-    mut raw_rx: mpsc::Receiver<Vec<u8>>,
-    grpc_tx: mpsc::Sender<T>,
-    wrap: F,
-) where
-    T: Send + 'static,
-    F: Fn(proto::SyncMessage) -> T + Send + 'static,
-{
-    tokio::spawn(async move {
-        while let Some(payload) = raw_rx.recv().await {
-            if grpc_tx
-                .send(wrap(proto::SyncMessage { payload }))
-                .await
-                .is_err()
-            {
-                break;
-            }
-        }
-    });
-}
-
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapter::AutomergeAdapter;
+    use common::ScalarVal;
 
     /// Makes a `NodeId` from a test literal. Test IDs are valid, so this
     /// cannot fail.
+    /// Returns the state of a replica `node-0` that uses Automerge.
+    fn new_state() -> Arc<ReplicaState> {
+        ReplicaState::new(id("node-0"), Box::new(AutomergeAdapter::new()))
+    }
+
     fn id(s: &str) -> NodeId {
         NodeId::new(s).expect("test node ids are valid")
     }
-    use crate::adapter::AutomergeAdapter;
-    use common::ScalarVal;
 
     fn map_put(key: &str) -> Op {
         Op::MapPut {
@@ -740,25 +574,25 @@ mod tests {
     /// `sync_generate` records a message as sent. If the channel is full after
     /// that, the change is lost. This test fills the channel for one flush,
     /// drains it, and checks that a later flush still sends the change.
-    #[tokio::test]
-    async fn full_peer_channel_defers_rather_than_dropping_a_change() {
-        let state = ReplicaState::new(id("node-0"), AutomergeAdapter::new());
+    #[test]
+    fn full_peer_channel_defers_rather_than_dropping_a_change() {
+        let state = new_state();
         // Capacity 1, so a single un-drained message saturates the channel.
         let (tx, mut rx) = mpsc::channel::<Vec<u8>>(1);
-        state.register_peer(id("node-1"), tx).await;
+        state.register_peer(id("node-1"), tx);
 
         // The handshake fills the only slot. It is not drained, so the
         // channel is full for the next flush.
-        state.flush_to_peers().await;
+        state.flush_to_peers();
 
         // The write's flush finds no room. The change must stay pending.
         state.apply_op_timed(&map_put("k")).unwrap();
-        state.flush_to_peers().await;
+        state.flush_to_peers();
 
         // Drain everything queued, then flush once more. The write is still
         // owed to the peer, so this must produce a message.
         while rx.try_recv().is_ok() {}
-        state.flush_to_peers().await;
+        state.flush_to_peers();
         assert!(
             rx.try_recv().is_ok(),
             "change was lost while the peer channel was momentarily full"
@@ -766,15 +600,15 @@ mod tests {
     }
 
     /// With room in the channel, each flush sends its pending message.
-    #[tokio::test]
-    async fn flush_delivers_when_the_peer_channel_has_room() {
-        let state = ReplicaState::new(id("node-0"), AutomergeAdapter::new());
+    #[test]
+    fn flush_delivers_when_the_peer_channel_has_room() {
+        let state = new_state();
         let (tx, mut rx) = mpsc::channel::<Vec<u8>>(8);
-        state.register_peer(id("node-1"), tx).await;
+        state.register_peer(id("node-1"), tx);
 
-        state.flush_to_peers().await;
+        state.flush_to_peers();
         state.apply_op_timed(&map_put("k")).unwrap();
-        state.flush_to_peers().await;
+        state.flush_to_peers();
 
         // Handshake plus the post-write message.
         assert!(rx.try_recv().is_ok());
@@ -783,16 +617,16 @@ mod tests {
 
     /// A flush with nothing to send must release the space it reserved.
     /// Otherwise, repeated idle flushes would use up the channel.
-    #[tokio::test]
-    async fn idle_flush_does_not_consume_channel_capacity() {
-        let state = ReplicaState::new(id("node-0"), AutomergeAdapter::new());
+    #[test]
+    fn idle_flush_does_not_consume_channel_capacity() {
+        let state = new_state();
         let (tx, mut rx) = mpsc::channel::<Vec<u8>>(2);
-        state.register_peer(id("node-1"), tx.clone()).await;
+        state.register_peer(id("node-1"), tx.clone());
 
         // The first flush queues the handshake. The others have nothing new.
-        state.flush_to_peers().await;
+        state.flush_to_peers();
         for _ in 0..10 {
-            state.flush_to_peers().await;
+            state.flush_to_peers();
         }
         assert!(rx.try_recv().is_ok(), "handshake");
         assert!(
@@ -808,17 +642,17 @@ mod tests {
     /// A flush sends nothing to a blocked peer, not even a handshake. An
     /// open peer on the same replica still gets its message. This tests the
     /// outbound side of a partition.
-    #[tokio::test]
-    async fn flush_skips_blocked_peers_and_serves_the_rest() {
-        let state = ReplicaState::new(id("node-0"), AutomergeAdapter::new());
+    #[test]
+    fn flush_skips_blocked_peers_and_serves_the_rest() {
+        let state = new_state();
         let (tx_b, mut rx_blocked) = mpsc::channel::<Vec<u8>>(8);
         let (tx_o, mut rx_open) = mpsc::channel::<Vec<u8>>(8);
-        state.register_peer(id("node-1"), tx_b).await;
-        state.register_peer(id("node-2"), tx_o).await;
+        state.register_peer(id("node-1"), tx_b);
+        state.register_peer(id("node-2"), tx_o);
         state.set_peer_links(&[id("node-1")], true);
 
         state.apply_op_timed(&map_put("k")).unwrap();
-        state.flush_to_peers().await;
+        state.flush_to_peers();
 
         assert!(
             rx_blocked.try_recv().is_err(),
@@ -832,19 +666,19 @@ mod tests {
 
     /// A block must not use up sync state. After the unblock, a kick must
     /// start sending the changes the peer missed.
-    #[tokio::test]
-    async fn unblock_delivers_changes_made_during_the_block() {
-        let state = ReplicaState::new(id("node-0"), AutomergeAdapter::new());
+    #[test]
+    fn unblock_delivers_changes_made_during_the_block() {
+        let state = new_state();
         let (tx, mut rx) = mpsc::channel::<Vec<u8>>(8);
-        state.register_peer(id("node-1"), tx).await;
+        state.register_peer(id("node-1"), tx);
         state.set_peer_links(&[id("node-1")], true);
 
         state.apply_op_timed(&map_put("during-block")).unwrap();
-        state.flush_to_peers().await;
+        state.flush_to_peers();
         assert!(rx.try_recv().is_err(), "nothing crosses a blocked link");
 
         state.set_peer_links(&[id("node-1")], false);
-        state.kick_sync(&[id("node-1")]).await;
+        state.kick_sync(&[id("node-1")]);
         assert!(
             rx.try_recv().is_ok(),
             "post-unblock kick must start the handshake"
@@ -853,16 +687,16 @@ mod tests {
 
     /// A kick to a peer with no open stream does nothing. In a sparse heal
     /// graph, not every peer has an edge.
-    #[tokio::test]
-    async fn kick_sync_ignores_unknown_peers() {
-        let state = ReplicaState::new(id("node-0"), AutomergeAdapter::new());
-        state.kick_sync(&[id("node-9")]).await;
+    #[test]
+    fn kick_sync_ignores_unknown_peers() {
+        let state = new_state();
+        state.kick_sync(&[id("node-9")]);
     }
 
     /// A reset clears the blocked set. Each trial starts with all links open.
     #[tokio::test]
     async fn reset_clears_blocked_peers() {
-        let state = ReplicaState::new(id("node-0"), AutomergeAdapter::new());
+        let state = new_state();
         state.set_peer_links(&[id("node-1")], true);
         assert!(state.is_blocked("node-1"));
 

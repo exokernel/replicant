@@ -117,7 +117,8 @@ column. Reasons:
   uniform — every measurement lives in `results/results.csv`, queryable by
   pandas without joining against the OTel snapshot.
 
-See [`crates/orchestrator/src/runner.rs`](../crates/orchestrator/src/runner.rs)
+See `wait_for_nodes` in
+[`crates/orchestrator/src/replicas.rs`](../crates/orchestrator/src/replicas.rs)
 for the measurement protocol — fingerprint-poll loop after the workload
 burst until all replicas report identical `GetStateFingerprint`.
 

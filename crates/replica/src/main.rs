@@ -1,17 +1,15 @@
 //! `replicant-replica`: one gRPC replica process.
 //!
 //! Builds the [`common::CrdtAdapter`] that `--crdt` selects. Serves it on
-//! `--port` through [`ReplicaService`] (control RPCs) and [`SyncService`]
-//! (peer sync streams). Exports metrics over OTLP when the OTLP endpoint is
+//! `--port` through [`server::router`], which has the control and peer sync
+//! services. Exports metrics over OTLP when the OTLP endpoint is
 //! set (see `init_metrics`).
 
 use clap::Parser as _;
 use common::NodeId;
-use common::proto::{replica_server::ReplicaServer, sync_server::SyncServer};
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use replica::adapter::Crdt;
-use replica::server::{ReplicaService, ReplicaState, SyncService};
-use tonic::transport::Server;
+use replica::server::{self, ReplicaState};
 
 /// Returns the clap parser for `--crdt`.
 ///
@@ -70,17 +68,47 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(actor = %args.actor, %addr, crdt = %args.crdt, "replica starting");
 
-    let state = ReplicaState::from_boxed_adapter(args.actor.clone(), args.crdt.build());
-    Server::builder()
-        .add_service(ReplicaServer::new(ReplicaService::new(state.clone())))
-        .add_service(SyncServer::new(SyncService::new(state)))
-        .serve(addr)
+    let state = ReplicaState::new(args.actor.clone(), args.crdt.build());
+    let signal = shutdown_signal()?;
+    // A graceful shutdown waits for every open stream to end. Close the peer
+    // sync streams, or the shutdown waits for the peers to close them.
+    let shutdown = {
+        let state = state.clone();
+        async move {
+            signal.await;
+            state.close_peer_streams().await;
+        }
+    };
+    server::router(state)
+        .serve_with_shutdown(addr, shutdown)
         .await?;
 
     // Flush any buffered metrics before exit.
     provider.shutdown()?;
 
     Ok(())
+}
+
+/// Returns a future that resolves on Ctrl-C or SIGTERM. The server then shuts
+/// down, and `main` flushes the metrics.
+///
+/// The replica is PID 1 in its container. The kernel does not deliver a
+/// signal to PID 1 unless the process installs a handler for it. Without this
+/// handler, `docker compose down` and pod deletion wait for their timeout and
+/// then send SIGKILL, and the last metrics interval is lost.
+fn shutdown_signal() -> anyhow::Result<impl Future<Output = ()>> {
+    #[cfg(unix)]
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    Ok(async move {
+        #[cfg(unix)]
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+        #[cfg(not(unix))]
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::info!("shutdown signal received");
+    })
 }
 
 /// Builds the metrics provider.
