@@ -113,15 +113,20 @@ def grafana_service() -> dict:
             "GF_SECURITY_ADMIN_USER": "admin",
             "GF_SECURITY_ADMIN_PASSWORD": "admin",
             "GF_USERS_ALLOW_SIGN_UP": "false",
-            # Anonymous viewer would let you skip login entirely; we keep
-            # admin/admin so in-UI dashboard edits attribute correctly.
+            # Anonymous users can view, and pages may embed panels, so the
+            # guided notebook can show them inline. Editing still needs the
+            # admin login. Grafana is published on localhost only.
+            "GF_AUTH_ANONYMOUS_ENABLED": "true",
+            "GF_AUTH_ANONYMOUS_ORG_ROLE": "Viewer",
+            "GF_SECURITY_ALLOW_EMBEDDING": "true",
         },
         "volumes": [
             "../shared/grafana/datasource.yaml:/etc/grafana/provisioning/datasources/datasource.yaml:ro",
             "../shared/grafana/dashboards-provider.yaml:/etc/grafana/provisioning/dashboards/dashboards.yaml:ro",
             "../shared/grafana/dashboards:/var/lib/grafana/dashboards:ro",
         ],
-        "ports": ["3000:3000"],
+        # Localhost only: anonymous users can view (see above).
+        "ports": ["127.0.0.1:3000:3000"],
         "depends_on": {"prometheus": {"condition": "service_started"}},
     }
 

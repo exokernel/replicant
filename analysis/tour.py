@@ -28,10 +28,11 @@ def _(mo):
     It assumes that you know what a CRDT is. It does not assume that you know
     Replicant.
 
-    Every run here uses **in-process replicas**: each replica is a gRPC server
-    on a Tokio task inside the orchestrator process. The container stacks run
-    the same replica code in separate processes. Section 6 says what that
-    difference means for the numbers.
+    By default every run uses the **docker lane**: each replica is its own
+    container in a docker compose stack, and sync goes over real TCP between
+    containers. If Docker is not running, the notebook falls back to the
+    **in-process lane**, where every replica is a task inside the orchestrator
+    process. Section 7 shows how much that choice changes the numbers.
     """)
     return
 
@@ -40,21 +41,94 @@ def _(mo):
 def _(mo, th):
     with mo.status.spinner(title="Building the release orchestrator…"):
         binary = th.build()
+    docker_up = th.docker_available()
     mo.md(f"Orchestrator ready: `{binary.relative_to(th.REPO)}`")
-    return (binary,)
+    return binary, docker_up
 
 
 @app.cell
-def _(mo, th):
+def _(docker_up, mo, th):
     crdt = mo.ui.dropdown(options=list(th.CRDTS), value="automerge", label="CRDT library")
-    mo.callout(
-        mo.hstack(
-            [crdt, mo.md("Sections 1 to 4 and 6 use this library. Change it at any time.")],
-            justify="start",
-        ),
-        kind="info",
+    lane = mo.ui.dropdown(
+        options=["docker", "in-process"],
+        value="docker" if docker_up else "in-process",
+        label="lane",
     )
-    return (crdt,)
+    _note = (
+        "Every section uses these settings. Change them at any time."
+        if docker_up
+        else "**Docker is not running**, so the lane is in-process. Start Docker "
+        "(for example `colima start`) and re-run this cell to use the docker lane."
+    )
+    mo.callout(
+        mo.hstack([crdt, lane, mo.md(_note)], justify="start"),
+        kind="info" if docker_up else "warn",
+    )
+    return crdt, lane
+
+
+@app.cell
+def _(binary, crdt, lane, mo, th):
+    if lane.value == "docker":
+        with mo.status.spinner(
+            title=f"Starting a {th.STACK.size}-replica docker stack with {crdt.value}…",
+            subtitle="The first start builds the replica image, which takes a few minutes.",
+        ):
+            th.STACK.ensure(crdt.value)
+
+    def go(scenario, trials=1, library=None):
+        """Runs `scenario` with the library and lane chosen above.
+
+        `library` overrides the library for one run.
+        """
+        return th.run(scenario, library or crdt.value, binary, trials=trials, lane=lane.value)
+
+    mo.md(
+        f"Lane: **{lane.value}**"
+        + (
+            f", a stack of {th.STACK.size} replicas running **{th.STACK.crdt}**. "
+            "A scenario uses the first replicas it needs."
+            if lane.value == "docker"
+            else "."
+        )
+    )
+    return (go,)
+
+
+@app.cell
+def _(lane, mo, th):
+    _panels = mo.hstack(
+        [
+            mo.Html(
+                f'<iframe src="{th.STACK.panel_url(_id)}" width="480" height="260" '
+                'frameborder="0"></iframe>'
+            )
+            for _id in (3, 4)
+        ],
+        justify="start",
+    )
+    mo.accordion(
+        {
+            "Live dashboard (docker lane)": mo.vstack(
+                [
+                    mo.md(
+                        f"""
+                        The stack also runs Prometheus and Grafana. These two
+                        panels show the replicas' OTel sync counters, live.
+                        Replicas export every 2 s, so a run shows up a few
+                        seconds after it ends. The counters add up over every
+                        run since the stack started.
+                        [Open the full dashboard]({th.STACK.dashboard_url()}).
+                        """
+                    ),
+                    _panels,
+                ]
+            )
+            if lane.value == "docker"
+            else mo.md("The dashboard needs the docker lane.")
+        }
+    )
+    return
 
 
 @app.cell
@@ -67,7 +141,7 @@ def _(mo):
     gRPC services:
 
     - **Replica**: control calls from the orchestrator. Apply an op, read the
-      state fingerprint, connect to a peer, block a link, reset.
+      state fingerprint, connect to a peer, block a link, reset, read stats.
     - **Sync**: a stream per link to each peer. The adapter's sync messages go
       over it.
 
@@ -93,12 +167,8 @@ def _(mo):
 
 
 @app.cell
-def _(binary, crdt, mo, th):
-    first = th.run(
-        th.topology("two-replicas", 2, "full_mesh", op_count=3, write_pattern="concentrated"),
-        crdt.value,
-        binary,
-    )
+def _(crdt, go, mo, th):
+    first = go(th.topology("two-replicas", 2, "full_mesh", op_count=3, write_pattern="concentrated"))
     mo.vstack(
         [
             mo.md(
@@ -113,7 +183,9 @@ def _(binary, crdt, mo, th):
                 """
                 And this is the trace of the same trial, from `--trace`. Each
                 line is one event. A `poll` gives each replica's fingerprint
-                **class**: replicas in the same class have the same state.
+                **class**: replicas in the same class have the same state. The
+                `stats` events at the end are each replica's sync counts, read
+                after the clock stopped.
                 """
             ),
             mo.ui.table(
@@ -167,9 +239,9 @@ def _(mo):
     6. **Stop the clock** at the first poll where every replica agrees.
 
     `convergence_ms` is the time from step 3 to step 6. It **includes the time
-    to send the writes**. The clock must start before the first write: over
-    loopback, sync often finishes before the first poll returns, so a clock
-    that started after the writes would often read zero.
+    to send the writes**. The clock must start before the first write: sync is
+    fast enough that it often finishes before the first poll returns, so a
+    clock that started after the writes would often read zero.
 
     Change the run below and watch the timeline.
     """)
@@ -186,23 +258,21 @@ def _(mo):
 
 
 @app.cell
-def _(binary, crdt, mo, s2_interval, s2_nodes, s2_ops, th):
-    one = th.run(
+def _(go, mo, s2_interval, s2_nodes, s2_ops, th):
+    one = go(
         th.topology(
             "one-trial",
             s2_nodes.value,
             "full_mesh",
             s2_ops.value,
             op_interval_ms=s2_interval.value,
-        ),
-        crdt.value,
-        binary,
+        )
     )
-    _trace = one.trial_trace()
+    _trace = one.trial_events()
     _p = th.phase_times(_trace)
     _measured = _p["converged"] - _p["clock_start"]
     _writing = _p["last_write"] - _p["clock_start"]
-    _polls = int((_trace["event"] == "poll").sum())
+    _polls = th.poll_count(_trace)
     mo.vstack(
         [
             th.timeline_chart(_trace, s2_nodes.value, title="One trial, full mesh"),
@@ -281,11 +351,11 @@ def _(mo):
     s3_conn = mo.ui.dropdown(
         options=["full_mesh", "ring", "line", "star"], value="ring", label="shape"
     )
-    s3_nodes = mo.ui.slider(3, 10, value=6, label="replicas", show_value=True)
+    s3_nodes = mo.ui.slider(3, 10, value=5, label="replicas", show_value=True)
     s3_pattern = mo.ui.dropdown(
         options=["round_robin", "concentrated"], value="round_robin", label="writes go to"
     )
-    s3_ops = mo.ui.slider(5, 200, value=30, label="writes", show_value=True)
+    s3_ops = mo.ui.slider(5, 200, value=10, label="writes", show_value=True)
     s3_trials = mo.ui.slider(1, 30, value=10, label="trials", show_value=True)
     mo.vstack(
         [
@@ -301,15 +371,12 @@ def _(mo):
 
 
 @app.cell
-def _(alt, binary, crdt, mo, s3_conn, s3_nodes, s3_ops, s3_pattern, s3_trials, th):
-    topo = th.run(
+def _(alt, go, mo, s3_conn, s3_nodes, s3_ops, s3_pattern, s3_trials, th):
+    topo = go(
         th.topology("topology", s3_nodes.value, s3_conn.value, s3_ops.value, s3_pattern.value),
-        crdt.value,
-        binary,
         trials=s3_trials.value,
     )
     _edges, _ = topo.edges()
-    _tx = topo.total("replicant.sync.messages.tx")
     _strip = (
         alt.Chart(topo.trials)
         .mark_circle(size=60)
@@ -320,35 +387,31 @@ def _(alt, binary, crdt, mo, s3_conn, s3_nodes, s3_ops, s3_pattern, s3_trials, t
         )
         .properties(width=320, height=40, title="One dot per trial")
     )
-    mo.vstack(
+    mo.hstack(
         [
-            mo.hstack(
-                [
-                    th.graph_chart(
-                        s3_nodes.value,
-                        _edges,
-                        weights=topo.sync_per_edge(),
-                        title=f"{s3_conn.value}, {s3_nodes.value} replicas",
-                    ),
-                    mo.vstack(
-                        [
-                            _strip,
-                            mo.md(
-                                f"""
-                                | | |
-                                |---|---|
-                                | links | {topo.summary["edge_count"]} |
-                                | diameter | {topo.summary["diameter"]} |
-                                | p50 / p95 | {topo.summary["p50_ms"]:.2f} / {topo.summary["p95_ms"]:.2f} ms |
-                                | sync messages per write | {_tx / (s3_ops.value * s3_trials.value):.1f} |
-                                """
-                            ),
-                        ]
-                    ),
-                ],
-                justify="start",
+            th.graph_chart(
+                s3_nodes.value,
+                _edges,
+                weights=topo.sync_per_edge(),
+                title=f"{s3_conn.value}, {s3_nodes.value} replicas",
             ),
-        ]
+            mo.vstack(
+                [
+                    _strip,
+                    mo.md(
+                        f"""
+                        | | |
+                        |---|---|
+                        | links | {topo.summary["edge_count"]} |
+                        | diameter | {topo.summary["diameter"]} |
+                        | p50 / p95 | {topo.summary["p50_ms"]:.2f} / {topo.summary["p95_ms"]:.2f} ms |
+                        | sync messages per write | {topo.sync_messages() / (s3_ops.value * s3_trials.value):.1f} |
+                        """
+                    ),
+                ]
+            ),
+        ],
+        justify="start",
     )
     return
 
@@ -364,14 +427,12 @@ def _(mo):
 
 
 @app.cell
-def _(alt, binary, crdt, mo, pd, s3_nodes, s3_ops, s3_pattern, s3_sweep, s3_trials, th):
+def _(alt, go, mo, pd, s3_nodes, s3_ops, s3_pattern, s3_sweep, s3_trials, th):
     mo.stop(not s3_sweep.value)
     _rows = []
     for _shape in ["full_mesh", "star", "ring", "line"]:
-        _r = th.run(
+        _r = go(
             th.topology(_shape, s3_nodes.value, _shape, s3_ops.value, s3_pattern.value),
-            crdt.value,
-            binary,
             trials=s3_trials.value,
         )
         _rows.append(
@@ -381,8 +442,7 @@ def _(alt, binary, crdt, mo, pd, s3_nodes, s3_ops, s3_pattern, s3_sweep, s3_tria
                 "links": _r.summary["edge_count"],
                 "p50_ms": _r.summary["p50_ms"],
                 "p95_ms": _r.summary["p95_ms"],
-                "sync messages per write": _r.total("replicant.sync.messages.tx")
-                / (s3_ops.value * s3_trials.value),
+                "sync messages per write": _r.sync_messages() / (s3_ops.value * s3_trials.value),
             }
         )
     _df = pd.DataFrame(_rows)
@@ -411,20 +471,20 @@ def _(mo):
     Two effects pull against each other:
 
     - **Diameter.** A change must cross up to `diameter` links, one sync
-      round trip each. A line of 6 has diameter 5; a full mesh has 1.
+      round trip each. A line of 5 has diameter 4; a full mesh has 1.
     - **Traffic.** A replica that receives new changes relays them to its
-      other peers, so more links mean more messages per write. A full mesh of
-      6 sends about 28 messages per write; a line sends about 5.
+      other peers, so more links mean more messages per write. A full mesh
+      sends several times as many messages per write as a line.
 
-    In this lane, traffic usually wins: **the full mesh is the slowest shape
-    for all three libraries**, although its diameter is the smallest. All
-    replicas share one process and one CPU pool, so every message costs time
-    that the other replicas wait for. Over a real network a hop costs more,
-    so diameter can matter more there. The archived `comparison` notebook
-    checks whether a ranking holds in the container lanes.
+    Which effect wins depends on the load. With a light load (the default 10
+    writes), diameter wins in the docker lane: **the line is the slowest
+    shape**. Each hop crosses a real network stack, so hops are expensive.
+    Raise the writes to 50 and compare again: the traffic grows, and the four
+    shapes come close together.
 
     Treat small differences between shapes as noise until the trial spread
-    (section 6) says otherwise.
+    (section 6) says otherwise. Section 7 shows that the in-process lane gives
+    a different answer.
     """)
     return
 
@@ -504,9 +564,9 @@ def _(mo):
 
 
 @app.cell
-def _(binary, crdt, mo, s4_heal, s4_locality, s4_ops, s4_size, s4_workload, th):
+def _(go, mo, s4_heal, s4_locality, s4_ops, s4_size, s4_workload, th):
     _g = s4_size.value
-    heal = th.run(
+    heal = go(
         th.partition(
             "partition-heal",
             [list(range(_g)), list(range(_g, 2 * _g))],
@@ -514,12 +574,10 @@ def _(binary, crdt, mo, s4_heal, s4_locality, s4_ops, s4_size, s4_workload, th):
             heal_topology=s4_heal.value,
             workload=s4_workload.value,
             locality=s4_locality.value,
-        ),
-        crdt.value,
-        binary,
+        )
     )
     _edges, _blocked = heal.edges()
-    _trace = heal.trial_trace()
+    _trace = heal.trial_events()
     _p = th.phase_times(_trace)
     _row = heal.trials.iloc[0]
     mo.vstack(
@@ -571,13 +629,13 @@ def _(mo):
 
 
 @app.cell
-def _(alt, binary, crdt, mo, pd, s4_heal, s4_locality, s4_size, s4_sweep, s4_workload, th):
+def _(alt, crdt, go, mo, pd, s4_heal, s4_locality, s4_size, s4_sweep, s4_workload, th):
     mo.stop(not s4_sweep.value)
     _g = s4_size.value
     _rows = []
     with mo.status.progress_bar(total=3, title="Running") as _bar:
         for _ops in [10, 100, 1000]:
-            _r = th.run(
+            _r = go(
                 th.partition(
                     "divergence",
                     [list(range(_g)), list(range(_g, 2 * _g))],
@@ -586,8 +644,6 @@ def _(alt, binary, crdt, mo, pd, s4_heal, s4_locality, s4_size, s4_sweep, s4_wor
                     workload=s4_workload.value,
                     locality=s4_locality.value,
                 ),
-                crdt.value,
-                binary,
                 trials=2,
             )
             for _t in _r.trials.itertuples():
@@ -624,7 +680,8 @@ def _(mo):
 
     The same scenario file runs against every library, so the workload stays
     fixed and only the library changes. Choose a scenario, then run it once
-    per library.
+    per library. In the docker lane, each library change recreates the
+    replica containers, which takes a few seconds.
     """)
     return
 
@@ -652,20 +709,22 @@ def _(mo, th):
 
 
 @app.cell
-def _(alt, binary, mo, pd, s5_go, s5_preset, s5_trials, th):
+def _(alt, go, mo, pd, s5_go, s5_preset, s5_trials, th):
     mo.stop(not s5_go.value)
     _rows = []
-    for _c in th.CRDTS:
-        _r = th.run(s5_preset.value, _c, binary, trials=s5_trials.value)
-        _rows.append(
-            {
-                "library": _c,
-                "p50_ms": _r.summary["p50_ms"],
-                "p95_ms": _r.summary["p95_ms"],
-                "sync messages per trial": _r.total("replicant.sync.messages.tx") / s5_trials.value,
-                "document bytes": _r.doc_size(),
-            }
-        )
+    with mo.status.progress_bar(total=len(th.CRDTS), title="Running") as _bar:
+        for _c in th.CRDTS:
+            _r = go(s5_preset.value, trials=s5_trials.value, library=_c)
+            _rows.append(
+                {
+                    "library": _c,
+                    "p50_ms": _r.summary["p50_ms"],
+                    "p95_ms": _r.summary["p95_ms"],
+                    "sync messages per trial": _r.sync_messages() / s5_trials.value,
+                    "document bytes": _r.doc_size(),
+                }
+            )
+            _bar.update()
     _df = pd.DataFrame(_rows)
     _base = alt.Chart(_df).encode(y=alt.Y("library:N", title=None))
     mo.vstack(
@@ -729,11 +788,10 @@ def _(mo):
 
 
 @app.cell
-def _(alt, binary, crdt, mo, s6_go, s6_trials, th):
+def _(alt, crdt, go, lane, mo, s6_go, s6_trials, th):
     mo.stop(not s6_go.value)
-    spread = th.run(th.topology("spread", 6, "ring", 30), crdt.value, binary, trials=s6_trials.value)
+    spread = go(th.topology("spread", 6, "ring", 30), trials=s6_trials.value)
     _s = spread.summary
-    _deferred = spread.total("replicant.sync.messages.deferred")
     _dots = (
         alt.Chart(spread.trials)
         .mark_circle(size=40)
@@ -752,9 +810,10 @@ def _(alt, binary, crdt, mo, s6_go, s6_trials, th):
             ),
             mo.md(
                 f"""
-                Ring of 6, 30 writes, **{crdt.value}**: p50 **{_s["p50_ms"]:.2f} ms**,
-                p95 **{_s["p95_ms"]:.2f} ms**, mean {_s["mean_ms"]:.2f} ms.
-                Deferred flushes: **{_deferred}**.
+                Ring of 6, 30 writes, **{crdt.value}**, {lane.value} lane:
+                p50 **{_s["p50_ms"]:.2f} ms**, p95 **{_s["p95_ms"]:.2f} ms**,
+                mean {_s["mean_ms"]:.2f} ms. Deferred flushes:
+                **{spread.deferred()}**.
                 """
             ),
         ]
@@ -774,20 +833,106 @@ def _(mo):
       host, not a property of the library.
     - **Check the deferred counter.** Each sync link has a buffer of 64
       messages. When it is full, the replica defers the flush instead of
-      waiting. Any deferral means that the timings include those stalls. In
-      the container stacks the bench recipes record this counter; see
-      `docs/metrics.md`.
-    - **Know the lane.** In-process replicas share one process and one CPU
-      pool, and sync goes over loopback. The container stacks add real
-      process and network boundaries. The archived `comparison` notebook
-      checks whether a finding survives the change of lane.
+      waiting. Any deferral means that the timings include those stalls.
+    - **Know the lane.** Section 7 shows that the lane can change which shape
+      or library looks fastest. Say which lane a number comes from.
+    - **Remember the host.** Every container of the docker lane runs on one
+      machine. It has real process and TCP boundaries, but no real network
+      latency or loss.
     - **Keep the provenance.** Run sweeps with `--provenance`. It records the
       commit, host, build profile, seeds, and cell parameters. `results/` is
       not in version control, so without it a CSV cannot be traced to the
       code that produced it.
-    - **Do not measure with `--trace`.** Tracing reads the clock and compares
-      fingerprints inside the timed window.
+    - **Do not measure with `--trace`.** Tracing reads the clock, compares
+      fingerprints, and makes extra RPCs inside or near the timed window.
     """)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## 7. Does the lane change the answer?
+
+    The same scenarios, run in both lanes. In-process, every replica is a task
+    in one process: replicas compete for the same CPU, and a sync message
+    never leaves the process's network stack for long. In docker, each
+    replica is its own process with its own runtime, and every message crosses
+    a container network.
+    """)
+    return
+
+
+@app.cell
+def _(docker_up, mo):
+    s7_go = mo.ui.run_button(label="Compare the lanes", disabled=not docker_up)
+    mo.hstack(
+        [
+            s7_go,
+            mo.md(
+                "Runs the four shapes with 5 replicas, at 10 and 50 writes, 10 "
+                "trials each, in both lanes."
+                if docker_up
+                else "This section needs Docker."
+            ),
+        ],
+        justify="start",
+    )
+    return (s7_go,)
+
+
+@app.cell
+def _(alt, binary, crdt, mo, pd, s7_go, th):
+    mo.stop(not s7_go.value)
+    _rows = []
+    with mo.status.progress_bar(total=16, title="Running") as _bar:
+        for _lane in ["in-process", "docker"]:
+            for _ops in [10, 50]:
+                for _shape in ["full_mesh", "star", "ring", "line"]:
+                    _r = th.run(
+                        th.topology(_shape, 5, _shape, _ops),
+                        crdt.value,
+                        binary,
+                        trials=10,
+                        lane=_lane,
+                    )
+                    _rows.append(
+                        {
+                            "lane": _lane,
+                            "load": f"{_ops} writes",
+                            "shape": _shape,
+                            "p50_ms": _r.summary["p50_ms"],
+                        }
+                    )
+                    _bar.update()
+    _df = pd.DataFrame(_rows)
+    mo.vstack(
+        [
+            alt.Chart(_df)
+            .mark_bar()
+            .encode(
+                x=alt.X("p50_ms:Q", title="p50 convergence (ms)"),
+                y=alt.Y("shape:N", sort=["full_mesh", "star", "ring", "line"], title=None),
+                color=alt.Color("lane:N"),
+                yOffset="lane:N",
+                column=alt.Column("load:N", title=None),
+            )
+            .properties(width=260, height=200),
+            mo.md(
+                f"""
+                With **{crdt.value}**. When this tour was written, with
+                Automerge, the two lanes ranked the shapes differently. At 50
+                writes the in-process full mesh was by far the slowest shape,
+                because its traffic competed for one CPU pool. In docker the
+                four shapes were close. At 10 writes, docker made the line the
+                slowest shape, because each hop crossed a network stack.
+
+                The lesson: a ranking measured in one lane is a claim about
+                that lane. Before you report one, check it in the other.
+                """
+            ),
+        ]
+    )
     return
 
 

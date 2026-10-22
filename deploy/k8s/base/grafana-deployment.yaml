@@ -27,6 +27,14 @@ spec:
               value: admin
             - name: GF_USERS_ALLOW_SIGN_UP
               value: "false"
+            # Anonymous users can view, and pages may embed panels. Editing
+            # still needs the admin login. Same settings as the compose stack.
+            - name: GF_AUTH_ANONYMOUS_ENABLED
+              value: "true"
+            - name: GF_AUTH_ANONYMOUS_ORG_ROLE
+              value: Viewer
+            - name: GF_SECURITY_ALLOW_EMBEDDING
+              value: "true"
           ports:
             - name: http
               containerPort: 3000
