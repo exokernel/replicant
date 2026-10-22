@@ -21,8 +21,8 @@ DEFAULT_CRDT=automerge
 # Host port of replica 0. Replica i listens on REPLICA_PORT_BASE + i.
 REPLICA_PORT_BASE=50051
 
-# Prints the Python interpreter to use: the analysis .venv if it exists,
-# otherwise python3 from PATH.
+# Prints the Python interpreter to use: .venv if it exists, otherwise python3
+# from PATH.
 python_bin() {
     if [ -x .venv/bin/python3 ]; then
         echo .venv/bin/python3

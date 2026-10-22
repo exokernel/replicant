@@ -1,0 +1,10 @@
+# Tool versions for this repository. Rust is pinned in rust-toolchain.toml.
+#
+# Entering the repository activates .venv, and creates it if it is missing.
+# Then run `just setup` to install the Python packages into it.
+
+[tools]
+python = "3.14"
+
+[env]
+_.python.venv = { path = ".venv", create = true }

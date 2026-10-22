@@ -5,8 +5,8 @@ explains how Replicant works and how to read what it measures, and it runs
 small scenarios live. It is for a reader who knows CRDTs but not Replicant.
 
 ```sh
-pip install -r analysis/requirements.txt   # into the repository's .venv
-just tour                                  # opens the notebook in a browser
+just setup   # installs requirements.txt into .venv
+just tour    # opens the notebook in a browser
 ```
 
 The notebook builds the release orchestrator, then runs each scenario with

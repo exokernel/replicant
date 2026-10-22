@@ -42,8 +42,10 @@ the library:
     `kubectl`.
   - bash 4 or later. macOS ships bash 3.2; install a newer one with
     `brew install bash`.
-  - `python3` with `pyyaml` (docker compose), and `jq` and `curl` (bench
-    recipes).
+  - `jq` and `curl`, for the bench recipes.
+- Python 3, for the notebooks and the deploy tooling. `just setup` creates
+  `.venv` and installs `requirements.txt` into it. With
+  [mise](https://mise.jdx.dev), entering the repository activates `.venv`.
 
 ## Quick start
 

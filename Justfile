@@ -15,6 +15,12 @@ default:
 
 # ── Develop ─────────────────────────────────────────────────────────────────
 
+# Create .venv if it is missing, and install requirements.txt into it
+[group('develop')]
+setup:
+    test -x .venv/bin/python3 || python3 -m venv .venv
+    .venv/bin/python3 -m pip install --quiet -r requirements.txt
+
 # Format all crates
 [group('develop')]
 fmt:
@@ -169,7 +175,7 @@ clean-notebooks:
     elif command -v nbstripout >/dev/null 2>&1; then
         nbstripout=nbstripout
     else
-        echo "error: nbstripout not found; pip install -r analysis/requirements.txt" >&2
+        echo "error: nbstripout not found; run just setup" >&2
         exit 1
     fi
     find analysis -name '*.ipynb' -not -path '*/.ipynb_checkpoints/*' -print0 \

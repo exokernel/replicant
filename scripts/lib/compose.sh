@@ -11,8 +11,7 @@ compose() {
 
 # Writes the compose file for $1 replicas backed by CRDT library $2.
 #
-# gen-compose.py needs pyyaml. The analysis .venv has it, from
-# analysis/requirements.txt.
+# gen-compose.py needs pyyaml. `just setup` installs it into .venv.
 compose_generate() {
     "$(python_bin)" deploy/docker/gen-compose.py "$1" --crdt "$2" > "$COMPOSE_FILE"
 }

@@ -1,3 +1,6 @@
+# Every Python package the repository uses. Install into .venv with
+# `just setup`.
+
 # The guided notebook, analysis/tour.py.
 marimo
 altair
