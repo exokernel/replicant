@@ -10,8 +10,8 @@ use anyhow::Result;
 use tokio::task::JoinSet;
 
 use crate::replicas::{
-    NodeSource, acquire_nodes, apply_write, check_tasks, connect_edges, ensure_text_all, reset_all,
-    verify_text_length, wait_for_nodes,
+    NodeSource, acquire_nodes, apply_write, check_tasks, connect_edges, ensure_text_all,
+    record_stats, reset_all, verify_text_length, wait_for_nodes,
 };
 use crate::scenario::{TopologyConfig, Workload};
 use crate::trace::{Event, Trace};
@@ -118,6 +118,7 @@ pub async fn run(
     )
     .await?;
     check_tasks(&mut tasks)?;
+    record_stats(&mut clients, trace).await?;
 
     // Validity gate, outside the measured window: the converged text must hold
     // one character per operation, because operations are insert-only.

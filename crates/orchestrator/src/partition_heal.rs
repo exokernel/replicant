@@ -38,8 +38,8 @@ use tokio::task::JoinSet;
 
 use crate::replicas::{
     Client, NodeSource, TEXT_OBJ, acquire_nodes, apply_write, check_tasks, connect_edges,
-    ensure_text_all, fingerprint, kick_sync_edges, reset_all, set_links_blocked, text_splice,
-    verify_text_length, wait_for_nodes,
+    ensure_text_all, fingerprint, kick_sync_edges, record_stats, reset_all, set_links_blocked,
+    text_splice, verify_text_length, wait_for_nodes,
 };
 use crate::runner::RunResult;
 use crate::scenario::{Group, HealTopology, PartitionConfig, Workload};
@@ -176,6 +176,7 @@ pub async fn run_partition_heal(
     )
     .await?;
     check_tasks(&mut tasks)?;
+    record_stats(&mut clients, trace).await?;
 
     // Validity gate, outside the measured window: the healed text must contain
     // both sides' inserts. Operations are insert-only and one character each,

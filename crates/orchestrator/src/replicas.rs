@@ -27,7 +27,7 @@ use replica::adapter::Crdt;
 use replica::server::{self, ReplicaState};
 
 use crate::scenario::Workload;
-use crate::trace::{Event, Trace};
+use crate::trace::{Event, PeerStats, Trace};
 
 /// The gRPC client the orchestrator uses for one replica.
 pub type Client = ReplicaClient<Channel>;
@@ -87,6 +87,11 @@ pub enum NodeSource {
 /// scenarios are wired by index on that assumption. Do not change the format.
 pub fn node_name(i: usize) -> String {
     format!("node-{i}")
+}
+
+/// Returns `i` for the node name `node-{i}`. See [`node_name`].
+pub fn node_index(name: &str) -> Option<usize> {
+    name.strip_prefix("node-")?.parse().ok()
 }
 
 /// Returns the actor ID for node `i`. See [`node_name`].
@@ -464,6 +469,37 @@ pub async fn wait_for_nodes(
     }
 }
 
+/// Records each node's `GetStats` reply in `trace`. Does nothing when `trace`
+/// is disabled. Call it after the timed window.
+pub async fn record_stats(clients: &mut [Client], trace: &mut Trace) -> Result<()> {
+    if !trace.enabled() {
+        return Ok(());
+    }
+    for (node, client) in clients.iter_mut().enumerate() {
+        let stats = client.get_stats(Request::new(Empty {})).await?.into_inner();
+        let peers = stats
+            .peers
+            .into_iter()
+            .map(|p| {
+                let peer = node_index(&p.peer_id)
+                    .with_context(|| format!("unexpected peer ID {:?}", p.peer_id))?;
+                Ok(PeerStats {
+                    peer,
+                    tx: p.tx,
+                    rx: p.rx,
+                    deferred: p.deferred,
+                })
+            })
+            .collect::<Result<_>>()?;
+        trace.record(Event::Stats {
+            node,
+            doc_size_bytes: stats.doc_size_bytes,
+            peers,
+        });
+    }
+    Ok(())
+}
+
 /// Checks that every node's text holds exactly `expected` characters. Valid
 /// only for insert-only workloads, where each operation adds one character.
 ///
@@ -518,6 +554,17 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    // ── node names ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn node_index_inverts_node_name() {
+        for i in [0, 7, 12] {
+            assert_eq!(node_index(&node_name(i)), Some(i));
+        }
+        assert_eq!(node_index("replica-1"), None);
+        assert_eq!(node_index("node-x"), None);
     }
 
     // ── acquire_nodes ──────────────────────────────────────────────────────

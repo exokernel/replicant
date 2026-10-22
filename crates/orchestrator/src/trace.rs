@@ -55,6 +55,22 @@ pub enum Event {
     },
     /// Every node in `nodes` has the same fingerprint.
     Converged { nodes: Vec<usize> },
+    /// What `node` reported after the trial, outside the timed window: its
+    /// document size, and its sync message counts for each peer.
+    Stats {
+        node: usize,
+        doc_size_bytes: u64,
+        peers: Vec<PeerStats>,
+    },
+}
+
+/// Sync message counts on the link from one replica to `peer`.
+#[derive(Serialize)]
+pub struct PeerStats {
+    pub peer: usize,
+    pub tx: u64,
+    pub rx: u64,
+    pub deferred: u64,
 }
 
 /// One line of the trace file.
@@ -84,6 +100,12 @@ impl Trace {
     #[cfg(test)]
     pub fn off() -> Self {
         Self::new(false)
+    }
+
+    /// Whether this trace records anything. Check it before work that only
+    /// the trace needs, such as extra RPCs.
+    pub fn enabled(&self) -> bool {
+        self.enabled
     }
 
     /// Records `event` at the current time.

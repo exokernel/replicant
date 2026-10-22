@@ -29,6 +29,14 @@ use common::{CrdtAdapter, Op};
 
 use crate::metrics::Metrics;
 
+/// Sync message counts on the link to one peer.
+#[derive(Clone, Copy, Default)]
+struct PeerCounts {
+    tx: u64,
+    rx: u64,
+    deferred: u64,
+}
+
 // ── Shared state ───────────────────────────────────────────────────────────
 
 /// The document, peer streams, and metric instruments of one replica.
@@ -51,6 +59,10 @@ pub struct ReplicaState {
     adapter: Mutex<Box<dyn CrdtAdapter>>,
     /// The outbound channel for each connected peer.
     peer_txs: Mutex<HashMap<NodeId, mpsc::Sender<Vec<u8>>>>,
+    /// Sync message counts for each peer since the last reset. The `GetStats`
+    /// RPC returns them. Unlike the OTel counters, they reset with the
+    /// document, so they describe one trial.
+    peer_stats: Mutex<HashMap<NodeId, PeerCounts>>,
     /// Handles of the tasks that drive the inbound and outbound sync streams.
     ///
     /// [`Self::reset`] aborts and awaits each task before it clears the
@@ -87,6 +99,7 @@ impl ReplicaState {
             actor_id,
             adapter: Mutex::new(adapter),
             peer_txs: Mutex::new(HashMap::new()),
+            peer_stats: Mutex::new(HashMap::new()),
             peer_tasks: Mutex::new(Vec::new()),
             blocked_peers: Mutex::new(HashSet::new()),
             metrics: Metrics::new(&meter),
@@ -227,14 +240,48 @@ impl ReplicaState {
 
     fn record_sync_tx(&self, peer_id: &NodeId) {
         self.metrics.sync_tx.add(1, &self.peer_attrs(peer_id));
+        self.count(peer_id, |c| c.tx += 1);
     }
 
     fn record_sync_rx(&self, peer_id: &NodeId) {
         self.metrics.sync_rx.add(1, &self.peer_attrs(peer_id));
+        self.count(peer_id, |c| c.rx += 1);
     }
 
     fn record_sync_deferred(&self, peer_id: &NodeId) {
         self.metrics.sync_deferred.add(1, &self.peer_attrs(peer_id));
+        self.count(peer_id, |c| c.deferred += 1);
+    }
+
+    /// Applies `bump` to the counts of `peer_id`.
+    fn count(&self, peer_id: &NodeId, bump: impl FnOnce(&mut PeerCounts)) {
+        let mut stats = self.peer_stats.lock().expect("peer_stats mutex poisoned");
+        match stats.get_mut(peer_id) {
+            Some(counts) => bump(counts),
+            None => bump(stats.entry(peer_id.clone()).or_default()),
+        }
+    }
+
+    /// Returns the document size and the per-peer sync counts since the last
+    /// reset, sorted by peer ID.
+    fn stats(&self) -> proto::ReplicaStats {
+        let mut peers: Vec<proto::PeerStats> = self
+            .peer_stats
+            .lock()
+            .expect("peer_stats mutex poisoned")
+            .iter()
+            .map(|(peer, c)| proto::PeerStats {
+                peer_id: peer.as_str().to_owned(),
+                tx: c.tx,
+                rx: c.rx,
+                deferred: c.deferred,
+            })
+            .collect();
+        peers.sort_by(|a, b| a.peer_id.cmp(&b.peer_id));
+        proto::ReplicaStats {
+            doc_size_bytes: self.doc_size_bytes() as u64,
+            peers,
+        }
     }
 
     /// Returns the `actor` and `peer` attributes. Both share their strings
@@ -279,6 +326,10 @@ impl ReplicaState {
         self.close_peer_streams().await;
         self.blocked().clear();
         self.adapter().reset();
+        self.peer_stats
+            .lock()
+            .expect("peer_stats mutex poisoned")
+            .clear();
     }
 
     /// Stops every peer stream task, then forgets all peers. Does not change
@@ -481,6 +532,13 @@ impl Replica for ReplicaService {
     async fn reset(&self, _: Request<proto::Empty>) -> Result<Response<proto::Empty>, Status> {
         self.state.reset().await;
         Ok(Response::new(proto::Empty {}))
+    }
+
+    async fn get_stats(
+        &self,
+        _: Request<proto::Empty>,
+    ) -> Result<Response<proto::ReplicaStats>, Status> {
+        Ok(Response::new(self.state.stats()))
     }
 
     async fn ensure_text(
@@ -691,6 +749,30 @@ mod tests {
     fn kick_sync_ignores_unknown_peers() {
         let state = new_state();
         state.kick_sync(&[id("node-9")]);
+    }
+
+    /// The per-peer counts describe one trial: a reset clears them.
+    #[tokio::test]
+    async fn stats_count_per_peer_and_reset_with_the_document() {
+        let state = new_state();
+        state.record_sync_tx(&id("node-1"));
+        state.record_sync_tx(&id("node-1"));
+        state.record_sync_rx(&id("node-2"));
+        state.record_sync_deferred(&id("node-1"));
+
+        let stats = state.stats();
+        let counts: Vec<_> = stats
+            .peers
+            .iter()
+            .map(|p| (p.peer_id.as_str(), p.tx, p.rx, p.deferred))
+            .collect();
+        assert_eq!(counts, [("node-1", 2, 0, 1), ("node-2", 0, 1, 0)]);
+
+        state.reset().await;
+        assert!(
+            state.stats().peers.is_empty(),
+            "reset must clear the counts"
+        );
     }
 
     /// A reset clears the blocked set. Each trial starts with all links open.

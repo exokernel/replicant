@@ -28,6 +28,12 @@ service Replica {
   // alone proves replicas agree, not that they agree on a document
   // containing all the work.
   rpc GetTextLength       (ObjRef)     returns (TextLengthResponse);
+  // Returns the document size and, for each peer, the sync messages sent,
+  // received, and deferred since the last Reset. Call it after a trial,
+  // outside the timed window. It gives the same numbers in every lane, with
+  // no metrics pipeline. A message still in flight when the stats are read
+  // counts as sent by one replica but not yet received by the other.
+  rpc GetStats            (Empty)      returns (ReplicaStats);
   // Block or unblock sync traffic with the named peers while keeping any
   // streams open. This is the app-layer partition primitive: the orchestrator
   // wires the FULL post-heal topology up front (stream setup outside every
@@ -149,3 +155,17 @@ message PeerIds { repeated string peer_ids = 1; }
 message ObjRef { string obj = 1; }
 
 message TextLengthResponse { uint64 length = 1; }
+
+message ReplicaStats {
+  uint64 doc_size_bytes     = 1;
+  repeated PeerStats peers  = 2;
+}
+
+// Sync message counts on the link to one peer, since the last Reset.
+message PeerStats {
+  string peer_id  = 1;
+  uint64 tx       = 2;
+  uint64 rx       = 3;
+  // Flushes skipped because the peer's outbound channel was full.
+  uint64 deferred = 4;
+}
