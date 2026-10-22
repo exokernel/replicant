@@ -18,7 +18,7 @@
 //! - [`replicas`]: the gRPC helpers that both runners share.
 //! - [`runner`] and [`partition_heal`]: the two scenario runners.
 //! - [`contention`] and [`provenance`]: run metadata that needs no replica.
-//! - [`output`] and [`metrics`]: what the run writes.
+//! - [`output`], [`metrics`], and [`trace`]: what the run writes.
 
 use std::path::PathBuf;
 
@@ -34,6 +34,7 @@ mod replicas;
 mod runner;
 mod scenario;
 mod topology;
+mod trace;
 mod workload;
 
 use output::OutputFormat;
@@ -41,6 +42,7 @@ use replica::adapter::Crdt;
 use replicas::{NodeSource, ReplicaEndpoint};
 use runner::RunResult;
 use scenario::{ScenarioBody, ScenarioFile, builtin_scenarios};
+use trace::Trace;
 
 // ── CLI ─────────────────────────────────────────────────────────────────────
 
@@ -85,6 +87,15 @@ struct Args {
     /// a sweep.
     #[arg(long)]
     dry_run: bool,
+
+    /// Write a per-trial event log as JSON Lines to this path: the links,
+    /// each write, each convergence poll, and the heal steps.
+    ///
+    /// It shows how a trial converged, for teaching and debugging. Recording
+    /// adds a little work inside the timed window, so do not use traced runs
+    /// for measurements.
+    #[arg(long)]
+    trace: Option<PathBuf>,
 
     /// Connect to externally-managed replicas instead of spawning in-process.
     ///
@@ -206,6 +217,14 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    let mut trace_file = match &args.trace {
+        Some(path) => Some(std::io::BufWriter::new(
+            std::fs::File::create(path)
+                .with_context(|| format!("creating trace file {}", path.display()))?,
+        )),
+        None => None,
+    };
+
     if matches!(args.output, OutputFormat::Csv) {
         println!("{}", output::header());
     }
@@ -226,7 +245,11 @@ async fn main() -> Result<()> {
             } else {
                 NodeSource::External(args.replicas.clone())
             };
-            let result = run_scenario_once(scenario, source, t).await?;
+            let mut trace = Trace::new(trace_file.is_some());
+            let result = run_scenario_once(scenario, source, t, &mut trace).await?;
+            if let Some(out) = &mut trace_file {
+                trace.write_to(out, &scenario.name, t)?;
+            }
             debug_assert_eq!(
                 result.total_ops, op_count,
                 "scenario '{}' trial {t}: runner reported {} ops, expected {}",
@@ -254,6 +277,11 @@ async fn main() -> Result<()> {
                 output::stats(&wiring_ms).mean,
             ),
         );
+    }
+
+    // A dropped BufWriter ignores write errors, so flush explicitly.
+    if let Some(mut out) = trace_file {
+        std::io::Write::flush(&mut out).context("writing the trace file")?;
     }
 
     // Flush pending metrics before exiting. Shutting the provider down lets the
@@ -305,12 +333,13 @@ async fn run_scenario_once(
     scenario: &ScenarioFile,
     source: NodeSource,
     repetition: usize,
+    trace: &mut Trace,
 ) -> Result<RunResult> {
     tracing::info!(scenario = %scenario.name, "starting");
     let result = match &scenario.body {
-        ScenarioBody::Topology(config) => runner::run(config, source).await?,
+        ScenarioBody::Topology(config) => runner::run(config, source, trace).await?,
         ScenarioBody::PartitionHeal(config) => {
-            partition_heal::run_partition_heal(config, source, repetition).await?
+            partition_heal::run_partition_heal(config, source, repetition, trace).await?
         }
     };
     tracing::info!(

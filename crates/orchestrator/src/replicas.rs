@@ -27,6 +27,7 @@ use replica::adapter::Crdt;
 use replica::server::{self, ReplicaState};
 
 use crate::scenario::Workload;
+use crate::trace::{Event, Trace};
 
 /// The gRPC client the orchestrator uses for one replica.
 pub type Client = ReplicaClient<Channel>;
@@ -419,24 +420,30 @@ pub async fn fingerprint(client: &mut Client) -> Result<Vec<u8>> {
 /// Polls the nodes at `indices` until every fingerprint is equal and non-empty.
 ///
 /// Returns the milliseconds elapsed from `start`. Fails if `timeout` passes
-/// first.
+/// first. Records each poll, and the convergence, in `trace`.
 pub async fn wait_for_nodes(
     clients: &mut [Client],
     indices: &[usize],
     start: Instant,
     timeout: Duration,
+    trace: &mut Trace,
 ) -> Result<f64> {
     loop {
         let mut fps: Vec<Vec<u8>> = Vec::with_capacity(indices.len());
         for &i in indices {
             fps.push(fingerprint(&mut clients[i]).await?);
         }
+        trace.poll(indices, &fps);
 
         // An empty fingerprint means the node has no operations yet. Treat that
         // as not converged, so a run cannot match before any write lands.
         let converged = fps.iter().all(|fp| !fp.is_empty()) && fps.windows(2).all(|w| w[0] == w[1]);
         if converged {
-            return Ok(start.elapsed().as_secs_f64() * 1000.0);
+            let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+            trace.record(Event::Converged {
+                nodes: indices.to_vec(),
+            });
+            return Ok(elapsed_ms);
         }
 
         if start.elapsed() >= timeout {
@@ -496,9 +503,15 @@ mod tests {
 
     /// Waits for nodes 0 and 1 to agree, with a fresh 5 s deadline.
     async fn wait_for_pair(clients: &mut [Client]) {
-        wait_for_nodes(clients, &[0, 1], Instant::now(), Duration::from_secs(5))
-            .await
-            .unwrap();
+        wait_for_nodes(
+            clients,
+            &[0, 1],
+            Instant::now(),
+            Duration::from_secs(5),
+            &mut Trace::off(),
+        )
+        .await
+        .unwrap();
     }
 
     // ── check_tasks ────────────────────────────────────────────────────────
@@ -643,6 +656,7 @@ mod tests {
             &[0, 1, 2, 3],
             measure_start,
             Duration::from_secs(5),
+            &mut Trace::off(),
         )
         .await
         .unwrap();

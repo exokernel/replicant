@@ -14,6 +14,7 @@ use crate::replicas::{
     verify_text_length, wait_for_nodes,
 };
 use crate::scenario::{TopologyConfig, Workload};
+use crate::trace::{Event, Trace};
 use crate::workload::target_node;
 
 /// What one completed trial measured.
@@ -50,7 +51,11 @@ pub struct RunResult {
 /// Acquires the nodes, wires the graph, applies the writes, and waits for every
 /// node to agree. All wiring happens before the clock starts, so `wiring_ms` is
 /// always `0.0` here.
-pub async fn run(config: &TopologyConfig, source: NodeSource) -> Result<RunResult> {
+pub async fn run(
+    config: &TopologyConfig,
+    source: NodeSource,
+    trace: &mut Trace,
+) -> Result<RunResult> {
     config.validate()?;
 
     let n = config.node_count;
@@ -74,15 +79,24 @@ pub async fn run(config: &TopologyConfig, source: NodeSource) -> Result<RunResul
     let diameter = config.connections.diameter(n);
     connect_edges(&clients, &endpoints, &edges).await?;
     check_tasks(&mut tasks)?;
+    trace.record(Event::Wired {
+        edges,
+        blocked: Vec::new(),
+    });
 
     // Start the clock before the first write, so the measurement includes
     // propagation. Over loopback, sync finishes before the first poll returns,
     // so a clock started after the writes would always read 0.
     let all_nodes: Vec<usize> = (0..n).collect();
     let measure_start = Instant::now();
+    trace.record(Event::ClockStart);
     for i in 0..config.op_count {
         let target = target_node(&config.write_pattern, i, &all_nodes);
         apply_write(&mut clients[target], config.workload, i).await?;
+        trace.record(Event::Write {
+            node: target,
+            op: i,
+        });
         // Pace between operations only. A sleep after the last one would delay
         // the first convergence poll and inflate `convergence_ms`.
         if config.op_interval_ms > 0 && i + 1 < config.op_count {
@@ -100,6 +114,7 @@ pub async fn run(config: &TopologyConfig, source: NodeSource) -> Result<RunResul
         &all_nodes,
         measure_start,
         Duration::from_secs(5) + pacing_budget,
+        trace,
     )
     .await?;
     check_tasks(&mut tasks)?;
@@ -140,9 +155,13 @@ mod tests {
              op_count = 3",
         )
         .expect("valid topology config");
-        let result = run(&config, NodeSource::InProcess(Crdt::Automerge))
-            .await
-            .unwrap();
+        let result = run(
+            &config,
+            NodeSource::InProcess(Crdt::Automerge),
+            &mut Trace::off(),
+        )
+        .await
+        .unwrap();
         assert_eq!(result.wiring_ms, 0.0);
     }
 }

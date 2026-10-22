@@ -28,6 +28,11 @@ cargo run --bin orchestrator
 | `--trials N` | 1 | Times to run each scenario |
 | `--output csv\|json` | csv | Output format |
 | `--metrics-file PATH` | *(none)* | Write OTel metrics snapshot (sync counts, op latencies, doc sizes) as JSON Lines to this file. Counters are cumulative across all scenarios in a single run — invoke once per scenario file for per-scenario data. This flag has priority over OTLP export: the orchestrator writes the file and sends nothing to a collector. Without the flag, the orchestrator exports over OTLP if `OTEL_EXPORTER_OTLP_ENDPOINT` is set, and drops its metrics if the variable is not set |
+| `--crdt automerge\|yrs\|loro` | automerge | CRDT library for in-process replicas. Not allowed with `--replicas` |
+| `--replicas LIST` | *(none)* | Use running replicas instead of in-process ones: comma-separated `client_addr[=peer_addr]`. See [`docs/deployment.md`](../../docs/deployment.md) |
+| `--provenance PATH` | *(none)* | Write the run's commit, host, build profile, seeds, and cell parameters as JSON |
+| `--dry-run` | off | Validate the scenarios and write the provenance file, but run no trials |
+| `--trace PATH` | *(none)* | Write a per-trial event log as JSON Lines: links, writes, convergence polls, heal steps. Adds work inside the timed window, so not for measurements |
 
 ## Output format
 

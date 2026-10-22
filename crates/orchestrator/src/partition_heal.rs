@@ -44,6 +44,7 @@ use crate::replicas::{
 use crate::runner::RunResult;
 use crate::scenario::{Group, HealTopology, PartitionConfig, Workload};
 use crate::topology::{self, Connections, intra_group_edges};
+use crate::trace::{Event, Trace};
 use crate::workload::{PositionStream, target_node};
 
 /// Runs one partition-heal scenario and returns its measurements.
@@ -54,6 +55,7 @@ pub async fn run_partition_heal(
     config: &PartitionConfig,
     source: NodeSource,
     repetition: usize,
+    trace: &mut Trace,
 ) -> Result<RunResult> {
     config.validate()?;
 
@@ -89,6 +91,10 @@ pub async fn run_partition_heal(
     let all_edges = plan.all_edges();
     connect_edges(&clients, &endpoints, &all_edges).await?;
     check_tasks(&mut tasks)?;
+    trace.record(Event::Wired {
+        edges: all_edges.clone(),
+        blocked: plan.heal.clone(),
+    });
 
     // Divergence phase: each group applies its operations independently.
     //
@@ -112,6 +118,10 @@ pub async fn run_partition_heal(
                     text_splice(&mut clients[target], TEXT_OBJ, pos, "x").await?;
                 }
             }
+            trace.record(Event::Write {
+                node: target,
+                op: op_idx,
+            });
             op_idx += 1;
         }
     }
@@ -127,6 +137,7 @@ pub async fn run_partition_heal(
                 &group.nodes,
                 Instant::now(),
                 Duration::from_secs(5),
+                trace,
             )
             .await?;
         }
@@ -148,9 +159,12 @@ pub async fn run_partition_heal(
     // still-blocked peer would be dropped on arrival, and the sender would then
     // wait for a reply that never comes.
     let heal_start = Instant::now();
+    trace.record(Event::ClockStart);
     set_links_blocked(&clients, &plan.heal, false).await?;
     let wiring_ms = heal_start.elapsed().as_secs_f64() * 1000.0;
+    trace.record(Event::Unblocked);
     kick_sync_edges(&clients, &plan.heal).await?;
+    trace.record(Event::Kicked);
 
     let all_nodes: Vec<usize> = (0..n).collect();
     let convergence_ms = wait_for_nodes(
@@ -158,6 +172,7 @@ pub async fn run_partition_heal(
         &all_nodes,
         heal_start,
         Duration::from_secs(10),
+        trace,
     )
     .await?;
     check_tasks(&mut tasks)?;
@@ -400,6 +415,7 @@ mod tests {
             &[0, 1],
             Instant::now(),
             Duration::from_secs(5),
+            &mut Trace::off(),
         )
         .await
         .unwrap();
@@ -441,12 +457,22 @@ mod tests {
     /// is wired up front, the measured cost is only the unblock round.
     #[tokio::test]
     async fn full_mesh_heal_wiring_does_not_scale_with_edge_count() {
-        let small = run_partition_heal(&halves(2, 4), NodeSource::InProcess(Crdt::Automerge), 1)
-            .await
-            .unwrap();
-        let large = run_partition_heal(&halves(6, 4), NodeSource::InProcess(Crdt::Automerge), 1)
-            .await
-            .unwrap();
+        let small = run_partition_heal(
+            &halves(2, 4),
+            NodeSource::InProcess(Crdt::Automerge),
+            1,
+            &mut Trace::off(),
+        )
+        .await
+        .unwrap();
+        let large = run_partition_heal(
+            &halves(6, 4),
+            NodeSource::InProcess(Crdt::Automerge),
+            1,
+            &mut Trace::off(),
+        )
+        .await
+        .unwrap();
 
         // n=6 full-mesh heal opens 9 cross-group links vs n=2's 1. Wiring is
         // now two concurrent RPC rounds either way, so allow a wide factor
@@ -465,9 +491,14 @@ mod tests {
     /// an analysis that subtracts it would report a negative merge time.
     #[tokio::test]
     async fn partition_heal_reports_wiring_within_the_convergence_window() {
-        let result = run_partition_heal(&halves(4, 4), NodeSource::InProcess(Crdt::Automerge), 1)
-            .await
-            .unwrap();
+        let result = run_partition_heal(
+            &halves(4, 4),
+            NodeSource::InProcess(Crdt::Automerge),
+            1,
+            &mut Trace::off(),
+        )
+        .await
+        .unwrap();
         assert!(result.wiring_ms > 0.0, "heal wiring is inside the window");
         assert!(
             result.wiring_ms <= result.convergence_ms,
@@ -500,9 +531,14 @@ mod tests {
                 locality,
                 ..PartitionConfig::for_test(2, &[&[0], &[1]])
             };
-            let result = run_partition_heal(&config, NodeSource::InProcess(Crdt::Automerge), 1)
-                .await
-                .unwrap_or_else(|e| panic!("locality={locality:?}: {e:#}"));
+            let result = run_partition_heal(
+                &config,
+                NodeSource::InProcess(Crdt::Automerge),
+                1,
+                &mut Trace::off(),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("locality={locality:?}: {e:#}"));
             assert_eq!(result.total_ops, 50, "locality={locality:?}");
         }
     }
