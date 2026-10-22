@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use anyhow::{Context, bail};
 use common::{CrdtAdapter, Op, ScalarVal};
 use yrs::{
-    Any, Array, ArrayRef, Doc, GetString, In, Map, MapRef, ReadTxn, Root, SharedRef, StateVector,
-    Text, TextRef, Transact, TransactionMut, Update, branch::Branch, types::TypeRef,
+    Any, Array, ArrayRef, Doc, GetString, In, Map, MapRef, Number, ReadTxn, Root, SharedRef,
+    StateVector, Text, TextRef, Transact, TransactionMut, Update, branch::Branch, types::TypeRef,
     updates::decoder::Decode,
 };
 
@@ -91,8 +91,8 @@ impl YrsAdapter {
     fn to_any(v: &ScalarVal) -> Any {
         match v {
             ScalarVal::Str(s) => Any::String(s.as_str().into()),
-            ScalarVal::Uint(n) => Any::BigInt(*n as i64),
-            ScalarVal::Int(n) => Any::BigInt(*n),
+            ScalarVal::Uint(n) => Any::Number(Number::Int(*n as i64)),
+            ScalarVal::Int(n) => Any::Number(Number::Int(*n)),
             ScalarVal::Bool(b) => Any::Bool(*b),
             ScalarVal::Bytes(b) => Any::Buffer(b.as_slice().into()),
         }
