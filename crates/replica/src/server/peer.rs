@@ -171,10 +171,12 @@ async fn recv_loop(
                 // the size checks after convergence would fail.
                 state.record_doc_size();
                 // Reply at once if the protocol has something to send back.
-                if let Some(response) = state.sync_generate(&peer_id)
-                    && tx.send(response).await.is_err()
-                {
-                    break;
+                // Count the reply like any other sent message.
+                if let Some(response) = state.sync_generate(&peer_id) {
+                    if tx.send(response).await.is_err() {
+                        break;
+                    }
+                    state.record_sync_tx(&peer_id);
                 }
                 // Relay the new state to all other peers. Ring, line, and
                 // star topologies need this to converge. It is also safe on a
