@@ -142,6 +142,11 @@ k8s-down:
 
 # ── Scenarios and notebooks ─────────────────────────────────────────────────
 
+# Open the guided notebook, analysis/tour.py, in marimo
+[group('data')]
+tour:
+    {{ python }} -m marimo edit analysis/tour.py
+
 # Regenerate the divergence scenario grid in scenarios/
 [group('data')]
 gen-scenarios:

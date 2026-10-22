@@ -9,3 +9,7 @@ analysis/figures/
 .venv/
 # Output of deploy/docker/gen-compose.py — regenerated per smoke-docker run.
 deploy/docker/compose.generated.yaml
+
+# Python bytecode and marimo session caches.
+__pycache__/
+__marimo__/
