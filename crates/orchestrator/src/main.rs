@@ -112,8 +112,9 @@ struct Args {
     /// ```
     ///
     /// Each external replica must be launched with actor ID `node-N`, matching
-    /// the orchestrator's wiring scheme, and `node_count` must equal the number
-    /// of entries.
+    /// the orchestrator's wiring scheme. A scenario uses the first
+    /// `node_count` entries and resets the rest, so one stack can serve
+    /// scenarios of every size up to its own.
     ///
     /// Every trial begins with a `Reset` call to each replica, so many scenarios
     /// and trials can share one long-lived stack with no state carried over.

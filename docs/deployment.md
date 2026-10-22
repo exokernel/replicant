@@ -60,6 +60,10 @@ cargo run --release --bin orchestrator -- --trials 10 \
 The two addresses differ when the replicas are in a different network
 namespace from the orchestrator.
 
+A scenario uses the first `node_count` entries and resets the rest. A stack
+larger than the scenario therefore works, and one stack can serve scenarios of
+several sizes.
+
 The `Replica.Reset` RPC clears replica state between trials and between
 scenarios. Thus one orchestrator run can sweep many scenarios, with
 `--trials N` trials each. You do not need to restart containers or pods.

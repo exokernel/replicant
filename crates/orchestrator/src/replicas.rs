@@ -158,8 +158,10 @@ async fn connect_external(endpoints: &[ReplicaEndpoint]) -> Result<Vec<Client>> 
 
 /// Gets `n` replicas from `source`.
 ///
-/// `InProcess` spawns them on ephemeral ports. `External` checks that the
-/// endpoint count matches `n`, then connects to each.
+/// `InProcess` spawns them on ephemeral ports. `External` uses the first `n`
+/// endpoints, and fails if there are fewer. It resets the endpoints it does not
+/// use, so no replica keeps a sync stream or state from an earlier run. One
+/// stack can then serve scenarios of every size up to its own.
 ///
 /// Only the in-process path adds anything to `tasks`. An external run leaves it
 /// empty, which makes every later [`check_tasks`] call a no-op.
@@ -170,12 +172,16 @@ pub async fn acquire_nodes(
 ) -> Result<(Vec<ReplicaEndpoint>, Vec<Client>)> {
     match source {
         NodeSource::InProcess(crdt) => spawn_nodes(n, crdt, tasks).await,
-        NodeSource::External(endpoints) => {
-            if endpoints.len() != n {
+        NodeSource::External(mut endpoints) => {
+            if endpoints.len() < n {
                 bail!(
-                    "scenario needs {n} replicas but --replicas supplied {}",
+                    "scenario needs {n} replicas but --replicas supplied only {}",
                     endpoints.len()
                 );
+            }
+            let unused = endpoints.split_off(n);
+            if !unused.is_empty() {
+                reset_all(&connect_external(&unused).await?).await?;
             }
             let clients = connect_external(&endpoints).await?;
             Ok((endpoints, clients))
@@ -512,6 +518,43 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    // ── acquire_nodes ──────────────────────────────────────────────────────
+
+    /// An external stack larger than the scenario serves it: the scenario gets
+    /// the first `n` replicas, and the rest are reset.
+    #[tokio::test]
+    async fn external_source_uses_the_first_n_and_resets_the_rest() {
+        let mut tasks = JoinSet::new();
+        let (endpoints, mut clients) = spawn_nodes(3, Crdt::Automerge, &mut tasks).await.unwrap();
+        map_put(&mut clients[2], "k", "v").await.unwrap();
+        assert!(!fingerprint(&mut clients[2]).await.unwrap().is_empty());
+
+        let mut unused_tasks = JoinSet::new();
+        let (got, _) = acquire_nodes(
+            NodeSource::External(endpoints.clone()),
+            2,
+            &mut unused_tasks,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(got, endpoints[..2]);
+        assert!(
+            fingerprint(&mut clients[2]).await.unwrap().is_empty(),
+            "the unused replica was not reset"
+        );
+    }
+
+    #[tokio::test]
+    async fn external_source_with_too_few_replicas_fails() {
+        let mut tasks = JoinSet::new();
+        let (endpoints, _) = two_nodes(&mut tasks).await;
+        let err = acquire_nodes(NodeSource::External(endpoints), 3, &mut JoinSet::new())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("only 2"), "{err}");
     }
 
     // ── check_tasks ────────────────────────────────────────────────────────
