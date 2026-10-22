@@ -37,8 +37,13 @@ the library:
 - Rust. `rust-toolchain.toml` pins 1.99.0, and rustup installs it automatically.
 - [`just`](https://github.com/casey/just)
 - `protoc` (Protocol Buffers compiler)
-- Optional: Docker with Compose v2, or [`kind`](https://kind.sigs.k8s.io/)
-  with `kubectl`, for the container stacks.
+- Optional, for the container stacks:
+  - Docker with Compose v2, or [`kind`](https://kind.sigs.k8s.io/) with
+    `kubectl`.
+  - bash 4 or later. macOS ships bash 3.2; install a newer one with
+    `brew install bash`.
+  - `python3` with `pyyaml` (docker compose), and `jq` and `curl` (bench
+    recipes).
 
 ## Quick start
 
@@ -117,7 +122,8 @@ functions that apply to it in a `#[test]`. There are two kinds:
   that asserts what it does instead.
 
 A function is universal until an adapter shows otherwise. When a second
-adapter needs the same mirror test, the mirror becomes the universal form.
+adapter needs the same mirror test, move the mirror into the suite. It is
+universal if every adapter passes it; otherwise mark it `ACCOMMODATION` too.
 
 Check these two points early:
 

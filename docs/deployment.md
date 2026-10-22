@@ -23,6 +23,9 @@ Grafana. Only the recipes and the wiring differ.
 The `bench-*` recipes manage the stack themselves. Do not run them while a
 `*-up` stack is running.
 
+The recipes call `scripts/docker.sh`, `scripts/k8s.sh`, and the `bench-*`
+scripts. The shared shell code is in `scripts/lib/`.
+
 Each recipe that starts a stack takes an optional CRDT library as its last
 argument. The default is `automerge`.
 

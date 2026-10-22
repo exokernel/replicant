@@ -12,38 +12,34 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+. scripts/lib/stack.sh
+. scripts/lib/compose.sh
 . scripts/lib/bench-common.sh
 
 bench_parse_args "$@"
 bench_bucket_scenarios
 bench_init_output 'results/results-docker.csv'
 
-# Prefer the analysis .venv interpreter so the pyyaml from requirements.txt is
-# used; fall back to system python3 (also expected to have pyyaml).
-py=$([ -x .venv/bin/python3 ] && echo .venv/bin/python3 || echo python3)
-compose='docker compose -f deploy/docker/compose.generated.yaml'
-
 # `--remove-orphans` makes this self-healing against stragglers from a
 # previously-interrupted run (same project name) — without it, a leaked
 # replica-N container from a prior bench would hold port 50051+N and the next
 # `up` would fail with "address already in use". The trap uses the same flag
 # for the same reason.
-trap '$compose down --remove-orphans 2>/dev/null || true' EXIT
+trap 'compose down --remove-orphans 2>/dev/null || true' EXIT
 
 # Defensive pre-loop sweep: if a previous invocation crashed mid-run (e.g.
 # orchestrator failure before the loop's own `down`), this clears any leftover
 # containers tied to the same compose file before the first `up`.
-if [ -f deploy/docker/compose.generated.yaml ]; then
-    $compose down --remove-orphans 2>/dev/null || true
+if [ -f "$COMPOSE_FILE" ]; then
+    compose down --remove-orphans 2>/dev/null || true
 fi
 
 for n in "${ns[@]}"; do
     echo ">>> bench-docker: N=$n, crdt=$crdt, scenarios:${by_n[$n]}" >&2
-    "$py" deploy/docker/gen-compose.py "$n" --crdt "$crdt" \
-        > deploy/docker/compose.generated.yaml
-    $compose up -d --build --remove-orphans
+    compose_generate "$n" "$crdt"
+    compose up -d --build --remove-orphans
 
-    bench_build_replica_wiring "$n" 'replica-{i}:50051'
+    replica_wiring "$n" 'replica-{i}:50051'
 
     # Range-query bound for the deferred snapshot below. Taken before the
     # orchestrator starts, so it covers every trial in this group.
@@ -143,7 +139,7 @@ for n in "${ns[@]}"; do
     echo ">>> deferred snapshot N=$n: $(jq -c '{tx_total, deferred_total, error}' <<<"$snap")" >&2
 
 
-    $compose down --remove-orphans
+    compose down --remove-orphans
 done
 
 bench_finalize

@@ -37,12 +37,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # The same gate as local development: `just ci` (fmt check → clippy
-  # -D warnings → test → smoke → scenario-grid check). Running the recipe
-  # verbatim instead of re-encoding its steps as YAML keeps CI and the
-  # local gate from drifting apart. The toolchain (1.95.0 + rustfmt +
-  # clippy) comes from rust-toolchain.toml, which rustup honors
-  # automatically — no version pin in this file to fall out of sync.
+  # The same gate as local development: `just ci`. Running the recipe,
+  # not a copy of its steps, keeps CI and the local gate the same. The
+  # toolchain comes from rust-toolchain.toml, which rustup reads, so this
+  # file pins no Rust version.
   gate:
     name: just ci
     runs-on: ubuntu-latest
