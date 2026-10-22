@@ -96,7 +96,7 @@ op_count = 6
 | [`docs/deployment.md`](docs/deployment.md) | The docker compose and kind stacks, and the Grafana dashboard |
 | [`docs/metrics.md`](docs/metrics.md) | The metric schema |
 | [`docs/divergence-sweep.md`](docs/divergence-sweep.md) | The offline-divergence sweep: what it measures, its grid, its validity gates |
-| [`analysis/README.md`](analysis/README.md) | The Jupyter notebooks, and how to generate their input data |
+| [`analysis/README.md`](analysis/README.md) | The analysis notebooks |
 
 ## Adding a CRDT backend
 

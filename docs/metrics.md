@@ -212,7 +212,7 @@ aspirational metrics — this file was previously full of them and went stale.
    `CrdtAdapter` trait so adapters stay purely functional).
 4. Add a row to the appropriate table above.
 5. If the metric is consumed by the notebook, update
-   [analysis/convergence.ipynb](../analysis/convergence.ipynb) to load and
+   [analysis/archive/convergence.ipynb](../analysis/archive/convergence.ipynb) to load and
    plot it.
 
 Keep this doc and the code synchronized — every metric name in the tables

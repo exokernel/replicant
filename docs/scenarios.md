@@ -181,7 +181,7 @@ cross edges to flood (1, against N²/4 for full mesh). In the n=4 to n=8
 scenarios, bridge heal is **7-21× faster** than full-mesh heal. A line
 converges faster than a full mesh in steady state for the same reason. See the
 "Partition-heal" section of
-[`analysis/convergence.ipynb`](../analysis/convergence.ipynb).
+[`analysis/archive/convergence.ipynb`](../analysis/archive/convergence.ipynb).
 
 ## Write patterns
 
