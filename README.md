@@ -34,7 +34,7 @@ the library:
 
 ## Requirements
 
-- Rust. `rust-toolchain.toml` pins 1.98.0, and rustup installs it automatically.
+- Rust. `rust-toolchain.toml` pins 1.99.0, and rustup installs it automatically.
 - [`just`](https://github.com/casey/just)
 - `protoc` (Protocol Buffers compiler)
 - Optional: Docker with Compose v2, or [`kind`](https://kind.sigs.k8s.io/)
