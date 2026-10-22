@@ -5,13 +5,44 @@
 //! against that adapter. A new adapter is complete when every generic function
 //! it wraps passes. The `conformance` module doc defines "generic" and "wraps".
 
-pub mod automerge;
-pub mod loro;
-pub mod yrs;
+mod automerge;
+mod loro;
+mod yrs;
 
 pub use automerge::AutomergeAdapter;
 pub use loro::LoroAdapter;
 pub use yrs::YrsAdapter;
+
+/// Name of the root map that stands in for ROOT (the empty object name).
+///
+/// In the [`common::Op`] model, an empty `obj` names ROOT: one unnamed
+/// top-level map. Automerge has this map. Yrs and Loro do not, so their
+/// adapters map the empty name to this name with [`map_name`]. Every replica
+/// resolves the name the same way, and no op creates the map, so two replicas
+/// cannot create it concurrently.
+///
+/// Do not change the value. It is encoded in every Yrs and Loro document that
+/// writes to ROOT, so a change alters doc sizes and sync bytes.
+///
+/// Do not use this name for a workload object. It would alias ROOT.
+pub(crate) const ROOT_MAP_NAME: &str = "_root";
+
+/// Returns the root map name for `obj`. The empty name becomes
+/// [`ROOT_MAP_NAME`].
+pub(crate) fn map_name(obj: &str) -> &str {
+    if obj.is_empty() { ROOT_MAP_NAME } else { obj }
+}
+
+/// Rejects an empty object name for a list or text op.
+///
+/// ROOT is a map, so an empty name has no meaning for a list or text op. An
+/// error is better than a silently invented root sequence.
+pub(crate) fn require_name(obj: &str) -> anyhow::Result<()> {
+    if obj.is_empty() {
+        anyhow::bail!("object name must not be empty: ROOT is a map, not a list or text");
+    }
+    Ok(())
+}
 
 /// Selects the [`common::CrdtAdapter`] implementation that backs a replica.
 ///

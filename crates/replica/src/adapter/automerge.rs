@@ -18,6 +18,15 @@ use common::{CrdtAdapter, Op, ScalarVal};
 /// right after, so every real op stays attributed to its replica.
 const BOOTSTRAP_ACTOR: &[u8] = b"replicant-bootstrap";
 
+/// Converts an `Op` delete count to the `isize` that Automerge's splice
+/// uses.
+///
+/// Call it before `resolve_obj`. `resolve_obj` can create the object, so an
+/// error after it would leave half an op in the document.
+fn to_isize(n: usize) -> anyhow::Result<isize> {
+    isize::try_from(n).with_context(|| format!("delete count {n} exceeds isize::MAX"))
+}
+
 /// [`common::CrdtAdapter`] implementation backed by `automerge::AutoCommit`.
 ///
 /// Each instance owns one document and one `sync::State` per peer. Objects
@@ -138,9 +147,10 @@ impl CrdtAdapter for AutomergeAdapter {
                 del_count,
                 values,
             } => {
+                let del_count = to_isize(*del_count)?;
                 let id = self.resolve_obj(obj, ObjType::List)?;
                 let scalars = values.iter().map(Self::to_am_scalar);
-                self.doc.splice(id, *pos, *del_count as isize, scalars)?;
+                self.doc.splice(id, *pos, del_count, scalars)?;
             }
             Op::TextSplice {
                 obj,
@@ -148,9 +158,9 @@ impl CrdtAdapter for AutomergeAdapter {
                 del_count,
                 insert,
             } => {
+                let del_count = to_isize(*del_count)?;
                 let id = self.resolve_obj(obj, ObjType::Text)?;
-                self.doc
-                    .splice_text(id, *pos, *del_count as isize, insert)?;
+                self.doc.splice_text(id, *pos, del_count, insert)?;
             }
         }
         // Commit the open transaction now. Then `op_duration_ms` includes the
@@ -263,6 +273,7 @@ impl CrdtAdapter for AutomergeAdapter {
 mod tests {
     use super::AutomergeAdapter;
     use crate::adapter::conformance::*;
+    use common::CrdtAdapter;
 
     #[test]
     fn automerge_identical_ops_yield_equal_fingerprints() {
@@ -397,5 +408,20 @@ mod tests {
     #[test]
     fn automerge_save_bytes_not_canonical_across_converged_replicas() {
         save_bytes_not_canonical_across_converged_replicas::<AutomergeAdapter>();
+    }
+
+    // Not wrapped here: uint_above_i64_max_is_rejected and the two Yrs and
+    // Loro mirrors of the bootstrap tests. The test below asserts what
+    // Automerge does instead of the first.
+
+    /// Automerge version of `uint_above_i64_max_is_rejected` (Yrs and Loro).
+    ///
+    /// Automerge has a native `u64` scalar, so it stores the value.
+    #[test]
+    fn automerge_stores_uint_above_i64_max() {
+        let mut a = AutomergeAdapter::default();
+        let before = a.state_fingerprint();
+        a.apply_op(&map_put("m", "k", u64::MAX)).unwrap();
+        assert_ne!(a.state_fingerprint(), before);
     }
 }

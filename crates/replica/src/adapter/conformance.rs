@@ -3,8 +3,9 @@
 //! Every function here is generic over the adapter. Each adapter module
 //! (`automerge.rs`, `yrs.rs`, `loro.rs`) wraps the functions it supports in a
 //! `#[test]`. If an adapter does not wrap a function, that is a known
-//! difference, not an omission. The adapter's own test module then has a
-//! mirror test that asserts what the adapter does instead.
+//! difference, not an omission. A mirror test then asserts what the adapter
+//! does instead. The mirror is in the adapter's own test module, or here if
+//! more than one adapter needs it.
 //!
 //! A new adapter is complete when every function that it wraps passes.
 //!
@@ -21,8 +22,9 @@
 //!
 //! A function is universal until an adapter fails it for a valid reason.
 //! When a second adapter needs the same mirror test as the first, move the
-//! mirror here as the universal function. Keep the original as the
-//! characterization.
+//! mirror here. The mirror is universal if every adapter passes it.
+//! Otherwise mark it `ACCOMMODATION` too, as
+//! `ensure_text_is_a_pure_lookup_no_change_authored` is.
 
 use common::{CrdtAdapter, Op, ScalarVal};
 
@@ -324,6 +326,48 @@ pub(crate) fn doc_size_grows_with_every_op<A: CrdtAdapter + Default>() {
     }
 }
 
+/// A `Uint` above `i64::MAX` is an error, and the document does not change.
+///
+/// ACCOMMODATION: Yrs and Loro. Both store integers as `i64` and have no
+/// unsigned type, so the adapter must reject the value instead of wrapping
+/// it. Automerge has a native `u64` and stores the value. See
+/// `automerge_stores_uint_above_i64_max`.
+///
+/// The splice puts a valid value before the bad one. The adapter must check
+/// every value before its first edit, so the valid value must not land.
+pub(crate) fn uint_above_i64_max_is_rejected<A: CrdtAdapter + Default>() {
+    let mut a = A::default();
+    let before = a.state_fingerprint();
+    let big = ScalarVal::Uint(u64::MAX);
+    let ops = [
+        map_put("m", "k", big.clone()),
+        Op::ListInsert {
+            obj: "l".into(),
+            index: 0,
+            value: big.clone(),
+        },
+        Op::ListSplice {
+            obj: "l".into(),
+            pos: 0,
+            del_count: 0,
+            values: vec![ScalarVal::Uint(1), big],
+        },
+    ];
+    for op in &ops {
+        let err = a.apply_op(op).unwrap_err();
+        assert!(err.to_string().contains("exceeds i64::MAX"), "{err}");
+        // Read the size first. A library with an implicit transaction (Loro)
+        // commits on export, so a partial edit then shows in the fingerprint.
+        a.doc_size_bytes();
+        assert_eq!(
+            a.state_fingerprint(),
+            before,
+            "rejected {} changed the doc",
+            op.name()
+        );
+    }
+}
+
 /// Repeated calls to `state_fingerprint` and `get_heads`, with no write
 /// between them, return the same bytes.
 ///
@@ -577,8 +621,8 @@ pub(crate) fn reset_allows_clean_re_sync_to_another_replica<A: CrdtAdapter + Def
 /// a change (the heads are not empty). That is true only where creating a
 /// root object is an op that merges like any other op. This is why Automerge
 /// needs `BOOTSTRAP_ACTOR`. In Yrs and Loro, a root object is identified by
-/// its name, so creation cannot collide and makes no change. Each of those
-/// adapters has a mirror test.
+/// its name, so creation cannot collide and makes no change. Their mirror is
+/// `ensure_text_is_a_pure_lookup_no_change_authored`.
 pub(crate) fn ensure_text_is_deterministic_across_replicas<A: CrdtAdapter + Default>() {
     let mut a = A::default();
     let mut b = A::default();
@@ -650,7 +694,8 @@ pub(crate) fn partitioned_text_edits_interleave_after_bootstrap<A: CrdtAdapter +
 ///
 /// ACCOMMODATION: Automerge only, for the same reason as
 /// `ensure_text_is_deterministic_across_replicas`. The collision needs root
-/// object creation to be an op that can lose a merge.
+/// object creation to be an op that can lose a merge. The Yrs and Loro
+/// mirror is `partitioned_text_edits_interleave_even_without_ensure_text`.
 pub(crate) fn without_bootstrap_partitioned_text_loses_a_side<A: CrdtAdapter + Default>() {
     let mut a = A::default();
     let mut b = A::default();
@@ -672,6 +717,61 @@ pub(crate) fn without_bootstrap_partitioned_text_loses_a_side<A: CrdtAdapter + D
         10,
         "lazy creation collides: converged doc keeps only the winning object"
     );
+}
+
+/// `ensure_text` makes no change. The heads stay empty, and two replicas
+/// that call it without sync have equal fingerprints.
+///
+/// ACCOMMODATION: Yrs and Loro. This is the mirror of
+/// `ensure_text_is_deterministic_across_replicas`. In both libraries a root
+/// object is identified by its name, so creating it is not an op. Yrs looks
+/// the name up in a local registry. Loro derives the container id from the
+/// name and the accessor's type, and stores nothing.
+pub(crate) fn ensure_text_is_a_pure_lookup_no_change_authored<A: CrdtAdapter + Default>() {
+    let mut a = A::default();
+    let mut b = A::default();
+    a.ensure_text("text").unwrap();
+    b.ensure_text("text").unwrap();
+
+    assert!(
+        a.get_heads().is_empty(),
+        "ensure_text must not author a change"
+    );
+    assert_eq!(a.get_heads(), b.get_heads());
+    assert_eq!(a.state_fingerprint(), b.state_fingerprint());
+}
+
+/// Without `ensure_text`, two partitioned replicas still merge into one text
+/// that holds the inserts from both sides.
+///
+/// ACCOMMODATION: Yrs and Loro. This is the mirror of
+/// `without_bootstrap_partitioned_text_loses_a_side`. A root object has no
+/// creation op, so the first `TextSplice` on each side names the same object,
+/// and no side can lose the merge.
+pub(crate) fn partitioned_text_edits_interleave_even_without_ensure_text<
+    A: CrdtAdapter + Default,
+>() {
+    let mut a = A::default();
+    let mut b = A::default();
+    let splice = Op::TextSplice {
+        obj: "text".into(),
+        pos: 0,
+        del_count: 0,
+        insert: "x".into(),
+    };
+    for _ in 0..10 {
+        a.apply_op(&splice).unwrap();
+        b.apply_op(&splice).unwrap();
+    }
+    sync_until_quiescent(&mut a, "a", &mut b, "b");
+
+    assert_eq!(a.state_fingerprint(), b.state_fingerprint());
+    assert_eq!(
+        a.text_length("text").unwrap(),
+        20,
+        "no lazy-creation collision to lose a side to"
+    );
+    assert_eq!(b.text_length("text").unwrap(), 20);
 }
 
 /// `ensure_text` fails on a document that already has changes but does not
