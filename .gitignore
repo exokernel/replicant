@@ -13,3 +13,6 @@ deploy/docker/compose.generated.yaml
 # Python bytecode and marimo session caches.
 __pycache__/
 __marimo__/
+
+# Personal study notebook for porting crdt-benchmarks. Not part of the repository.
+/analysis/benchmark-study.md
