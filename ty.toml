@@ -1,0 +1,11 @@
+# Settings for the ty type checker and language server.
+
+# ty does not keep the return type of altair's `mark_*` methods, because
+# altair wraps them in a decorator (`use_signature`) that ty cannot follow yet.
+# Each `.mark_circle(...).encode(...)` chain then gives a false
+# `unresolved-attribute` error. Turn the rule off for the notebooks only.
+[[overrides]]
+include = ["analysis/**"]
+
+[overrides.rules]
+unresolved-attribute = "ignore"

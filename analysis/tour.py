@@ -4,19 +4,16 @@ __generated_with = "0.25.2"
 app = marimo.App(width="medium", app_title="Replicant tour")
 
 
-@app.cell
-def _():
+with app.setup:
     import marimo as mo
     import altair as alt
     import pandas as pd
 
     import tour_helpers as th
 
-    return alt, mo, pd, th
-
 
 @app.cell
-def _(mo):
+def _():
     mo.md(r"""
     # How Replicant works, and how to read what it measures
 
@@ -38,7 +35,7 @@ def _(mo):
 
 
 @app.cell
-def _(mo, th):
+def _():
     with mo.status.spinner(title="Building the release orchestrator…"):
         binary = th.build()
     docker_up = th.docker_available()
@@ -47,7 +44,7 @@ def _(mo, th):
 
 
 @app.cell
-def _(docker_up, mo, th):
+def _(docker_up):
     crdt = mo.ui.dropdown(options=list(th.CRDTS), value="automerge", label="CRDT library")
     lane = mo.ui.dropdown(
         options=["docker", "in-process"],
@@ -68,7 +65,7 @@ def _(docker_up, mo, th):
 
 
 @app.cell
-def _(binary, crdt, lane, mo, th):
+def _(binary, crdt, lane):
     if lane.value == "docker":
         with mo.status.spinner(
             title=f"Starting a {th.STACK.size}-replica docker stack with {crdt.value}…",
@@ -96,7 +93,7 @@ def _(binary, crdt, lane, mo, th):
 
 
 @app.cell
-def _(lane, mo, th):
+def _(lane):
     _panels = mo.hstack(
         [
             mo.Html(
@@ -132,7 +129,7 @@ def _(lane, mo, th):
 
 
 @app.cell
-def _(mo):
+def _():
     mo.md(r"""
     ## 1. What is under test?
 
@@ -153,7 +150,7 @@ def _(mo):
 
 
 @app.cell
-def _(mo):
+def _():
     mo.mermaid(
         """
         flowchart LR
@@ -167,7 +164,7 @@ def _(mo):
 
 
 @app.cell
-def _(crdt, go, mo, th):
+def _(crdt, go):
     first = go(th.topology("two-replicas", 2, "full_mesh", op_count=3, write_pattern="concentrated"))
     mo.vstack(
         [
@@ -199,7 +196,7 @@ def _(crdt, go, mo, th):
 
 
 @app.cell
-def _(mo):
+def _():
     mo.md(r"""
     ### What "converged" means
 
@@ -225,7 +222,7 @@ def _(mo):
 
 
 @app.cell
-def _(mo):
+def _():
     mo.md(r"""
     ## 2. What does one trial measure?
 
@@ -249,7 +246,7 @@ def _(mo):
 
 
 @app.cell
-def _(mo):
+def _():
     s2_nodes = mo.ui.slider(2, 8, value=4, label="replicas", show_value=True)
     s2_ops = mo.ui.slider(1, 200, value=20, label="writes", show_value=True)
     s2_interval = mo.ui.slider(0, 5, value=0, label="pause between writes (ms)", show_value=True)
@@ -258,7 +255,7 @@ def _(mo):
 
 
 @app.cell
-def _(go, mo, s2_interval, s2_nodes, s2_ops, th):
+def _(go, s2_interval, s2_nodes, s2_ops):
     one = go(
         th.topology(
             "one-trial",
@@ -295,7 +292,7 @@ def _(go, mo, s2_interval, s2_nodes, s2_ops, th):
 
 
 @app.cell
-def _(mo, one, pd):
+def _(one):
     _meaning = {
         "row_type": "`trial` for one trial, `summary` for the scenario.",
         "scenario": "The scenario name.",
@@ -331,7 +328,7 @@ def _(mo, one, pd):
 
 
 @app.cell
-def _(mo):
+def _():
     mo.md(r"""
     ## 3. Does the topology change convergence?
 
@@ -347,7 +344,7 @@ def _(mo):
 
 
 @app.cell
-def _(mo):
+def _():
     s3_conn = mo.ui.dropdown(
         options=["full_mesh", "ring", "line", "star"], value="ring", label="shape"
     )
@@ -371,7 +368,7 @@ def _(mo):
 
 
 @app.cell
-def _(alt, go, mo, s3_conn, s3_nodes, s3_ops, s3_pattern, s3_trials, th):
+def _(go, s3_conn, s3_nodes, s3_ops, s3_pattern, s3_trials):
     topo = go(
         th.topology("topology", s3_nodes.value, s3_conn.value, s3_ops.value, s3_pattern.value),
         trials=s3_trials.value,
@@ -417,7 +414,7 @@ def _(alt, go, mo, s3_conn, s3_nodes, s3_ops, s3_pattern, s3_trials, th):
 
 
 @app.cell
-def _(mo):
+def _():
     s3_sweep = mo.ui.run_button(label="Compare the four shapes")
     mo.hstack(
         [s3_sweep, mo.md("Runs each shape with the replica, write, and trial settings above.")],
@@ -427,7 +424,7 @@ def _(mo):
 
 
 @app.cell
-def _(alt, go, mo, pd, s3_nodes, s3_ops, s3_pattern, s3_sweep, s3_trials, th):
+def _(go, s3_nodes, s3_ops, s3_pattern, s3_sweep, s3_trials):
     mo.stop(not s3_sweep.value)
     _rows = []
     for _shape in ["full_mesh", "star", "ring", "line"]:
@@ -464,7 +461,7 @@ def _(alt, go, mo, pd, s3_nodes, s3_ops, s3_pattern, s3_sweep, s3_trials, th):
 
 
 @app.cell
-def _(mo):
+def _():
     mo.md(r"""
     ### How to read it
 
@@ -490,7 +487,7 @@ def _(mo):
 
 
 @app.cell
-def _(mo):
+def _():
     mo.md(r"""
     ## 4. What does a partition cost?
 
@@ -524,7 +521,7 @@ def _(mo):
 
 
 @app.cell
-def _(mo):
+def _():
     s4_size = mo.ui.slider(1, 4, value=2, label="replicas per group", show_value=True)
     s4_ops = mo.ui.dropdown(
         options={"10": 10, "100": 100, "1,000": 1000},
@@ -564,7 +561,7 @@ def _(mo):
 
 
 @app.cell
-def _(go, mo, s4_heal, s4_locality, s4_ops, s4_size, s4_workload, th):
+def _(go, s4_heal, s4_locality, s4_ops, s4_size, s4_workload):
     _g = s4_size.value
     heal = go(
         th.partition(
@@ -613,7 +610,7 @@ def _(go, mo, s4_heal, s4_locality, s4_ops, s4_size, s4_workload, th):
 
 
 @app.cell
-def _(mo):
+def _():
     s4_sweep = mo.ui.run_button(label="Measure the cost of divergence")
     mo.hstack(
         [
@@ -629,7 +626,7 @@ def _(mo):
 
 
 @app.cell
-def _(alt, crdt, go, mo, pd, s4_heal, s4_locality, s4_size, s4_sweep, s4_workload, th):
+def _(crdt, go, s4_heal, s4_locality, s4_size, s4_sweep, s4_workload):
     mo.stop(not s4_sweep.value)
     _g = s4_size.value
     _rows = []
@@ -674,7 +671,7 @@ def _(alt, crdt, go, mo, pd, s4_heal, s4_locality, s4_size, s4_sweep, s4_workloa
 
 
 @app.cell
-def _(mo):
+def _():
     mo.md(r"""
     ## 5. Do the libraries differ?
 
@@ -687,7 +684,7 @@ def _(mo):
 
 
 @app.cell
-def _(mo, th):
+def _():
     s5_preset = mo.ui.dropdown(
         options={
             "map writes, full mesh of 5": th.topology("map-mesh-5", 5, "full_mesh", 50),
@@ -709,7 +706,7 @@ def _(mo, th):
 
 
 @app.cell
-def _(alt, go, mo, pd, s5_go, s5_preset, s5_trials, th):
+def _(go, s5_go, s5_preset, s5_trials):
     mo.stop(not s5_go.value)
     _rows = []
     with mo.status.progress_bar(total=len(th.CRDTS), title="Running") as _bar:
@@ -748,7 +745,7 @@ def _(alt, go, mo, pd, s5_go, s5_preset, s5_trials, th):
 
 
 @app.cell
-def _(mo):
+def _():
     mo.md(r"""
     ### What does not compare directly
 
@@ -769,7 +766,7 @@ def _(mo):
 
 
 @app.cell
-def _(mo):
+def _():
     mo.md(r"""
     ## 6. When should you distrust a number?
 
@@ -780,7 +777,7 @@ def _(mo):
 
 
 @app.cell
-def _(mo):
+def _():
     s6_trials = mo.ui.slider(10, 100, value=40, step=10, label="trials", show_value=True)
     s6_go = mo.ui.run_button(label="Run")
     mo.hstack([s6_trials, s6_go], justify="start")
@@ -788,7 +785,7 @@ def _(mo):
 
 
 @app.cell
-def _(alt, crdt, go, lane, mo, s6_go, s6_trials, th):
+def _(crdt, go, lane, s6_go, s6_trials):
     mo.stop(not s6_go.value)
     spread = go(th.topology("spread", 6, "ring", 30), trials=s6_trials.value)
     _s = spread.summary
@@ -822,7 +819,7 @@ def _(alt, crdt, go, lane, mo, s6_go, s6_trials, th):
 
 
 @app.cell
-def _(mo):
+def _():
     mo.md(r"""
     ### A checklist for reading a sweep
 
@@ -850,7 +847,7 @@ def _(mo):
 
 
 @app.cell
-def _(mo):
+def _():
     mo.md(r"""
     ## 7. Does the lane change the answer?
 
@@ -864,7 +861,7 @@ def _(mo):
 
 
 @app.cell
-def _(docker_up, mo):
+def _(docker_up):
     s7_go = mo.ui.run_button(label="Compare the lanes", disabled=not docker_up)
     mo.hstack(
         [
@@ -882,7 +879,7 @@ def _(docker_up, mo):
 
 
 @app.cell
-def _(alt, binary, crdt, mo, pd, s7_go, th):
+def _(binary, crdt, s7_go):
     mo.stop(not s7_go.value)
     _rows = []
     with mo.status.progress_bar(total=16, title="Running") as _bar:
