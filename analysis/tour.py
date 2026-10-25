@@ -259,10 +259,10 @@ def _(go, s2_interval, s2_nodes, s2_ops):
     one = go(
         th.topology(
             "one-trial",
-            s2_nodes.value,
+            int(s2_nodes.value),
             "full_mesh",
-            s2_ops.value,
-            op_interval_ms=s2_interval.value,
+            int(s2_ops.value),
+            op_interval_ms=int(s2_interval.value),
         )
     )
     _trace = one.trial_events()
@@ -272,7 +272,7 @@ def _(go, s2_interval, s2_nodes, s2_ops):
     _polls = th.poll_count(_trace)
     mo.vstack(
         [
-            th.timeline_chart(_trace, s2_nodes.value, title="One trial, full mesh"),
+            th.timeline_chart(_trace, int(s2_nodes.value), title="One trial, full mesh"),
             mo.md(
                 f"""
                 - Reported `convergence_ms`: **{one.trials["convergence_ms"].iloc[0]:.3f} ms**.
@@ -370,7 +370,7 @@ def _():
 @app.cell
 def _(go, s3_conn, s3_nodes, s3_ops, s3_pattern, s3_trials):
     topo = go(
-        th.topology("topology", s3_nodes.value, s3_conn.value, s3_ops.value, s3_pattern.value),
+        th.topology("topology", int(s3_nodes.value), s3_conn.value, int(s3_ops.value), s3_pattern.value),
         trials=s3_trials.value,
     )
     _edges, _ = topo.edges()
@@ -387,7 +387,7 @@ def _(go, s3_conn, s3_nodes, s3_ops, s3_pattern, s3_trials):
     mo.hstack(
         [
             th.graph_chart(
-                s3_nodes.value,
+                int(s3_nodes.value),
                 _edges,
                 weights=topo.sync_per_edge(),
                 title=f"{s3_conn.value}, {s3_nodes.value} replicas",
@@ -429,7 +429,7 @@ def _(go, s3_nodes, s3_ops, s3_pattern, s3_sweep, s3_trials):
     _rows = []
     for _shape in ["full_mesh", "star", "ring", "line"]:
         _r = go(
-            th.topology(_shape, s3_nodes.value, _shape, s3_ops.value, s3_pattern.value),
+            th.topology(_shape, int(s3_nodes.value), _shape, int(s3_ops.value), s3_pattern.value),
             trials=s3_trials.value,
         )
         _rows.append(
@@ -562,7 +562,7 @@ def _():
 
 @app.cell
 def _(go, s4_heal, s4_locality, s4_ops, s4_size, s4_workload):
-    _g = s4_size.value
+    _g = int(s4_size.value)
     heal = go(
         th.partition(
             "partition-heal",
@@ -628,7 +628,7 @@ def _():
 @app.cell
 def _(crdt, go, s4_heal, s4_locality, s4_size, s4_sweep, s4_workload):
     mo.stop(not s4_sweep.value)
-    _g = s4_size.value
+    _g = int(s4_size.value)
     _rows = []
     with mo.status.progress_bar(total=3, title="Running") as _bar:
         for _ops in [10, 100, 1000]:
