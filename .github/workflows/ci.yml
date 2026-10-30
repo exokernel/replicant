@@ -73,9 +73,12 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: just
-      # gen-compose.py needs pyyaml. The runner's python3 may not have it.
-      - name: Install pyyaml
-        run: pip install pyyaml
+      # gen-compose.py needs pyyaml. `just setup` installs the locked packages
+      # into .venv, and the Justfile prefers that python3 when it exists.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+      - name: Install Python packages
+        run: just setup
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
       # The text scenario covers more than the sync path: it also runs the

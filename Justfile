@@ -15,11 +15,15 @@ default:
 
 # ── Develop ─────────────────────────────────────────────────────────────────
 
-# Create .venv if it is missing, and install requirements.txt into it
+# Create .venv if it is missing, and install the locked packages into it
 [group('develop')]
 setup:
-    test -x .venv/bin/python3 || python3 -m venv .venv
-    .venv/bin/python3 -m pip install --quiet -r requirements.txt
+    uv sync --quiet
+
+# Also install the packages for the archived Jupyter notebooks
+[group('develop')]
+setup-archive:
+    uv sync --quiet --group archive
 
 # Format all crates
 [group('develop')]

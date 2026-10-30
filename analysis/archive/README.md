@@ -49,7 +49,8 @@ for s in $(ls scenarios/*.toml | xargs -n1 basename -s .toml); do
 done
 ```
 
-Then run `cd analysis/archive && jupyter lab`.
+Then install the notebook packages with `just setup-archive`, and run
+`cd analysis/archive && jupyter lab`.
 
 The notebooks cache each CSV as `<stem>.parquet`. They refresh the cache when
 the CSV is newer. `results/` is gitignored.

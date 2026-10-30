@@ -10,6 +10,11 @@ KIND_CLUSTER=replicant
 KIND_IMAGE=replicant-replica:dev
 KIND_NS=replicant
 
+# Host port of the port-forward to node-0. Set KIND_PORT_BASE to use other
+# ports, so that a docker compose stack on 50051 and up can run at the same
+# time. The compose ports do not change.
+REPLICA_PORT_BASE="${KIND_PORT_BASE:-$REPLICA_PORT_BASE}"
+
 kind_created=0
 forward_pids=()
 
@@ -38,9 +43,11 @@ kind_apply() {
     # read deploy/shared/, which is outside the kustomization root.
     kubectl kustomize --load-restrictor=LoadRestrictionsNone deploy/k8s/overlays/kind \
         | kubectl apply -f -
+    # On a new cluster, the first rollout pulls each image, which can take
+    # more than a minute.
     local d
     for d in otel-collector prometheus grafana; do
-        k rollout status "deployment/$d" --timeout=60s
+        k rollout status "deployment/$d" --timeout=180s
     done
 }
 

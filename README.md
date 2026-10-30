@@ -43,8 +43,9 @@ the library:
   - bash 4 or later. macOS ships bash 3.2; install a newer one with
     `brew install bash`.
   - `jq` and `curl`, for the bench recipes.
-- Python 3, for the notebooks and the deploy tooling. `just setup` creates
-  `.venv` and installs `requirements.txt` into it. With
+- Python 3 and [uv](https://docs.astral.sh/uv/), for the notebooks and the
+  deploy tooling. `just setup` creates `.venv` and installs
+  the packages from `uv.lock` into it. With
   [mise](https://mise.jdx.dev), entering the repository activates `.venv`.
 
 ## Quick start

@@ -3,26 +3,34 @@
 The notebook builds scenarios as dicts, runs them with `run`, and draws the
 result with `graph_chart` and `timeline_chart`.
 
-A run uses one of two lanes:
+A run uses one of three lanes:
 
 - `docker`: the replicas are containers in a 10-replica docker compose stack.
-  `STACK` starts the stack the first time, and recreates it when the CRDT
-  library changes. A scenario uses the first `node_count` replicas.
+- `k8s`: the replicas are pods in a 10-replica StatefulSet on a local kind
+  cluster. The orchestrator reaches them through `kubectl port-forward`.
 - `in-process`: the replicas are Tokio tasks inside the orchestrator process.
 
+`STACKS` holds the stack of each container lane. A stack starts the first
+time a run needs it, and restarts its replicas when the CRDT library changes.
+A scenario uses the first `node_count` replicas.
+
 Every run is traced. The trace's `stats` events give the per-link sync counts
-in both lanes.
+in every lane.
 """
 
 from __future__ import annotations
 
+import atexit
 import json
 import math
+import os
+import shutil
 import socket
 import subprocess
 import tempfile
 import time
-from collections.abc import Sequence
+from collections import deque
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 from pathlib import Path
@@ -56,26 +64,40 @@ def build() -> Path:
     return BINARY
 
 
-# ── The docker stack ────────────────────────────────────────────────────────
+# ── The container stacks ────────────────────────────────────────────────────
 
 
 def docker_available() -> bool:
-    """True if the docker daemon answers."""
+    """True if the docker daemon answers within 10 seconds."""
     try:
-        return subprocess.run(["docker", "info"], capture_output=True).returncode == 0
-    except FileNotFoundError:
+        return (
+            subprocess.run(["docker", "info"], capture_output=True, timeout=10).returncode == 0
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
 
 
+def kind_installed() -> bool:
+    """True if the kind and kubectl commands exist. kind also needs docker."""
+    return bool(shutil.which("kind") and shutil.which("kubectl"))
+
+
 class Stack:
-    """The docker compose stack that the docker lane runs against.
+    """A container stack that a lane runs against.
 
     It has `size` replicas, so it serves every scenario of up to `size`
     replicas without a restart. It runs one CRDT library at a time.
     """
 
-    PORT_BASE = 50051
-    GRAFANA = "http://localhost:3000"
+    #: The lane name.
+    LANE = ""
+    #: The script that starts the stack, in scripts/.
+    SCRIPT = ""
+    #: Host port of replica 0. Replica i is on PORT_BASE + i.
+    PORT_BASE = 0
+    #: The address that the replicas use to dial each other, with {i}.
+    PEER = ""
+    GRAFANA_PORT = 0
     DASHBOARD_UID = "replicant-scenarios"
 
     def __init__(self, size: int = 10):
@@ -83,44 +105,169 @@ class Stack:
         #: The library the stack runs, or None before the first `ensure`.
         self.crdt: str | None = None
 
-    def ensure(self, crdt: str) -> None:
+    def ensure(self, crdt: str, on_line: Callable[[str], None] | None = None) -> None:
         """Starts the stack with `crdt`, unless it already runs it.
 
         The first start builds the replica image, which takes minutes. A
         library change recreates the replica containers, which takes seconds.
+        `on_line` gets each line of the build output as it arrives.
+
+        If a replica port does not answer, for example after
+        `just docker-down`, it starts the stack again. Before a start, it
+        stops the other stacks, so that only one stack runs at a time.
         """
-        if self.crdt == crdt:
+        if self.crdt == crdt and self._replicas_answer():
             return
+        for other in STACKS.values():
+            if other is not self:
+                other.stop()
         with tempfile.TemporaryDirectory() as tmp:
             sizing = Path(tmp) / "stack.toml"
             sizing.write_text(to_toml(topology("stack", self.size, "full_mesh", 1)))
-            proc = subprocess.run(
-                [str(REPO / "scripts" / "docker.sh"), "up", str(sizing), crdt],
+            proc = subprocess.Popen(
+                [str(REPO / "scripts" / self.SCRIPT), "up", str(sizing), crdt],
                 cwd=REPO,
-                capture_output=True,
+                env=self._env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
             )
-        if proc.returncode != 0:
-            raise RuntimeError(f"starting the docker stack failed:\n{proc.stderr[-3000:]}")
+            tail: deque[str] = deque(maxlen=40)
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                line = line.rstrip()
+                if not line:
+                    continue
+                tail.append(line)
+                if on_line:
+                    on_line(line)
+            returncode = proc.wait()
+        if returncode != 0:
+            raise RuntimeError(
+                f"starting the {self.LANE} stack failed:\n" + "\n".join(tail)
+            )
         for i in range(self.size):
             _wait_for_port(self.PORT_BASE + i)
+        self._after_start()
         self.crdt = crdt
+
+    def stop(self) -> None:
+        """Stops the stack's containers. Does nothing if they do not run."""
+        self.crdt = None
+        subprocess.run(
+            [str(REPO / "scripts" / self.SCRIPT), "down"], cwd=REPO, capture_output=True
+        )
+
+    def _replicas_answer(self) -> bool:
+        """True if every replica port accepts a TCP connection."""
+        for i in range(self.size):
+            try:
+                with socket.create_connection(("localhost", self.PORT_BASE + i), timeout=1):
+                    pass
+            except OSError:
+                return False
+        return True
+
+    def _env(self) -> dict[str, str] | None:
+        """The environment of the start script. None keeps the notebook's."""
+        return None
+
+    def _after_start(self) -> None:
+        """Runs after the replicas accept connections."""
 
     def replicas_arg(self) -> str:
         """The orchestrator's --replicas argument for the whole stack."""
         return ",".join(
-            f"localhost:{self.PORT_BASE + i}=replica-{i}:50051" for i in range(self.size)
+            f"localhost:{self.PORT_BASE + i}={self.PEER.replace('{i}', str(i))}"
+            for i in range(self.size)
         )
+
+    def grafana_url(self) -> str:
+        return f"http://localhost:{self.GRAFANA_PORT}"
 
     def panel_url(self, panel_id: int, minutes: int = 5) -> str:
         """URL of one dashboard panel, for an iframe."""
         return (
-            f"{self.GRAFANA}/d-solo/{self.DASHBOARD_UID}/replicant"
+            f"{self.grafana_url()}/d-solo/{self.DASHBOARD_UID}/replicant"
             f"?orgId=1&panelId={panel_id}&from=now-{minutes}m&to=now&refresh=5s&theme=light"
         )
 
     def dashboard_url(self) -> str:
-        return f"{self.GRAFANA}/d/{self.DASHBOARD_UID}/replicant?orgId=1&refresh=5s"
+        return f"{self.grafana_url()}/d/{self.DASHBOARD_UID}/replicant?orgId=1&refresh=5s"
+
+
+class DockerStack(Stack):
+    """The docker compose stack. Grafana is a published port."""
+
+    LANE = "docker"
+    SCRIPT = "docker.sh"
+    PORT_BASE = 50051
+    PEER = "replica-{i}:50051"
+    GRAFANA_PORT = 3000
+
+
+class KindStack(Stack):
+    """The StatefulSet on the kind cluster `replicant`.
+
+    The first start also creates the cluster, which takes about a minute
+    more. `stop` keeps the cluster, and `just k8s-down` deletes it. The ports
+    are not the docker stack's, so a docker stack that another tool started
+    does not block them.
+    """
+
+    LANE = "k8s"
+    SCRIPT = "k8s.sh"
+    PORT_BASE = 51051
+    PEER = "node-{i}.node:50051"
+    GRAFANA_PORT = 3001
+
+    def __init__(self, size: int = 10):
+        super().__init__(size)
+        self._grafana: subprocess.Popen | None = None
+
+    def _env(self) -> dict[str, str]:
+        return {**os.environ, "KIND_PORT_BASE": str(self.PORT_BASE)}
+
+    def stop(self) -> None:
+        """Scales every pod to zero, and stops the port-forwards.
+
+        It keeps the cluster, so the next start takes seconds, not minutes.
+        `k8s.sh up` applies the manifests again, which restores the pods.
+        """
+        self.crdt = None
+        if self._grafana is not None:
+            self._grafana.terminate()
+            self._grafana = None
+        subprocess.run(
+            ["pkill", "-f", "kubectl -n replicant port-forward pod/node-"], capture_output=True
+        )
+        # Name the context, so that this never scales pods on another cluster.
+        for kind in ("statefulset", "deployment"):
+            subprocess.run(
+                [
+                    "kubectl", "--context", "kind-replicant", "-n", "replicant",
+                    "scale", kind, "--all", "--replicas=0",
+                ],
+                capture_output=True,
+            )
+
+    def _after_start(self) -> None:
+        """Port-forwards Grafana, unless the forward already runs.
+
+        The forward stops when the notebook stops.
+        """
+        if self._grafana is not None and self._grafana.poll() is None:
+            return
+        self._grafana = subprocess.Popen(
+            [
+                "kubectl", "-n", "replicant", "port-forward",
+                "svc/grafana", f"{self.GRAFANA_PORT}:3000",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        atexit.register(self._grafana.terminate)
+        _wait_for_port(self.GRAFANA_PORT)
 
 
 def _wait_for_port(port: int, timeout_s: float = 60) -> None:
@@ -137,7 +284,7 @@ def _wait_for_port(port: int, timeout_s: float = 60) -> None:
 
 
 #: The one stack this Python process uses.
-STACK = Stack()
+STACKS: dict[str, Stack] = {"docker": DockerStack(), "k8s": KindStack()}
 
 
 # ── Scenarios ───────────────────────────────────────────────────────────────
@@ -240,6 +387,27 @@ class Run:
         """The events as a table, for display."""
         return pd.DataFrame(self.events)
 
+    def trace_table(self, trial: int | None = None) -> pd.DataFrame:
+        """The events as a table with one `detail` column, for display.
+
+        Each kind of event has its own fields. One column per field would be
+        mostly empty, so the fields of an event go in its `detail` text.
+        """
+        rows = [
+            {
+                "t_ms": round(e["t_ms"], 3),
+                "event": e["event"],
+                "detail": ", ".join(
+                    f"{k}={v}"
+                    for k, v in e.items()
+                    if k not in ("t_ms", "event", "scenario", "trial")
+                ),
+            }
+            for e in self.events
+            if trial is None or e["trial"] == trial
+        ]
+        return pd.DataFrame(rows, columns=["t_ms", "event", "detail"])
+
     def trial_events(self, trial: int = 1) -> list[Event]:
         return [e for e in self.events if e["trial"] == trial]
 
@@ -288,10 +456,10 @@ def run(
     `binary` comes from `build()`. Passing it makes each caller wait for the
     build.
     """
-    if lane == "docker":
-        STACK.ensure(crdt)
+    if lane in STACKS:
+        STACKS[lane].ensure(crdt)
         # The stack fixes the library; the orchestrator rejects --crdt here.
-        lane_args = ["--replicas", STACK.replicas_arg()]
+        lane_args = ["--replicas", STACKS[lane].replicas_arg()]
     else:
         lane_args = ["--crdt", crdt]
     with tempfile.TemporaryDirectory() as tmp:

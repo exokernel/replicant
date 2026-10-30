@@ -1,0 +1,35 @@
+# Every Python package the repository uses. Run `just setup` to install them
+# into .venv. This is not an installable package: uv only reads the
+# dependencies and writes uv.lock.
+
+[project]
+name = "replicant-analysis"
+version = "0.0.0"
+requires-python = ">=3.14"
+dependencies = [
+    # The guided notebook, analysis/tour.py.
+    "marimo",
+    "altair",
+    "pandas",
+    # YAML library for deploy/docker/gen-compose.py (compose file generator).
+    # Listed explicitly so deploy tooling does not rely on a transitive dependency.
+    "pyyaml",
+    # Strips notebook outputs on `git add` so .ipynb diffs stay code-only.
+    # After `just setup`, run `nbstripout --install` once to register the local
+    # git filter (.gitattributes already binds it).
+    "nbstripout",
+]
+
+[dependency-groups]
+# The archived Jupyter notebooks in analysis/archive/. `just setup` leaves
+# them out. Run `just setup-archive` to install them.
+archive = [
+    "matplotlib",
+    "seaborn",
+    "pyarrow",
+    "jupyterlab",
+    "requests",
+]
+
+[tool.uv]
+package = false

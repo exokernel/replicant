@@ -5,6 +5,23 @@
 
 [tools]
 python = "3.14"
+uv = "latest"
 
 [env]
 _.python.venv = { path = ".venv", create = true }
+
+[tasks.setup]
+description = "Install the locked Python packages into .venv"
+run = "uv sync --quiet"
+
+[tasks."setup:archive"]
+description = "Also install the packages for the archived Jupyter notebooks"
+run = "uv sync --quiet --group archive"
+
+[tasks."tour:edit"]
+description = "Open the guided marimo notebook in a browser, with its code"
+run = "python -m marimo edit analysis/tour.py"
+
+[tasks."tour:run"]
+description = "Open the guided marimo notebook as an app, with the code hidden"
+run = "python -m marimo run analysis/tour.py"

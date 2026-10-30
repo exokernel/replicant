@@ -82,7 +82,9 @@ scenarios. Thus one orchestrator run can sweep many scenarios, with
 
 1. Create a kind cluster named `replicant`, or reuse one that exists.
 2. Apply the manifests in `deploy/k8s/overlays/kind`.
-3. Port-forward the replica pods to host ports `50051` and up.
+3. Port-forward the replica pods to host ports `50051` and up. Set
+   `KIND_PORT_BASE` to use other ports. The notebook sets it to `51051`, so
+   that a docker stack on `50051` and up can run at the same time.
 4. Run the scenario.
 5. Delete the cluster, but only if this recipe created it.
 

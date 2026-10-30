@@ -29,7 +29,9 @@ def _():
     container in a docker compose stack, and sync goes over real TCP between
     containers. If Docker is not running, the notebook falls back to the
     **in-process lane**, where every replica is a task inside the orchestrator
-    process. Section 7 shows how much that choice changes the numbers.
+    process. If `kind` and `kubectl` are installed, you can also pick the
+    **k8s lane**: each replica is a pod on a local kind cluster. Section 7
+    shows how much that choice changes the numbers.
     """)
     return
 
@@ -39,24 +41,31 @@ def _():
     with mo.status.spinner(title="Building the release orchestrator…"):
         binary = th.build()
     docker_up = th.docker_available()
+    kind_up = docker_up and th.kind_installed()
     mo.md(f"Orchestrator ready: `{binary.relative_to(th.REPO)}`")
-    return binary, docker_up
+    return binary, docker_up, kind_up
 
 
 @app.cell
-def _(docker_up):
+def _(docker_up, kind_up):
     crdt = mo.ui.dropdown(options=list(th.CRDTS), value="automerge", label="CRDT library")
     lane = mo.ui.dropdown(
-        options=["docker", "in-process"],
+        options=["docker", "k8s", "in-process"] if kind_up else ["docker", "in-process"],
         value="docker" if docker_up else "in-process",
         label="lane",
     )
-    _note = (
-        "Every section uses these settings. Change them at any time."
-        if docker_up
-        else "**Docker is not running**, so the lane is in-process. Start Docker "
-        "(for example `colima start`) and re-run this cell to use the docker lane."
-    )
+    if not docker_up:
+        _note = (
+            "**Docker is not running**, so the lane is in-process. Start Docker "
+            "(for example `colima start`) and re-run this cell to use the docker lane."
+        )
+    elif not kind_up:
+        _note = (
+            "Every section uses these settings. Change them at any time. "
+            "Install `kind` and `kubectl` to also use the k8s lane."
+        )
+    else:
+        _note = "Every section uses these settings. Change them at any time."
     mo.callout(
         mo.hstack([crdt, lane, mo.md(_note)], justify="start"),
         kind="info" if docker_up else "warn",
@@ -66,12 +75,18 @@ def _(docker_up):
 
 @app.cell
 def _(binary, crdt, lane):
-    if lane.value == "docker":
+    stack = th.STACKS.get(lane.value)
+    if stack is not None:
         with mo.status.spinner(
-            title=f"Starting a {th.STACK.size}-replica docker stack with {crdt.value}…",
-            subtitle="The first start builds the replica image, which takes a few minutes.",
-        ):
-            th.STACK.ensure(crdt.value)
+            title=f"Starting a {stack.size}-replica {stack.LANE} stack with {crdt.value}…",
+            subtitle=(
+                "The first start creates a kind cluster and builds the replica "
+                "image, which takes a few minutes."
+                if stack.LANE == "k8s"
+                else "The first start builds the replica image, which takes a few minutes."
+            ),
+        ) as _spinner:
+            stack.ensure(crdt.value, on_line=lambda line: _spinner.update(subtitle=line[-120:]))
 
     def go(scenario, trials=1, library=None):
         """Runs `scenario` with the library and lane chosen above.
@@ -80,33 +95,41 @@ def _(binary, crdt, lane):
         """
         return th.run(scenario, library or crdt.value, binary, trials=trials, lane=lane.value)
 
+    _k8s_note = (
+        " The orchestrator reaches each pod through `kubectl port-forward`, so "
+        "every control call and every poll takes longer than in docker. Sync "
+        "between the pods stays inside the cluster."
+    )
     mo.md(
         f"Lane: **{lane.value}**"
         + (
-            f", a stack of {th.STACK.size} replicas running **{th.STACK.crdt}**. "
+            f", a stack of {stack.size} replicas running **{stack.crdt}**. "
             "A scenario uses the first replicas it needs."
-            if lane.value == "docker"
+            + (_k8s_note if stack.LANE == "k8s" else "")
+            if stack is not None
             else "."
         )
     )
-    return (go,)
+    return go, stack
 
 
 @app.cell
-def _(lane):
+def _(stack):
     _panels = mo.hstack(
         [
             mo.Html(
-                f'<iframe src="{th.STACK.panel_url(_id)}" width="480" height="260" '
+                f'<iframe src="{stack.panel_url(_id)}" width="480" height="260" '
                 'frameborder="0"></iframe>'
             )
             for _id in (3, 4)
-        ],
+        ]
+        if stack is not None
+        else [],
         justify="start",
     )
     mo.accordion(
         {
-            "Live dashboard (docker lane)": mo.vstack(
+            "Live dashboard (docker and k8s lanes)": mo.vstack(
                 [
                     mo.md(
                         f"""
@@ -115,14 +138,14 @@ def _(lane):
                         Replicas export every 2 s, so a run shows up a few
                         seconds after it ends. The counters add up over every
                         run since the stack started.
-                        [Open the full dashboard]({th.STACK.dashboard_url()}).
+                        [Open the full dashboard]({stack.dashboard_url()}).
                         """
                     ),
                     _panels,
                 ]
             )
-            if lane.value == "docker"
-            else mo.md("The dashboard needs the docker lane.")
+            if stack is not None
+            else mo.md("The dashboard needs the docker or the k8s lane.")
         }
     )
     return
@@ -185,11 +208,7 @@ def _(crdt, go):
                 after the clock stopped.
                 """
             ),
-            mo.ui.table(
-                first.trace.drop(columns=["scenario", "trial"]),
-                selection=None,
-                show_column_summaries=False,
-            ),
+            mo.ui.table(first.trace_table(), selection=None, show_column_summaries=False),
         ]
     )
     return
@@ -851,39 +870,42 @@ def _():
     mo.md(r"""
     ## 7. Does the lane change the answer?
 
-    The same scenarios, run in both lanes. In-process, every replica is a task
+    The same scenarios, run in each lane. In-process, every replica is a task
     in one process: replicas compete for the same CPU, and a sync message
     never leaves the process's network stack for long. In docker, each
     replica is its own process with its own runtime, and every message crosses
-    a container network.
+    a container network. In k8s, the replicas are pods, and sync crosses the
+    cluster network. The orchestrator reaches the pods through
+    `kubectl port-forward`, so its polls are slower than in docker.
     """)
     return
 
 
 @app.cell
-def _(docker_up):
+def _(docker_up, kind_up):
+    s7_lanes = ["in-process", "docker"] + (["k8s"] if kind_up else [])
     s7_go = mo.ui.run_button(label="Compare the lanes", disabled=not docker_up)
     mo.hstack(
         [
             s7_go,
             mo.md(
                 "Runs the four shapes with 5 replicas, at 10 and 50 writes, 10 "
-                "trials each, in both lanes."
+                f"trials each, in these lanes: {', '.join(s7_lanes)}."
                 if docker_up
                 else "This section needs Docker."
             ),
         ],
         justify="start",
     )
-    return (s7_go,)
+    return s7_go, s7_lanes
 
 
 @app.cell
-def _(binary, crdt, s7_go):
+def _(binary, crdt, s7_go, s7_lanes):
     mo.stop(not s7_go.value)
     _rows = []
-    with mo.status.progress_bar(total=16, title="Running") as _bar:
-        for _lane in ["in-process", "docker"]:
+    with mo.status.progress_bar(total=8 * len(s7_lanes), title="Running") as _bar:
+        for _lane in s7_lanes:
             for _ops in [10, 50]:
                 for _shape in ["full_mesh", "star", "ring", "line"]:
                     _r = th.run(
@@ -924,8 +946,12 @@ def _(binary, crdt, s7_go):
                 four shapes were close. At 10 writes, docker made the line the
                 slowest shape, because each hop crossed a network stack.
 
+                The k8s lane was not in that run, so the text does not say
+                how it ranks the shapes. Its p50 includes the slower polls
+                through the port-forward.
+
                 The lesson: a ranking measured in one lane is a claim about
-                that lane. Before you report one, check it in the other.
+                that lane. Before you report one, check it in another.
                 """
             ),
         ]
