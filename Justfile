@@ -142,6 +142,17 @@ replay-docker replicas crdt *args:
 gen-traces clone:
     tools/crdt-benchmarks/gen-traces.sh '{{ clone }}'
 
+# Download the archived traces to traces/, with no crdt-benchmarks clone
+[group('data')]
+fetch-traces:
+    scripts/fetch-traces.sh
+
+# Run all workloads once and check their content. The times have no use. Needs traces/.
+[group('data')]
+replay-check:
+    cargo run --release --bin replay -- --trials 1 --no-memory --out /dev/null
+    cargo run --release --bin replay -- --spec workloads/editing-traces.toml --trials 1 --no-memory --out /dev/null
+
 # Compare replay results with crdt-benchmarks results, on the versions the crates use
 [group('data')]
 calibrate clone trials='6' repeats='5':

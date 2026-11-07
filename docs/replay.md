@@ -27,6 +27,10 @@ just replay-docker 1 yrs --only b4 --out results/replay/b4-yrs-docker.jsonl
 just replay --spec workloads/editing-traces.toml
 ```
 
+If you have no clone, `just fetch-traces` downloads the same files from the
+`traces-v1` release. `just replay-check` runs every workload once and checks its
+content. CI runs these two recipes, so a change that breaks a real workload fails CI.
+
 The clone must be at the commit that `tools/crdt-benchmarks/gen-traces.sh` names.
 The tools do not change the clone. They copy its commit to a gitignored directory
 and install the packages there, with `--ignore-scripts`. Node comes from
