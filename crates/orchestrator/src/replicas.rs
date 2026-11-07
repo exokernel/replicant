@@ -121,7 +121,7 @@ async fn spawn_node(
             tracing::error!("replica server exited with error: {e:#}");
         }
     });
-    let client = ReplicaClient::connect(format!("http://{addr}")).await?;
+    let client = common::connect_replica(&addr.to_string()).await?;
     Ok((ReplicaEndpoint::loopback(addr.to_string()), client))
 }
 
@@ -150,7 +150,7 @@ pub async fn spawn_nodes(
 async fn connect_external(endpoints: &[ReplicaEndpoint]) -> Result<Vec<Client>> {
     let mut clients = Vec::with_capacity(endpoints.len());
     for ep in endpoints {
-        let mut client = ReplicaClient::connect(format!("http://{}", ep.client_addr))
+        let mut client = common::connect_replica(&ep.client_addr)
             .await
             .with_context(|| format!("connecting to external replica at {}", ep.client_addr))?;
         fingerprint(&mut client)
@@ -340,7 +340,7 @@ pub async fn kick_sync_edges(clients: &[Client], edges: &[(usize, usize)]) -> Re
 // ── Writes ─────────────────────────────────────────────────────────────────
 
 /// Name of the shared text object that every `TextSplice` workload writes to.
-pub const TEXT_OBJ: &str = "text";
+pub use common::TEXT_OBJ;
 
 /// Applies one `MapPut` to the root map.
 pub async fn map_put(client: &mut Client, key: &str, val: &str) -> Result<()> {

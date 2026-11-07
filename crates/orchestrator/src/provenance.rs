@@ -15,9 +15,9 @@
 //! tracked, so the commit already determines it.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Context, Result};
+use common::provenance;
 use serde_json::{Value, json};
 
 use crate::contention::{self, AchievedContention};
@@ -238,40 +238,18 @@ fn unix_millis() -> u64 {
 /// repository. A provenance file with no git identity is still better than
 /// none, so this never fails the run.
 fn git_provenance() -> Value {
-    let commit = capture(&["rev-parse", "HEAD"]);
-    // `--porcelain` prints one line per modified path, so empty output means a
-    // clean tree.
-    let dirty = capture(&["status", "--porcelain"]).map(|s| !s.is_empty());
     json!({
-        "commit": commit,
-        // True when the tree held uncommitted changes. The run is then not
-        // reproducible from `commit` alone.
-        "dirty": dirty,
+        "commit": provenance::git_commit(),
+        "dirty": provenance::git_dirty(),
     })
-}
-
-/// Runs `git` with `args` and returns its trimmed stdout, or `None` if the
-/// command fails for any reason.
-fn capture(args: &[&str]) -> Option<String> {
-    let out = Command::new("git").args(args).output().ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
 }
 
 /// Returns the hostname and CPU count, which identify the machine a timing was
 /// taken on.
 fn host_provenance() -> Value {
-    // On Linux, the measurement host, /proc is authoritative. HOSTNAME is a
-    // fallback and not every shell exports it.
-    let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname")
-        .map(|s| s.trim().to_owned())
-        .ok()
-        .or_else(|| std::env::var("HOSTNAME").ok())
-        .filter(|s| !s.is_empty());
     json!({
-        "hostname": hostname,
-        "cpus": std::thread::available_parallelism().map(usize::from).ok(),
+        "hostname": provenance::hostname(),
+        "cpus": provenance::cpus(),
     })
 }
 
