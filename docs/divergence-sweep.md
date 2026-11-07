@@ -124,15 +124,31 @@ Run by
 1. **Setup.** Reset every replica. If the cell has a baseline, load it on every
    replica, and check that all replicas hold the same document. For text
    workloads, create the shared text object on every replica. Wire the
-   *complete* post-heal graph, then block every cross-group link. A blocked link
-   stays open but carries no data.
+   *complete* post-heal graph with every link open, and wait until the sync on
+   every link is idle. Then block every cross-group link. A blocked link stays
+   open but carries no data, and it keeps its sync state.
 2. **Divergence.** Each group applies `ops_per_group` operations. The blocks
    keep the groups invisible to each other.
 3. **Gate.** Confirm that the groups really did diverge.
-4. **Heal.** Clear the blocks and start the sync handshake. **The clock runs
-   from the first unblock until every replica reports the same fingerprint.**
+4. **Heal.** Clear the blocks and kick the sync. Each side still has its sync
+   state from before the partition, so it sends only what changed. **The clock
+   runs from the first unblock until every replica reports the same
+   fingerprint.**
 5. **Gate.** Confirm the merged document contains both sides' work. Its length
    must equal the baseline length plus the operation count.
+
+**The sync before the partition.** Sync is idle when no replica has a message to
+send, and every message that a replica sent has arrived. The orchestrator checks
+both with the `SyncPending` and `GetStats` calls. A timer cannot show this, because
+an Automerge replica can compute for hundreds of milliseconds between two messages
+of one handshake. The heal then measures a reconnect, not a first contact. See
+[`metrics.md`](metrics.md).
+
+**The sync protocols.** Automerge has its own sync protocol. Yrs and Loro have none,
+so their adapters add one that follows the Yjs sync protocol: each side sends its
+state vector or version vector, and the other side answers with what that version
+lacks. Before 2026-11-07, these adapters sent data based only on what they had sent
+before, so after a reset they sent the whole document.
 
 Setup happens before the clock starts on purpose. Opening a sync stream costs a
 TCP connect and an HTTP/2 handshake, and that cost grows with the number of

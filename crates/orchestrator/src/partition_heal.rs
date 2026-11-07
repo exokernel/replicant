@@ -11,14 +11,16 @@
 //! # Phases
 //!
 //! 1. **Setup.** Reset every replica. If the cell has a baseline, load it on every
-//!    replica. For text workloads, create the shared
-//!    text object on every replica. Wire the *complete* post-heal graph, then
-//!    block every cross-group link. A blocked link stays open but carries no
-//!    data.
+//!    replica. For text workloads, create the shared text object on every
+//!    replica. Wire the *complete* post-heal graph with every link open, wait
+//!    until the sync on every link is idle, then block every cross-group link. A
+//!    blocked link stays open but carries no data, and it keeps its sync state.
 //! 2. **Divergence.** Each group applies `ops_per_group` operations. The blocks
 //!    keep the groups invisible to each other.
-//! 3. **Heal.** Clear the blocks and start the sync handshake. The clock runs
-//!    from the first unblock until every replica reports the same fingerprint.
+//! 3. **Heal.** Clear the blocks and kick the sync. Each side still has the sync
+//!    state from before the partition, so it sends only what changed. The clock
+//!    runs from the first unblock until every replica reports the same
+//!    fingerprint.
 //!
 //! # Why the graph is wired before the clock starts
 //!
@@ -42,12 +44,15 @@ use crate::event_log::{Event, EventLog};
 use crate::replicas::{
     Client, NodeSource, TEXT_OBJ, acquire_nodes, apply_write, check_tasks, connect_edges,
     ensure_text_all, fingerprint, kick_sync_edges, record_stats, reset_all, set_links_blocked,
-    text_splice, verify_text_length, wait_for_nodes,
+    text_splice, verify_text_length, wait_for_nodes, wait_for_sync_idle,
 };
 use crate::runner::RunResult;
 use crate::scenario::{Group, HealTopology, PartitionConfig, WriteKind};
 use crate::topology::{self, Connections, intra_group_edges};
 use crate::workload::{PositionStream, target_node};
+
+/// The longest time that a trial waits for the sync before the partition.
+const SYNC_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The longest heal that a trial waits for before it fails.
 ///
@@ -96,16 +101,19 @@ pub async fn run_partition_heal(
 
     let plan = plan_edges(config);
 
-    // Block every cross-group link BEFORE wiring it, so the streams open
-    // silently. `connect_to_peer`'s opening handshake is itself skipped on a
-    // blocked link. Blocking is by peer ID and does not require the stream to
-    // exist yet, which is what makes this order safe.
-    set_links_blocked(&clients, &plan.heal, true).await?;
-
-    // Wire the full post-heal topology. All of this is outside every timed
-    // window; the heal below only flips flags.
+    // Wire the full post-heal topology, with every link open, and let each link
+    // sync. The documents are equal here, so this exchanges only versions. The
+    // replicas then know each other, as peers do that were in contact before they
+    // went offline, and the heal sends only what changed. All of this is outside
+    // every timed window; the heal below only flips flags.
     let all_edges = plan.all_edges();
     connect_edges(&clients, &endpoints, &all_edges).await?;
+    wait_for_sync_idle(&mut clients, &all_edges, SYNC_IDLE_TIMEOUT).await?;
+
+    // Block the cross-group links only now that their sync is idle. A message in
+    // flight would be dropped by the block, and its sender's sync state would
+    // then be wrong. The links stay open, and their sync state stays.
+    set_links_blocked(&clients, &plan.heal, true).await?;
     check_tasks(&mut tasks)?;
     log.record(Event::Wired {
         edges: all_edges.clone(),

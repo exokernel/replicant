@@ -1,5 +1,6 @@
 //! Reads replicas: polls fingerprints for convergence, and collects statistics.
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -96,6 +97,77 @@ pub async fn record_stats(clients: &mut [Client], log: &mut EventLog) -> Result<
         });
     }
     Ok(())
+}
+
+/// Waits until sync is idle on every link in `edges`, or fails after `timeout`.
+///
+/// Sync is idle when no replica has a sync message to send, and each message that
+/// a replica sent on a link has arrived at the other end. Each direction of each
+/// link must also have carried at least one message, so the opening handshake is
+/// done. The condition must hold on two polls in a row. A reply that a replica has
+/// made but not yet counted cannot then pass as idle.
+///
+/// A timer alone cannot show this. An Automerge replica can compute for hundreds of
+/// milliseconds between two messages of one handshake.
+pub async fn wait_for_sync_idle(
+    clients: &mut [Client],
+    edges: &[(usize, usize)],
+    timeout: Duration,
+) -> Result<()> {
+    let start = Instant::now();
+    let mut idle_polls = 0;
+    loop {
+        if sync_is_idle(clients, edges).await? {
+            idle_polls += 1;
+            if idle_polls == 2 {
+                return Ok(());
+            }
+        } else {
+            idle_polls = 0;
+        }
+        if start.elapsed() >= timeout {
+            bail!(
+                "sync on links {edges:?} was not idle within {}s",
+                timeout.as_secs()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// Returns true if sync on every link in `edges` is idle now. See
+/// [`wait_for_sync_idle`].
+async fn sync_is_idle(clients: &mut [Client], edges: &[(usize, usize)]) -> Result<bool> {
+    // The messages that each node sent to, and received from, each peer.
+    let mut sent: HashMap<(usize, usize), u64> = HashMap::new();
+    let mut received: HashMap<(usize, usize), u64> = HashMap::new();
+    for (node, client) in clients.iter_mut().enumerate() {
+        let pending = client
+            .sync_pending(Request::new(Empty {}))
+            .await
+            .with_context(|| format!("SyncPending on node {node}"))?
+            .into_inner();
+        if !pending.peer_ids.is_empty() {
+            return Ok(false);
+        }
+        let stats = client.get_stats(Request::new(Empty {})).await?.into_inner();
+        for p in stats.peers {
+            let peer = node_index(&p.peer_id)
+                .with_context(|| format!("unexpected peer ID {:?}", p.peer_id))?;
+            sent.insert((node, peer), p.tx);
+            received.insert((node, peer), p.rx);
+        }
+    }
+    for &(a, b) in edges {
+        for (from, to) in [(a, b), (b, a)] {
+            let out = sent.get(&(from, to)).copied().unwrap_or(0);
+            let arrived = received.get(&(to, from)).copied().unwrap_or(0);
+            if out == 0 || out != arrived {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
 }
 
 /// Checks that every node's text holds exactly `expected` characters. Valid

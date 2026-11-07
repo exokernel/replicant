@@ -150,9 +150,13 @@ notes.
 
 A blocked link is enforced on both endpoints: outbound flushes skip the peer
 (never consuming sync protocol state toward it) and inbound messages are dropped
-unprocessed. Unblocking discards the per-peer sync protocol state, so the heal
-starts from a fresh handshake rather than trusting beliefs formed while the link
-was down. The runner asserts the partition actually held — no two groups may
+unprocessed. Each link syncs before it is blocked, and it is blocked only when
+that sync is idle, so no message is in flight. Unblocking keeps the per-peer sync
+protocol state, so the heal sends only what changed during the partition, as for
+peers that were in contact before they went offline. Before 2026-11-07, an unblock
+discarded that state, so each heal started as a first contact. With an empty start
+the difference is small. With a starting document it is large: on the B4 paper,
+an Automerge heal of one op per side took about 700 ms. The runner asserts the partition actually held — no two groups may
 share a fingerprint at the end of the divergence phase — for the same reason the
 text-length gate exists: a silently-leaking partition reports a fast heal that
 looks like a result rather than a broken experiment.

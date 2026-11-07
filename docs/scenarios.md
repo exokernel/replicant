@@ -102,10 +102,12 @@ step then connects the groups. `convergence_ms` starts at the heal.
 
 The partition is simulated at the application layer:
 
-1. The orchestrator wires the **full post-heal topology** before the writes.
+1. The orchestrator wires the **full post-heal topology** before the writes,
+   with every link open, and waits until the sync on every link is idle.
 2. It blocks the cross-group links. A blocked link drops traffic in both
-   directions, but its stream stays open.
-3. The heal unblocks the links and starts the sync handshake.
+   directions, but its stream and its sync state stay.
+3. The heal unblocks the links and kicks the sync. Each side sends only what
+   changed during the partition.
 
 Thus connection setup stays out of the measured window. For the reason, see
 [`metrics.md`](metrics.md#wiring_ms-the-residual-setup-inside-the-window).
