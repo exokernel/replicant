@@ -292,6 +292,22 @@ State these when reporting results. They are choices, not oversights.
 Dated findings. These are results, not specifications — do not treat them as
 guarantees of current behaviour.
 
+**2026-11-07 — a heal of a long-lived document measured its history.** In the
+first runs from the B4 paper, the two replicas had loaded the paper and had never
+synced, and the unblock reset their sync state. An Automerge heal of one op per side
+took about 690 ms, and the Yrs sync layer could not heal 10⁵ ops per side within
+600 s. After the change to a reconnect heal and the new Yrs and Loro sync protocol,
+these are about 254 ms and 0.9 s. Automerge still could not heal 10⁵ within 600 s.
+See [`data/divergence-paper-pilot-2026-11-07/`](../data/divergence-paper-pilot-2026-11-07/).
+
+**2026-11-07 — Loro's peer ids can change a merge by about 400 times.** Two Loro
+documents each inserted 10⁴ characters at position 0 and imported the other's update,
+with no Replicant code. For a given pair of peer ids, an import took either about 10
+ms or about 4,300 ms, on one side, both, or neither. In 12 random pairs, 10 of 24
+imports were slow. The rule is not known. It is not which id is lower. On the docker
+lane, `same_region` at 10⁴ took 26 ms, 5,400 ms, or 10,700 ms, and this explains the
+bimodal Loro results. With a starting document, `random_position` did not show it.
+
 **2026-08-06 — the shared text object is what makes locality reach the CRDT.**
 A standalone Automerge 0.9 probe at 10⁴ operations per side. With each replica
 creating its own text object, all three localities merged in about 70–78 ms and

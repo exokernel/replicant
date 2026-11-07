@@ -1,0 +1,141 @@
+{
+  "invocations": [
+    {
+      "build": {
+        "arch": "aarch64",
+        "orchestrator_version": "0.1.0",
+        "os": "macos",
+        "profile": "release"
+      },
+      "generated_at_unix_ms": 1794092223415,
+      "git": {
+        "commit": "c6b515789191de1335093f09d8ddf7abe10f7231",
+        "dirty": false
+      },
+      "host": {
+        "cpus": 18,
+        "hostname": "Artemis"
+      },
+      "run": {
+        "crdt": "yrs",
+        "node_source": "external",
+        "replicas": [
+          {
+            "client_addr": "localhost:50051",
+            "peer_addr": "replica-0:50051"
+          },
+          {
+            "client_addr": "localhost:50052",
+            "peer_addr": "replica-1:50051"
+          }
+        ],
+        "trials": 3
+      },
+      "scenarios": [
+        {
+          "achieved_contention": {
+            "contested_anchors": {
+              "max": 25023,
+              "mean": 24947.333333333332,
+              "min": 24875
+            },
+            "contested_ops": {
+              "max": 68661,
+              "mean": 68607.66666666667,
+              "min": 68510
+            },
+            "head_children_repetition_1": [
+              0,
+              0
+            ],
+            "max_concurrent_siblings": {
+              "max": 9,
+              "mean": 9.0,
+              "min": 9
+            },
+            "model": "rga_anchor_simulation"
+          },
+          "kind": "partition_heal",
+          "name": "divergence-n2-random_position-1e5",
+          "node_count": 2,
+          "op_count": 200000,
+          "params": {
+            "baseline": {
+              "length": 104852,
+              "sha256": "42c0ff1720c0cad77077e190e36135c9cab9f7bbc266351c0a7fe4981c6a1546",
+              "trace": "editing-traces/automerge-paper.json.gz"
+            },
+            "groups": [
+              [
+                0
+              ],
+              [
+                1
+              ]
+            ],
+            "heal_topology": "full_mesh",
+            "locality": "random_position",
+            "ops_per_group": 100000,
+            "workload": "text_splice",
+            "write_pattern": "concentrated"
+          },
+          "path": "scenarios/divergence-n2-random_position-1e5.toml",
+          "seeds": {
+            "base": "0x5eedd1f50ff5e7a1",
+            "per_repetition": [
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x3e9695371ab81b00"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xb37350a2940fb617"
+                  }
+                ],
+                "repetition": 1
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x4658445af16e9bdd"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xb6d828c9a6d0302a"
+                  }
+                ],
+                "repetition": 2
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x145f5acae0cf2aa9"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xed1246ad82a3aafc"
+                  }
+                ],
+                "repetition": 3
+              }
+            ]
+          }
+        }
+      ],
+      "schema_version": 3,
+      "deferred": {
+        "window": {
+          "start": 1794092222,
+          "end": 1794093333
+        },
+        "tx_total": 15,
+        "deferred_total": 0,
+        "deferred_series": []
+      }
+    }
+  ]
+}
