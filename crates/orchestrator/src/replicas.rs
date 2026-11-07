@@ -26,8 +26,8 @@ use common::proto::{
 use replica::adapter::Crdt;
 use replica::server::{self, ReplicaState};
 
+use crate::event_log::{Event, EventLog, PeerStats};
 use crate::scenario::Workload;
-use crate::trace::{Event, PeerStats, Trace};
 
 /// The gRPC client the orchestrator uses for one replica.
 pub type Client = ReplicaClient<Channel>;
@@ -431,27 +431,27 @@ pub async fn fingerprint(client: &mut Client) -> Result<Vec<u8>> {
 /// Polls the nodes at `indices` until every fingerprint is equal and non-empty.
 ///
 /// Returns the milliseconds elapsed from `start`. Fails if `timeout` passes
-/// first. Records each poll, and the convergence, in `trace`.
+/// first. Records each poll, and the convergence, in `log`.
 pub async fn wait_for_nodes(
     clients: &mut [Client],
     indices: &[usize],
     start: Instant,
     timeout: Duration,
-    trace: &mut Trace,
+    log: &mut EventLog,
 ) -> Result<f64> {
     loop {
         let mut fps: Vec<Vec<u8>> = Vec::with_capacity(indices.len());
         for &i in indices {
             fps.push(fingerprint(&mut clients[i]).await?);
         }
-        trace.poll(indices, &fps);
+        log.poll(indices, &fps);
 
         // An empty fingerprint means the node has no operations yet. Treat that
         // as not converged, so a run cannot match before any write lands.
         let converged = fps.iter().all(|fp| !fp.is_empty()) && fps.windows(2).all(|w| w[0] == w[1]);
         if converged {
             let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-            trace.record(Event::Converged {
+            log.record(Event::Converged {
                 nodes: indices.to_vec(),
             });
             return Ok(elapsed_ms);
@@ -469,15 +469,15 @@ pub async fn wait_for_nodes(
     }
 }
 
-/// Calls `GetStats` on each node and records the replies in `trace`.
+/// Calls `GetStats` on each node and records the replies in `log`.
 ///
 /// Call it after the timed window. Each call does a full encode of the document.
 /// The call also makes the replica record its `replicant.doc.size_bytes` gauge,
-/// so run it also when `trace` is disabled.
-pub async fn record_stats(clients: &mut [Client], trace: &mut Trace) -> Result<()> {
+/// so run it also when `log` is disabled.
+pub async fn record_stats(clients: &mut [Client], log: &mut EventLog) -> Result<()> {
     for (node, client) in clients.iter_mut().enumerate() {
         let stats = client.get_stats(Request::new(Empty {})).await?.into_inner();
-        if !trace.enabled() {
+        if !log.enabled() {
             continue;
         }
         let peers = stats
@@ -494,7 +494,7 @@ pub async fn record_stats(clients: &mut [Client], trace: &mut Trace) -> Result<(
                 })
             })
             .collect::<Result<_>>()?;
-        trace.record(Event::Stats {
+        log.record(Event::Stats {
             node,
             doc_size_bytes: stats.doc_size_bytes,
             peers,
@@ -553,7 +553,7 @@ mod tests {
             &[0, 1],
             Instant::now(),
             Duration::from_secs(5),
-            &mut Trace::off(),
+            &mut EventLog::off(),
         )
         .await
         .unwrap();
@@ -749,7 +749,7 @@ mod tests {
             &[0, 1, 2, 3],
             measure_start,
             Duration::from_secs(5),
-            &mut Trace::off(),
+            &mut EventLog::off(),
         )
         .await
         .unwrap();

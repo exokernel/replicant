@@ -18,7 +18,7 @@
 //! - [`replicas`]: the gRPC helpers that both runners share.
 //! - [`runner`] and [`partition_heal`]: the two scenario runners.
 //! - [`contention`] and [`provenance`]: run metadata that needs no replica.
-//! - [`output`], [`metrics`], and [`trace`]: what the run writes.
+//! - [`output`], [`metrics`], and [`event_log`]: what the run writes.
 
 use std::path::PathBuf;
 
@@ -26,6 +26,7 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 
 mod contention;
+mod event_log;
 mod metrics;
 mod output;
 mod partition_heal;
@@ -34,15 +35,14 @@ mod replicas;
 mod runner;
 mod scenario;
 mod topology;
-mod trace;
 mod workload;
 
+use event_log::EventLog;
 use output::OutputFormat;
 use replica::adapter::Crdt;
 use replicas::{NodeSource, ReplicaEndpoint};
 use runner::RunResult;
 use scenario::{ScenarioBody, ScenarioFile, builtin_scenarios};
-use trace::Trace;
 
 // ── CLI ─────────────────────────────────────────────────────────────────────
 
@@ -246,10 +246,10 @@ async fn main() -> Result<()> {
             } else {
                 NodeSource::External(args.replicas.clone())
             };
-            let mut trace = Trace::new(trace_file.is_some());
-            let result = run_scenario_once(scenario, source, t, &mut trace).await?;
+            let mut log = EventLog::new(trace_file.is_some());
+            let result = run_scenario_once(scenario, source, t, &mut log).await?;
             if let Some(out) = &mut trace_file {
-                trace.write_to(out, &scenario.name, t)?;
+                log.write_to(out, &scenario.name, t)?;
             }
             debug_assert_eq!(
                 result.total_ops, op_count,
@@ -334,13 +334,13 @@ async fn run_scenario_once(
     scenario: &ScenarioFile,
     source: NodeSource,
     repetition: usize,
-    trace: &mut Trace,
+    log: &mut EventLog,
 ) -> Result<RunResult> {
     tracing::info!(scenario = %scenario.name, "starting");
     let result = match &scenario.body {
-        ScenarioBody::Topology(config) => runner::run(config, source, trace).await?,
+        ScenarioBody::Topology(config) => runner::run(config, source, log).await?,
         ScenarioBody::PartitionHeal(config) => {
-            partition_heal::run_partition_heal(config, source, repetition, trace).await?
+            partition_heal::run_partition_heal(config, source, repetition, log).await?
         }
     };
     tracing::info!(
