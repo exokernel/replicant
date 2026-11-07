@@ -126,7 +126,7 @@ column. Reasons:
   pandas without joining against the OTel snapshot.
 
 See `wait_for_nodes` in
-[`crates/orchestrator/src/replicas.rs`](../crates/orchestrator/src/replicas.rs)
+[`crates/orchestrator/src/replicas/convergence.rs`](../crates/orchestrator/src/replicas/convergence.rs)
 for the measurement protocol — fingerprint-poll loop after the workload
 burst until all replicas report identical `GetStateFingerprint`.
 
