@@ -6,15 +6,18 @@
 //!   has a `TryFrom` impl from its proto type.
 //! - [`CrdtAdapter`]: the trait that each CRDT backend (Automerge, Yrs, Loro)
 //!   implements. The replica scaffolding calls it.
+//! - [`SplitMix64`]: a deterministic random number generator.
 
 mod adapter;
 mod node_id;
 mod op;
 pub mod provenance;
+mod split_mix64;
 
 pub use adapter::CrdtAdapter;
 pub use node_id::NodeId;
 pub use op::{Op, ScalarVal};
+pub use split_mix64::SplitMix64;
 use tonic::transport::Channel;
 
 /// The text object that text workloads edit.
