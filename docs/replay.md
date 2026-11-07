@@ -234,7 +234,39 @@ each setting. The seeded column gives the range of the medians across seeds 1 to
 
 - Yrs: ascending ids are the slowest order that was measured. All B3 clients edit one position. The likely cause is that each merge scans the items that conflict, and the id order sets how many it must pass. This cause was not profiled. The seed has almost no effect on the time.
 - Loro: the fixed peer ids share their high bits, and the snapshot is smaller. With seeded ids, the B3 size is within 4% of JS.
-- Automerge: the seeded size is within 0.1% of JS. The time depends on how the actors sort. With ids below the bootstrap actor of the adapter, the ascending time is 134 ms on B3.4 and about 480 ms on B3.5. With ids above that actor, it is the 109 ms and 391 ms in the table. The fixed orders use ids above it. The likely cause is the bootstrap actor, because it is the only actor that these two settings put in a different position. This cause was not profiled.
+- Automerge: the seeded size is within 0.1% of JS. The time depends on how the actors sort. See below.
+
+### Automerge actor order
+
+Automerge keeps its actors in a sorted table. If a new actor does not go at the end of
+the table, `insert_actor` renumbers the actor references of the existing ops
+(`op_set.rs` in automerge 0.12). B3 adds 1540 actors in one merge, so this cost can show.
+The adapter also adds one actor: the `replicant-bootstrap` actor that makes the shared
+object. Its first byte is `0x72`.
+
+A test changed only the actor bytes, on B3 with 5 usable trials for each setting. Times
+are medians, in ms. The same control run at the start and the end gave 108.2 and 107.7 ms
+on B3.4.
+
+| Actors | Each new actor goes | B3.1 | B3.4 | B3.5 |
+|---|---|---|---|---|
+| Ascending, above the bootstrap actor (`0x73`, `0x80`, `0xa5`, `0xf0`) | At the end | 85 | 108 | 391 |
+| Ascending, below it (`0x00`, `0x10`, `0x71`) | Just before it | 85-89 | 134-138 | 481-487 |
+| Ascending `0x00`, bootstrap actor moved to the lowest position | At the end | 86 | 108 | 392 |
+| Ascending `0xa5`, bootstrap actor moved to the highest position | Just before it | 86 | 135 | 485 |
+| Descending (`0xa5` or `0x00`) | Near the start | 106-107 | 142 | 501-503 |
+| Seeded, with the bootstrap actor at any of three positions | At random positions | 109-110 | 148-149 | 499-504 |
+
+What this shows:
+
+- **The seeded times are not an effect of the bootstrap actor.** They stay the same when that actor moves. The JS libraries also have random actors, so seeded ids are the setting to compare with JS.
+- **The fixed ascending times are the low limit.** No renumbering happens in them, so they understate the cost that random actors have. Seeded ids cost 37% more on B3.4 and 28% more on B3.5.
+- **The effect is per actor.** On B3.4 it is about 26 µs for each actor (40 ms over 1540 actors), and on B3.5 about 71 µs. A document adds each actor once, so a run with few replicas has few of these events. The effect on orchestrator runs was not measured.
+
+B3.1 does not change when only the bootstrap actor is renumbered, but B3.4 and B3.5 do. The
+likely reason is that each list or text op refers to the object that the bootstrap actor
+made, and a map op at the root does not. This reason was inferred from the results, and
+it was not measured directly.
 
 Results with seeded ids at commit `45f699cc`:
 
