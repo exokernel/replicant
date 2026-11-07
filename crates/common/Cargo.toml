@@ -11,3 +11,6 @@ tonic-prost = { workspace = true }
 
 [build-dependencies]
 tonic-prost-build = "0.14"
+
+[lints]
+workspace = true

@@ -65,6 +65,7 @@ fn to_u32(n: usize) -> anyhow::Result<u32> {
 /// can. So, unlike [`super::AutomergeAdapter`], this adapter needs no
 /// object-ID cache and no bootstrap actor. See `ensure_text`.
 pub struct YrsAdapter {
+    /// The document.
     doc: Doc,
     /// What this adapter has already sent to each peer.
     ///
@@ -88,6 +89,7 @@ pub struct YrsAdapter {
 /// Rule: any Yrs bookkeeping that counts what each client authored cannot see
 /// deletes. `state_fingerprint` has the same constraint (see `get_heads`).
 struct PeerSent {
+    /// The state vector at the last send.
     sv: StateVector,
     /// The encoded delete set at the last send. It is compared by value, not
     /// by hash, so a hash collision cannot hide a deletion.

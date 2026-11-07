@@ -34,6 +34,7 @@ fn to_isize(n: usize) -> anyhow::Result<isize> {
 /// under ROOT are created lazily on first access. `objects` caches their ids,
 /// so later ops skip the lookup through Automerge's `get` API.
 pub struct AutomergeAdapter {
+    /// The document.
     doc: AutoCommit,
     /// Per-peer sync state. Keyed by stable peer ID.
     sync_states: HashMap<String, sync::State>,

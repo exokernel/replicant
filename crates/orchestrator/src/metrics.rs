@@ -57,6 +57,7 @@ pub fn init_metrics(
 /// caller write to the same file.
 #[derive(Clone)]
 pub struct FileMetricExporter {
+    /// The file that receives the JSON Lines.
     sink: Arc<Mutex<std::fs::File>>,
 }
 

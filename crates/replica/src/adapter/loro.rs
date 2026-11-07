@@ -27,6 +27,7 @@ use super::{map_name, require_name};
 ///    `export(ExportMode::updates(&their_vv))`. As with Yrs, the caller must
 ///    track what each peer has. See `peer_vv`.
 pub struct LoroAdapter {
+    /// The document.
     doc: LoroDoc,
     /// The version vector this adapter believes each peer has, based on what
     /// it has sent. Loro keeps no per-peer state (fact 2), so the adapter must.

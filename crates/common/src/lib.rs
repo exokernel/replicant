@@ -22,6 +22,7 @@ pub use op::{Op, ScalarVal};
 pub const MAX_RPC_BYTES: usize = 1 << 30;
 
 /// Generated protobuf types for the `replicant.v1` package.
+#[allow(missing_docs, clippy::missing_docs_in_private_items)]
 pub mod proto {
     tonic::include_proto!("replicant.v1");
 }

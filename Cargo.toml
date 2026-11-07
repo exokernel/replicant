@@ -6,6 +6,15 @@ members = [
 ]
 resolver = "2"
 
+# Every item needs a doc comment, also a private one. `just lint` and CI turn
+# these warnings into errors. Generated proto code has an exemption in the common
+# crate.
+[workspace.lints.rust]
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+missing_docs_in_private_items = "warn"
+
 [workspace.dependencies]
 anyhow               = "1"
 clap                 = { version = "4", features = ["derive"] }
