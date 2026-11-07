@@ -75,6 +75,7 @@ stacks.
 | `common` | Protobuf-generated types, the `Op` model, and the `CrdtAdapter` trait |
 | `replica` | CRDT replica (Automerge / Yrs / Loro) with a gRPC server and OTel metrics export |
 | `orchestrator` | Launches replicas, drives workloads, and measures convergence. See [its README](crates/orchestrator/README.md) for flags and output format. |
+| `replay` | Replays recorded workloads, such as crdt-benchmarks and editing traces, and checks the final content. See [docs/replay.md](docs/replay.md). |
 
 ## Scenarios
 
