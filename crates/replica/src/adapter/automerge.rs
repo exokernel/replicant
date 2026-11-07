@@ -122,9 +122,7 @@ impl AutomergeAdapter {
             _ => None,
         }
     }
-}
 
-impl AutomergeAdapter {
     /// Applies `op` in the open transaction. Does not commit.
     fn apply_uncommitted(&mut self, op: &Op) -> anyhow::Result<()> {
         match op {
@@ -367,7 +365,7 @@ impl CrdtAdapter for AutomergeAdapter {
             .context("apply_txn: no local change after a commit")
     }
 
-    fn apply_updates(&mut self, updates: &[Vec<u8>]) -> anyhow::Result<()> {
+    fn apply_updates(&mut self, updates: &[&[u8]]) -> anyhow::Result<()> {
         for update in updates {
             self.doc
                 .load_incremental(update)

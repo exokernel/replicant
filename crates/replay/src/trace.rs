@@ -10,19 +10,18 @@
 //!
 //! [editing-traces]: https://github.com/josephg/editing-traces
 
+use std::fmt::Write as _;
 use std::io::Read;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail, ensure};
-use common::{Op, ScalarVal};
+use common::{Op, ScalarVal, TEXT_OBJ};
 use flate2::read::GzDecoder;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::oracle::OracleSpec;
 
-/// The object that text ops edit.
-pub const TEXT_OBJ: &str = "text";
 /// The object that list ops edit.
 pub const LIST_OBJ: &str = "list";
 /// The object that map ops edit. The empty name means ROOT.
@@ -39,6 +38,18 @@ pub enum ContentKind {
     Map,
 }
 
+impl ContentKind {
+    /// Returns the name of the object of this kind.
+    #[must_use]
+    pub fn obj(self) -> &'static str {
+        match self {
+            Self::Text => TEXT_OBJ,
+            Self::List => LIST_OBJ,
+            Self::Map => MAP_OBJ,
+        }
+    }
+}
+
 /// One transaction: ops that one agent applies together.
 #[derive(Debug, Clone)]
 pub struct Txn {
@@ -50,6 +61,21 @@ pub struct Txn {
     pub parents: Vec<usize>,
     /// The ops, in order. Each op sees the effect of the ops before it.
     pub ops: Vec<Op>,
+}
+
+/// Statistics about a trace's causal graph.
+///
+/// The graph makes the concurrency of a workload visible in its data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct GraphStats {
+    /// All transactions.
+    pub txns: usize,
+    /// Transactions with no parents.
+    pub roots: usize,
+    /// Transactions with more than one parent.
+    pub merges: usize,
+    /// Transactions with more than one child. A fork starts concurrent work.
+    pub forks: usize,
 }
 
 /// A loaded and validated trace.
@@ -144,8 +170,15 @@ pub fn read_verified(path: &Path, sha256: Option<&str>) -> Result<Vec<u8>> {
 }
 
 /// Returns the lowercase hex form of `bytes`.
+#[must_use]
 pub fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut out, b| {
+            // Writing to a String cannot fail.
+            let _ = write!(out, "{b:02x}");
+            out
+        })
 }
 
 impl Trace {
@@ -263,7 +296,7 @@ impl Trace {
     ///   all of its branches merge only at the end of the replay.
     pub fn validate(&self) -> Result<()> {
         let mut clocks: Vec<Vec<u32>> = Vec::with_capacity(self.txns.len());
-        let mut last: Vec<Option<u32>> = vec![None; self.num_agents];
+        let mut authored = vec![0u32; self.num_agents];
         for (i, t) in self.txns.iter().enumerate() {
             ensure!(
                 t.agent < self.num_agents,
@@ -280,14 +313,13 @@ impl Trace {
             }
             // All changes by one agent are in one order. If the agent's last
             // txn is not an ancestor, the agent would be concurrent with itself.
-            let seq = last[t.agent].map_or(0, |n| n + 1);
             ensure!(
-                clock[t.agent] == seq,
+                clock[t.agent] == authored[t.agent],
                 "txn {i}: agent {} has not seen its own earlier txns",
                 t.agent
             );
-            clock[t.agent] = seq + 1;
-            last[t.agent] = Some(seq);
+            authored[t.agent] += 1;
+            clock[t.agent] = authored[t.agent];
             clocks.push(clock);
         }
         let has_merge = self.txns.iter().any(|t| t.parents.len() > 1);
@@ -317,6 +349,7 @@ impl Trace {
     }
 
     /// True if the transactions form one chain by one agent.
+    #[must_use]
     pub fn is_single_chain(&self) -> bool {
         self.num_agents == 1
             && self
@@ -325,23 +358,9 @@ impl Trace {
                 .enumerate()
                 .all(|(i, t)| t.parents == if i == 0 { Vec::new() } else { vec![i - 1] })
     }
-}
 
-/// Statistics about a trace's causal graph.
-///
-/// The graph makes the concurrency of a workload visible in its data.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GraphStats {
-    /// Transactions with no parents.
-    pub roots: usize,
-    /// Transactions with more than one parent.
-    pub merges: usize,
-    /// Transactions with more than one child. A fork starts concurrent work.
-    pub forks: usize,
-}
-
-impl Trace {
     /// Returns the [`GraphStats`] of this trace.
+    #[must_use]
     pub fn graph_stats(&self) -> GraphStats {
         let mut children = vec![0usize; self.txns.len()];
         for t in &self.txns {
@@ -350,6 +369,7 @@ impl Trace {
             }
         }
         GraphStats {
+            txns: self.txns.len(),
             roots: self.txns.iter().filter(|t| t.parents.is_empty()).count(),
             merges: self.txns.iter().filter(|t| t.parents.len() > 1).count(),
             forks: children.iter().filter(|&&c| c > 1).count(),
@@ -452,6 +472,7 @@ mod tests {
         assert_eq!(
             sequential.graph_stats(),
             GraphStats {
+                txns: 2,
                 roots: 1,
                 merges: 0,
                 forks: 0

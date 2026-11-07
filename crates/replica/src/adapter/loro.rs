@@ -41,6 +41,18 @@ pub struct LoroAdapter {
     peer_vv: HashMap<String, VersionVector>,
 }
 
+/// Converts one Loro value to a [`ScalarVal`]. Fails on a value that the op
+/// model does not have.
+fn from_loro_value(value: &LoroValue) -> anyhow::Result<ScalarVal> {
+    Ok(match value {
+        LoroValue::String(s) => ScalarVal::Str(s.to_string()),
+        LoroValue::I64(n) => ScalarVal::Int(*n),
+        LoroValue::Bool(b) => ScalarVal::Bool(*b),
+        LoroValue::Binary(b) => ScalarVal::Bytes(b.to_vec()),
+        other => bail!("value {other:?} has no ScalarVal form"),
+    })
+}
+
 impl Default for LoroAdapter {
     fn default() -> Self {
         Self::new()
@@ -102,21 +114,7 @@ impl LoroAdapter {
             ScalarVal::Bytes(b) => LoroValue::Binary(b.clone().into()),
         })
     }
-}
 
-/// Converts one Loro value to a [`ScalarVal`]. Fails on a value that the op
-/// model does not have.
-fn from_loro_value(value: &LoroValue) -> anyhow::Result<ScalarVal> {
-    Ok(match value {
-        LoroValue::String(s) => ScalarVal::Str(s.to_string()),
-        LoroValue::I64(n) => ScalarVal::Int(*n),
-        LoroValue::Bool(b) => ScalarVal::Bool(*b),
-        LoroValue::Binary(b) => ScalarVal::Bytes(b.to_vec()),
-        other => bail!("value {other:?} has no ScalarVal form"),
-    })
-}
-
-impl LoroAdapter {
     /// Applies `op` in the implicit transaction. Does not commit.
     fn apply_uncommitted(&mut self, op: &Op) -> anyhow::Result<()> {
         // Every arm converts its inputs before the first edit. An error after
@@ -381,7 +379,7 @@ impl CrdtAdapter for LoroAdapter {
         match self.doc.get_map(map_name(obj)).get_value() {
             LoroValue::Map(values) => values
                 .iter()
-                .map(|(k, v)| Ok((k.to_string(), from_loro_value(v)?)))
+                .map(|(k, v)| Ok((k.clone(), from_loro_value(v)?)))
                 .collect(),
             other => bail!("read_map: unexpected value {other:?}"),
         }
@@ -401,13 +399,16 @@ impl CrdtAdapter for LoroAdapter {
             .context("exporting a Loro update")
     }
 
-    fn apply_updates(&mut self, updates: &[Vec<u8>]) -> anyhow::Result<()> {
+    fn apply_updates(&mut self, updates: &[&[u8]]) -> anyhow::Result<()> {
         // One update takes `import`. More take the batch path, which merges
-        // them before it updates the document state.
+        // them before it updates the document state. That API needs owned bytes.
         match updates {
             [] => Ok(()),
             [one] => self.doc.import(one).map(drop),
-            many => self.doc.import_batch(many).map(drop),
+            many => {
+                let owned: Vec<Vec<u8>> = many.iter().map(|update| update.to_vec()).collect();
+                self.doc.import_batch(&owned).map(drop)
+            }
         }
         .context("importing Loro updates")
     }

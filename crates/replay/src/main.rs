@@ -7,11 +7,12 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use replica::adapter::Crdt;
-use serde_json::{Value, json};
+use serde::Serialize;
+use serde_json::json;
 
 use replay::alloc::CountingAlloc;
-use replay::driver::{IdOrder, Plan, run_trial};
-use replay::output;
+use replay::driver::{IdOrder, Plan, run_memory_trial, run_trial};
+use replay::output::{self, Row, RowKey};
 use replay::spec::{self, Workload};
 use replay::target::Lane;
 use replay::trace::{Trace, read_verified};
@@ -102,33 +103,40 @@ fn skip_reason(plan: &Plan, lane: &Lane) -> Option<String> {
 
 /// Runs all trials of one plan on one lane. Returns false if any trial failed.
 fn run_plan(plan: &Plan, lane: &Lane, args: &Args, out: &mut dyn Write) -> Result<bool> {
-    let (crdt, lane_name) = (lane.crdt().as_str(), lane.name());
+    let crdt = lane.crdt().as_str();
+    let key = RowKey {
+        workload: plan.name(),
+        crdt,
+        lane: lane.name(),
+    };
     if let Some(reason) = skip_reason(plan, lane) {
-        eprintln!("{} {crdt}: skipped: {reason}", plan.name);
-        write_row(
-            out,
-            &output::skipped_row(&plan.name, crdt, lane_name, &reason),
-        )?;
+        eprintln!("{} {crdt}: skipped: {reason}", plan.name());
+        let reason = reason.as_str();
+        write_row(out, &Row::Skipped { key, reason })?;
         return Ok(true);
     }
     for trial in 1..=args.trials {
-        match run_trial(plan, lane, args.id_order, false) {
+        match run_trial(plan, lane, args.id_order) {
             Ok(result) => {
                 eprintln!(
                     "{} {crdt} trial {trial}: {:.1} ms, {} bytes",
-                    plan.name, result.time_ms, result.doc_size
+                    plan.name(),
+                    result.time_ms,
+                    result.doc_size
                 );
-                write_row(
-                    out,
-                    &output::trial_row(&plan.name, crdt, lane_name, trial, &result),
-                )?;
+                write_row(out, &Row::Trial { key, trial, result })?;
             }
             Err(e) => {
                 let error = format!("{e:#}");
-                eprintln!("{} {crdt} trial {trial}: FAILED: {error}", plan.name);
+                eprintln!("{} {crdt} trial {trial}: FAILED: {error}", plan.name());
+                let trial = Some(trial);
                 write_row(
                     out,
-                    &output::failed_row(&plan.name, crdt, lane_name, trial, &error),
+                    &Row::Failed {
+                        key,
+                        trial,
+                        error: &error,
+                    },
                 )?;
                 return Ok(false);
             }
@@ -137,16 +145,18 @@ fn run_plan(plan: &Plan, lane: &Lane, args: &Args, out: &mut dyn Write) -> Resul
     // The memory count covers this process only, so it has no meaning for a
     // remote replica.
     if !args.no_memory && matches!(lane, Lane::InProcess(_)) {
-        match run_trial(plan, lane, args.id_order, true) {
-            Ok(result) => write_row(
-                out,
-                &output::memory_row(&plan.name, crdt, lane_name, &result),
-            )?,
+        match run_memory_trial(plan, lane, args.id_order) {
+            Ok(result) => write_row(out, &Row::Memory { key, result })?,
             Err(e) => {
                 let error = format!("{e:#}");
+                eprintln!("{} {crdt} memory trial: FAILED: {error}", plan.name());
                 write_row(
                     out,
-                    &output::failed_row(&plan.name, crdt, lane_name, 0, &error),
+                    &Row::Failed {
+                        key,
+                        trial: None,
+                        error: &error,
+                    },
                 )?;
                 return Ok(false);
             }
@@ -156,8 +166,9 @@ fn run_plan(plan: &Plan, lane: &Lane, args: &Args, out: &mut dyn Write) -> Resul
 }
 
 /// Writes one result row and flushes it, so a crash keeps the earlier rows.
-fn write_row(out: &mut dyn Write, row: &Value) -> Result<()> {
-    writeln!(out, "{row}").context("writing a result row")?;
+fn write_row(out: &mut dyn Write, row: &impl Serialize) -> Result<()> {
+    let line = serde_json::to_string(row).context("encoding a result row")?;
+    writeln!(out, "{line}").context("writing a result row")?;
     out.flush().context("flushing the results")
 }
 
@@ -171,15 +182,20 @@ fn load_plans(args: &Args) -> Result<Vec<Plan>> {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        return Ok(vec![Plan::ad_hoc(&name, trace)?]);
+        return Ok(vec![Plan::new(
+            Workload::ad_hoc(name, path.clone()),
+            trace,
+        )?]);
     }
     spec::load(&args.spec)?
-        .iter()
+        .into_iter()
         .filter(|w| selected(w, args))
         .map(|w| {
-            let bytes = read_verified(&args.data_dir.join(&w.trace), Some(&w.sha256))?;
-            let trace = Trace::parse(&bytes).with_context(|| w.name.clone())?;
-            Plan::new(w, trace).with_context(|| w.name.clone())
+            let name = w.name.clone();
+            let bytes = read_verified(&args.data_dir.join(&w.trace), Some(&w.sha256))
+                .with_context(|| name.clone())?;
+            let trace = Trace::parse(&bytes).with_context(|| name.clone())?;
+            Plan::new(w, trace).with_context(|| name)
         })
         .collect()
 }
@@ -220,9 +236,18 @@ fn main() -> Result<()> {
         "crdt": args.crdt.iter().map(|c| c.as_str()).collect::<Vec<_>>(),
         "trials": args.trials,
         "replicas": args.replicas,
-        "id_order": args.id_order.as_str(),
+        "id_order": args.id_order,
     });
-    write_row(&mut out, &output::run_row(run_args))?;
+    write_row(&mut out, &output::run_row(&run_args))?;
+
+    for plan in &plans {
+        let row = Row::Workload {
+            workload: plan.name(),
+            agents: plan.trace.num_agents,
+            stats: plan.trace.graph_stats(),
+        };
+        write_row(&mut out, &row)?;
+    }
 
     let mut clean = true;
     for &crdt in &args.crdt {

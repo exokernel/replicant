@@ -188,7 +188,7 @@ pub trait CrdtAdapter: Send + 'static {
     /// as its crdt-benchmarks factory, so that the two can be compared: Yrs uses
     /// one transaction, Loro uses a batch import, and Automerge applies one
     /// update at a time.
-    fn apply_updates(&mut self, updates: &[Vec<u8>]) -> anyhow::Result<()>;
+    fn apply_updates(&mut self, updates: &[&[u8]]) -> anyhow::Result<()>;
 
     /// Returns the full encoded document. [`Self::load`] accepts it.
     ///

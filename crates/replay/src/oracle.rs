@@ -14,7 +14,7 @@ use anyhow::{Context, Result, bail, ensure};
 use common::{Op, ScalarVal};
 use serde::Deserialize;
 
-use crate::trace::{ContentKind, JsonScalar, Trace};
+use crate::trace::{JsonScalar, Trace};
 
 /// The check that a trace file asks for.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -81,33 +81,6 @@ fn elements(content: &Content) -> Result<Vec<String>> {
     })
 }
 
-/// Returns the [`CheckPlan`] for `trace`, repeated `repeat` times.
-pub fn plan(trace: &Trace, repeat: usize) -> Result<CheckPlan> {
-    ensure!(
-        repeat == 1 || matches!(trace.oracle, OracleSpec::ExactText { .. }),
-        "repeat needs an exact text oracle"
-    );
-    Ok(match &trace.oracle {
-        OracleSpec::ExactText { text } => CheckPlan::Exact(Content::Text(text.repeat(repeat))),
-        OracleSpec::ExactList { values } => CheckPlan::Exact(Content::List(
-            values.iter().cloned().map(Into::into).collect(),
-        )),
-        OracleSpec::MapWinner => {
-            let mut candidates: BTreeMap<String, Vec<ScalarVal>> = BTreeMap::new();
-            for op in trace.txns.iter().flat_map(|t| &t.ops) {
-                if let Op::MapPut { key, value, .. } = op {
-                    candidates
-                        .entry(key.clone())
-                        .or_default()
-                        .push(value.clone());
-                }
-            }
-            CheckPlan::MapWinner(candidates)
-        }
-        OracleSpec::TreeInvariants => tree_plan(trace)?,
-    })
-}
-
 /// Replays the trace on identity lists, one per branch.
 ///
 /// An element's identity is its index in `arena`. The result depends on no
@@ -122,21 +95,20 @@ fn tree_plan(trace: &Trace) -> Result<CheckPlan> {
     let mut arena: Vec<String> = Vec::new();
     let mut dead: Vec<bool> = Vec::new();
     // The identity list after each txn. A list moves to its last child.
-    let mut states: Vec<Option<Vec<u32>>> = vec![None; trace.txns.len()];
+    let mut states: Vec<Vec<u32>> = vec![Vec::new(); trace.txns.len()];
     let mut remaining = children.clone();
     let mut tips: Vec<Vec<u32>> = Vec::new();
     for (i, t) in trace.txns.iter().enumerate() {
+        // Parents have lower indexes, and a parent keeps its state until its
+        // last child takes it. So the state is always present here.
         let mut doc = match t.parents.first() {
             None => Vec::new(),
             Some(&p) => {
                 remaining[p] -= 1;
-                let held = states[p]
-                    .as_ref()
-                    .with_context(|| format!("txn {i}: parent {p} has no state"))?;
                 if remaining[p] == 0 {
-                    states[p].take().unwrap_or_default()
+                    std::mem::take(&mut states[p])
                 } else {
-                    held.clone()
+                    states[p].clone()
                 }
             }
         };
@@ -164,9 +136,10 @@ fn tree_plan(trace: &Trace) -> Result<CheckPlan> {
             for &id in &doc[pos..pos + del] {
                 dead[id as usize] = true;
             }
-            let ids: Vec<u32> = (0..new.len() as u32)
-                .map(|k| arena.len() as u32 + k)
-                .collect();
+            let first = u32::try_from(arena.len()).context("too many elements for a 32-bit id")?;
+            let end = u32::try_from(arena.len() + new.len())
+                .context("too many elements for a 32-bit id")?;
+            let ids: Vec<u32> = (first..end).collect();
             dead.extend(std::iter::repeat_n(false, new.len()));
             arena.extend(new);
             doc.splice(pos..pos + del, ids);
@@ -174,7 +147,7 @@ fn tree_plan(trace: &Trace) -> Result<CheckPlan> {
         if children[i] == 0 {
             tips.push(doc);
         } else {
-            states[i] = Some(doc);
+            states[i] = doc;
         }
     }
     let mut survivors: Vec<String> = arena
@@ -226,7 +199,34 @@ fn first_difference(expected: &Content, actual: &Content) -> String {
 }
 
 impl CheckPlan {
-    /// Returns the object kind that this plan can check.
+    /// Returns the check for `trace`, replayed `repeat` times.
+    pub fn new(trace: &Trace, repeat: usize) -> Result<Self> {
+        ensure!(
+            repeat == 1 || matches!(trace.oracle, OracleSpec::ExactText { .. }),
+            "repeat needs an exact text oracle"
+        );
+        Ok(match &trace.oracle {
+            OracleSpec::ExactText { text } => Self::Exact(Content::Text(text.repeat(repeat))),
+            OracleSpec::ExactList { values } => Self::Exact(Content::List(
+                values.iter().cloned().map(Into::into).collect(),
+            )),
+            OracleSpec::MapWinner => {
+                let mut candidates: BTreeMap<String, Vec<ScalarVal>> = BTreeMap::new();
+                for op in trace.txns.iter().flat_map(|t| &t.ops) {
+                    if let Op::MapPut { key, value, .. } = op {
+                        candidates
+                            .entry(key.clone())
+                            .or_default()
+                            .push(value.clone());
+                    }
+                }
+                Self::MapWinner(candidates)
+            }
+            OracleSpec::TreeInvariants => tree_plan(trace)?,
+        })
+    }
+
+    /// Returns an error if `content` fails this check.
     pub fn check(&self, content: &Content) -> Result<()> {
         match self {
             CheckPlan::Exact(expected) => {
@@ -278,15 +278,6 @@ impl CheckPlan {
     }
 }
 
-/// Returns the [`ContentKind`] of `content`.
-pub fn kind_of(content: &Content) -> ContentKind {
-    match content {
-        Content::Text(_) => ContentKind::Text,
-        Content::List(_) => ContentKind::List,
-        Content::Map(_) => ContentKind::Map,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,7 +300,7 @@ mod tests {
 
     #[test]
     fn tree_check_accepts_any_valid_interleaving() {
-        let plan = plan(&trace(FORK), 1).unwrap();
+        let plan = CheckPlan::new(&trace(FORK), 1).unwrap();
         for merged in ["ABCDase", "CDABase", "ACBDase"] {
             plan.check(&text(merged)).unwrap();
         }
@@ -319,14 +310,14 @@ mod tests {
     /// agreed document holds only half of the work.
     #[test]
     fn tree_check_rejects_a_merge_that_lost_a_side() {
-        let plan = plan(&trace(FORK), 1).unwrap();
+        let plan = CheckPlan::new(&trace(FORK), 1).unwrap();
         let e = plan.check(&text("ABbase")).unwrap_err();
         assert!(e.to_string().contains("lost or invented"), "{e}");
     }
 
     #[test]
     fn tree_check_rejects_a_broken_local_order() {
-        let plan = plan(&trace(FORK), 1).unwrap();
+        let plan = CheckPlan::new(&trace(FORK), 1).unwrap();
         let e = plan.check(&text("BACDase")).unwrap_err();
         assert!(e.to_string().contains("local order"), "{e}");
     }
@@ -334,7 +325,7 @@ mod tests {
     #[test]
     fn exact_check_reports_the_first_difference() {
         let t = trace(r#"{"endContent":"abc","txns":[{"patches":[[0,0,"abc"]]}]}"#);
-        let plan = plan(&t, 1).unwrap();
+        let plan = CheckPlan::new(&t, 1).unwrap();
         plan.check(&text("abc")).unwrap();
         let e = plan.check(&text("abd")).unwrap_err();
         assert!(e.to_string().contains("at char 2"), "{e}");
@@ -343,7 +334,10 @@ mod tests {
     #[test]
     fn repeat_multiplies_the_expected_text() {
         let t = trace(r#"{"endContent":"ab","txns":[{"patches":[[0,0,"ab"]]}]}"#);
-        plan(&t, 3).unwrap().check(&text("ababab")).unwrap();
+        CheckPlan::new(&t, 3)
+            .unwrap()
+            .check(&text("ababab"))
+            .unwrap();
     }
 
     #[test]
@@ -353,7 +347,7 @@ mod tests {
                 {"agent":0,"parents":[],"mapOps":[["v",1]]},
                 {"agent":1,"parents":[],"mapOps":[["v",2]]}]}"#,
         );
-        let plan = plan(&t, 1).unwrap();
+        let plan = CheckPlan::new(&t, 1).unwrap();
         let map = |n| Content::Map(BTreeMap::from([("v".to_owned(), ScalarVal::Int(n))]));
         plan.check(&map(2)).unwrap();
         assert!(plan.check(&map(3)).is_err());
@@ -366,7 +360,7 @@ mod tests {
             r#"{"kind":"concurrent","oracle":{"kind":"tree_invariants"},"numAgents":1,"txns":[
                 {"agent":0,"parents":[],"patches":[[5,0,"x"]]}]}"#,
         );
-        let e = plan(&t, 1).unwrap_err();
+        let e = CheckPlan::new(&t, 1).unwrap_err();
         assert!(e.to_string().contains("past the end"), "{e}");
     }
 }

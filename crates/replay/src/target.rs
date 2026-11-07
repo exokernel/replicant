@@ -9,14 +9,14 @@ use std::rc::Rc;
 
 use anyhow::{Context, Result, ensure};
 use common::proto::{self, replica_client::ReplicaClient};
-use common::{CrdtAdapter, MAX_RPC_BYTES, Op, ScalarVal};
+use common::{CrdtAdapter, Op, ScalarVal};
 use replica::adapter::Crdt;
 use tokio::runtime::Runtime;
 use tonic::Request;
 use tonic::transport::Channel;
 
 use crate::oracle::Content;
-use crate::trace::{ContentKind, LIST_OBJ, MAP_OBJ, TEXT_OBJ};
+use crate::trace::ContentKind;
 
 /// One replica. Each method matches the [`CrdtAdapter`] method of the same name.
 pub trait Target {
@@ -29,7 +29,7 @@ pub trait Target {
     /// Applies `ops` in one transaction and returns the update.
     fn apply_txn(&mut self, ops: &[Op]) -> Result<Vec<u8>>;
     /// Applies updates in causal order, in one call.
-    fn apply_updates(&mut self, updates: &[Vec<u8>]) -> Result<()>;
+    fn apply_updates(&mut self, updates: &[&[u8]]) -> Result<()>;
     /// Reads the object that a trace of this `kind` edits.
     fn read(&mut self, kind: ContentKind) -> Result<Content>;
     /// Returns the full encoded document.
@@ -56,8 +56,8 @@ impl Target for Local {
 
     fn ensure(&mut self, kind: ContentKind) -> Result<()> {
         match kind {
-            ContentKind::Text => self.0.ensure_text(TEXT_OBJ),
-            ContentKind::List => self.0.ensure_list(LIST_OBJ),
+            ContentKind::Text => self.0.ensure_text(kind.obj()),
+            ContentKind::List => self.0.ensure_list(kind.obj()),
             ContentKind::Map => Ok(()),
         }
     }
@@ -66,15 +66,15 @@ impl Target for Local {
         self.0.apply_txn(ops)
     }
 
-    fn apply_updates(&mut self, updates: &[Vec<u8>]) -> Result<()> {
+    fn apply_updates(&mut self, updates: &[&[u8]]) -> Result<()> {
         self.0.apply_updates(updates)
     }
 
     fn read(&mut self, kind: ContentKind) -> Result<Content> {
         Ok(match kind {
-            ContentKind::Text => Content::Text(self.0.read_text(TEXT_OBJ)?),
-            ContentKind::List => Content::List(self.0.read_list(LIST_OBJ)?),
-            ContentKind::Map => Content::Map(self.0.read_map(MAP_OBJ)?),
+            ContentKind::Text => Content::Text(self.0.read_text(kind.obj())?),
+            ContentKind::List => Content::List(self.0.read_list(kind.obj())?),
+            ContentKind::Map => Content::Map(self.0.read_map(kind.obj())?),
         })
     }
 
@@ -104,43 +104,50 @@ pub struct Remote {
     adapter_ns: u64,
 }
 
-impl Remote {
-    /// Returns a request that names the object of a trace of this `kind`.
-    fn obj(kind: ContentKind) -> Request<proto::ObjRef> {
-        let obj = match kind {
-            ContentKind::Text => TEXT_OBJ,
-            ContentKind::List => LIST_OBJ,
-            ContentKind::Map => MAP_OBJ,
-        };
-        Request::new(proto::ObjRef {
-            obj: obj.to_owned(),
-        })
+/// Blocks on one RPC of a [`Remote`], and returns the reply body.
+macro_rules! rpc {
+    ($remote:ident . $method:ident ( $request:expr )) => {
+        $remote
+            .runtime
+            .block_on($remote.client.$method(Request::new($request)))?
+            .into_inner()
+    };
+}
+
+/// Does what [`rpc!`] does, and adds the reply's adapter time to the total.
+macro_rules! timed_rpc {
+    ($remote:ident . $method:ident ( $request:expr )) => {{
+        let reply = rpc!($remote.$method($request));
+        $remote.adapter_ns += reply.adapter_ns;
+        reply
+    }};
+}
+
+/// Returns the request that names the object of a trace of this `kind`.
+fn obj_ref(kind: ContentKind) -> proto::ObjRef {
+    proto::ObjRef {
+        obj: kind.obj().to_owned(),
     }
 }
 
 impl Target for Remote {
     fn reset(&mut self) -> Result<()> {
-        self.runtime
-            .block_on(self.client.reset(Request::new(proto::Empty {})))?;
+        rpc!(self.reset(proto::Empty {}));
         Ok(())
     }
 
     fn set_instance_id(&mut self, id: u32) -> Result<()> {
-        let request = Request::new(proto::InstanceId { id });
-        self.runtime
-            .block_on(self.client.set_instance_id(request))?;
+        rpc!(self.set_instance_id(proto::InstanceId { id }));
         Ok(())
     }
 
     fn ensure(&mut self, kind: ContentKind) -> Result<()> {
         match kind {
             ContentKind::Text => {
-                self.runtime
-                    .block_on(self.client.ensure_text(Self::obj(kind)))?;
+                rpc!(self.ensure_text(obj_ref(kind)));
             }
             ContentKind::List => {
-                self.runtime
-                    .block_on(self.client.ensure_list(Self::obj(kind)))?;
+                rpc!(self.ensure_list(obj_ref(kind)));
             }
             ContentKind::Map => {}
         }
@@ -152,88 +159,42 @@ impl Target for Remote {
             .iter()
             .map(proto::OpRequest::try_from)
             .collect::<Result<Vec<_>>>()?;
-        let reply = self
-            .runtime
-            .block_on(
-                self.client
-                    .apply_txn(Request::new(proto::TxnRequest { ops })),
-            )?
-            .into_inner();
-        self.adapter_ns += reply.adapter_ns;
-        Ok(reply.update)
+        Ok(timed_rpc!(self.apply_txn(proto::TxnRequest { ops })).update)
     }
 
-    fn apply_updates(&mut self, updates: &[Vec<u8>]) -> Result<()> {
-        let request = Request::new(proto::UpdatesRequest {
-            updates: updates.to_vec(),
-        });
-        let reply = self
-            .runtime
-            .block_on(self.client.apply_updates(request))?
-            .into_inner();
-        self.adapter_ns += reply.adapter_ns;
+    fn apply_updates(&mut self, updates: &[&[u8]]) -> Result<()> {
+        let updates = updates.iter().map(|update| update.to_vec()).collect();
+        timed_rpc!(self.apply_updates(proto::UpdatesRequest { updates }));
         Ok(())
     }
 
     fn read(&mut self, kind: ContentKind) -> Result<Content> {
         Ok(match kind {
-            ContentKind::Text => {
-                let reply = self
-                    .runtime
-                    .block_on(self.client.read_text(Self::obj(kind)))?
-                    .into_inner();
-                self.adapter_ns += reply.adapter_ns;
-                Content::Text(reply.text)
-            }
-            ContentKind::List => {
-                let reply = self
-                    .runtime
-                    .block_on(self.client.read_list(Self::obj(kind)))?
-                    .into_inner();
-                self.adapter_ns += reply.adapter_ns;
-                Content::List(
-                    reply
-                        .values
-                        .into_iter()
-                        .map(ScalarVal::try_from)
-                        .collect::<Result<_>>()?,
-                )
-            }
-            ContentKind::Map => {
-                let reply = self
-                    .runtime
-                    .block_on(self.client.read_map(Self::obj(kind)))?
-                    .into_inner();
-                self.adapter_ns += reply.adapter_ns;
-                Content::Map(
-                    reply
-                        .values
-                        .into_iter()
-                        .map(|(k, v)| Ok((k, ScalarVal::try_from(v)?)))
-                        .collect::<Result<_>>()?,
-                )
-            }
+            ContentKind::Text => Content::Text(timed_rpc!(self.read_text(obj_ref(kind))).text),
+            ContentKind::List => Content::List(
+                timed_rpc!(self.read_list(obj_ref(kind)))
+                    .values
+                    .into_iter()
+                    .map(ScalarVal::try_from)
+                    .collect::<Result<_>>()?,
+            ),
+            ContentKind::Map => Content::Map(
+                timed_rpc!(self.read_map(obj_ref(kind)))
+                    .values
+                    .into_iter()
+                    .map(|(k, v)| Ok((k, ScalarVal::try_from(v)?)))
+                    .collect::<Result<_>>()?,
+            ),
         })
     }
 
     fn encode(&mut self) -> Result<Vec<u8>> {
-        let reply = self
-            .runtime
-            .block_on(self.client.encode(Request::new(proto::Empty {})))?
-            .into_inner();
-        self.adapter_ns += reply.adapter_ns;
-        Ok(reply.state)
+        Ok(timed_rpc!(self.encode(proto::Empty {})).state)
     }
 
     fn load(&mut self, bytes: &[u8]) -> Result<()> {
-        let request = Request::new(proto::LoadRequest {
-            state: bytes.to_vec(),
-        });
-        let reply = self
-            .runtime
-            .block_on(self.client.load(request))?
-            .into_inner();
-        self.adapter_ns += reply.adapter_ns;
+        let state = bytes.to_vec();
+        timed_rpc!(self.load(proto::LoadRequest { state }));
         Ok(())
     }
 
@@ -274,10 +235,8 @@ impl Lane {
         let mut clients = Vec::with_capacity(addrs.len());
         for addr in addrs {
             let client = runtime
-                .block_on(ReplicaClient::connect(format!("http://{addr}")))
-                .with_context(|| format!("connecting to the replica at {addr}"))?
-                .max_decoding_message_size(MAX_RPC_BYTES)
-                .max_encoding_message_size(MAX_RPC_BYTES);
+                .block_on(common::connect_replica(addr))
+                .with_context(|| format!("connecting to the replica at {addr}"))?;
             clients.push(client);
         }
         Ok(Self::Remote {
@@ -288,6 +247,7 @@ impl Lane {
     }
 
     /// Returns the library that this lane runs.
+    #[must_use]
     pub fn crdt(&self) -> Crdt {
         match self {
             Self::InProcess(crdt) | Self::Remote { crdt, .. } => *crdt,
@@ -295,6 +255,7 @@ impl Lane {
     }
 
     /// Returns the lane name for the result rows.
+    #[must_use]
     pub fn name(&self) -> &'static str {
         match self {
             Self::InProcess(_) => "in_process",
@@ -304,6 +265,7 @@ impl Lane {
 
     /// Returns the largest number of replicas this lane can give, if it has a
     /// limit.
+    #[must_use]
     pub fn capacity(&self) -> Option<usize> {
         match self {
             Self::InProcess(_) => None,

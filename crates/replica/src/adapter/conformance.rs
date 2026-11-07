@@ -1051,11 +1051,11 @@ pub(crate) fn txn_updates_carry_inserts_and_deletes<A: CrdtAdapter + Default>() 
     b.ensure_text("text").unwrap();
 
     let u1 = a.apply_txn(&[splice(0, 0, "abcdef")]).unwrap();
-    b.apply_updates(std::slice::from_ref(&u1)).unwrap();
+    b.apply_updates(&[u1.as_slice()]).unwrap();
     assert_eq!(b.read_text("text").unwrap(), "abcdef");
 
     let u2 = a.apply_txn(&[splice(1, 2, "")]).unwrap();
-    b.apply_updates(std::slice::from_ref(&u2)).unwrap();
+    b.apply_updates(&[u2.as_slice()]).unwrap();
     assert_eq!(b.read_text("text").unwrap(), "adef");
     assert_eq!(a.read_text("text").unwrap(), "adef");
 }
@@ -1068,7 +1068,7 @@ pub(crate) fn txn_applies_ops_in_sequence<A: CrdtAdapter + Default>() {
     let update = a
         .apply_txn(&[splice(0, 0, "ac"), splice(1, 0, "b"), splice(0, 1, "z")])
         .unwrap();
-    b.apply_updates(std::slice::from_ref(&update)).unwrap();
+    b.apply_updates(&[update.as_slice()]).unwrap();
     assert_eq!(a.read_text("text").unwrap(), "zbc");
     assert_eq!(b.read_text("text").unwrap(), "zbc");
     assert!(a.apply_txn(&[]).unwrap().is_empty());
@@ -1083,7 +1083,7 @@ pub(crate) fn txn_update_excludes_received_ops<A: CrdtAdapter + Default>() {
     b.ensure_text("text").unwrap();
     let big = "x".repeat(4000);
     let received = a.apply_txn(&[splice(0, 0, &big)]).unwrap();
-    b.apply_updates(std::slice::from_ref(&received)).unwrap();
+    b.apply_updates(&[received.as_slice()]).unwrap();
 
     let own = b.apply_txn(&[splice(0, 0, "y")]).unwrap();
     assert!(
@@ -1106,9 +1106,10 @@ pub(crate) fn update_batch_equals_one_by_one<A: CrdtAdapter + Default>() {
     let (mut batch, mut single) = (A::default(), A::default());
     batch.ensure_text("text").unwrap();
     single.ensure_text("text").unwrap();
-    batch.apply_updates(&updates).unwrap();
+    let slices: Vec<&[u8]> = updates.iter().map(Vec::as_slice).collect();
+    batch.apply_updates(&slices).unwrap();
     for update in &updates {
-        single.apply_updates(std::slice::from_ref(update)).unwrap();
+        single.apply_updates(&[update.as_slice()]).unwrap();
     }
     let expected = a.read_text("text").unwrap();
     assert_eq!(batch.read_text("text").unwrap(), expected);
@@ -1155,8 +1156,8 @@ pub(crate) fn partitioned_list_inserts_merge_after_ensure_list<A: CrdtAdapter + 
     b.ensure_list("list").unwrap();
     let ua = a.apply_txn(&[list_insert(0, 1)]).unwrap();
     let ub = b.apply_txn(&[list_insert(0, 2)]).unwrap();
-    a.apply_updates(std::slice::from_ref(&ub)).unwrap();
-    b.apply_updates(std::slice::from_ref(&ua)).unwrap();
+    a.apply_updates(&[ub.as_slice()]).unwrap();
+    b.apply_updates(&[ua.as_slice()]).unwrap();
     let merged = a.read_list("list").unwrap();
     assert_eq!(merged.len(), 2, "a merge lost one side: {merged:?}");
     assert_eq!(merged, b.read_list("list").unwrap());
@@ -1172,15 +1173,14 @@ pub(crate) fn set_instance_id_gives_distinct_replicas<A: CrdtAdapter + Default>(
     b.ensure_text("text").unwrap();
     let ua = a.apply_txn(&[splice(0, 0, "a")]).unwrap();
     let ub = b.apply_txn(&[splice(0, 0, "b")]).unwrap();
-    a.apply_updates(std::slice::from_ref(&ub)).unwrap();
-    b.apply_updates(std::slice::from_ref(&ua)).unwrap();
+    a.apply_updates(&[ub.as_slice()]).unwrap();
+    b.apply_updates(&[ua.as_slice()]).unwrap();
     let merged = a.read_text("text").unwrap();
     assert_eq!(merged.chars().count(), 2);
     assert_eq!(merged, b.read_text("text").unwrap());
 }
 
-/// The same ids give the same document size on each run, and the same order of
-/// concurrent inserts.
+/// The same ids give the same order of concurrent inserts on each run.
 pub(crate) fn fixed_ids_make_a_merge_repeatable<A: CrdtAdapter + Default>() {
     let run = || {
         let (mut a, mut b) = (A::default(), A::default());
@@ -1190,8 +1190,8 @@ pub(crate) fn fixed_ids_make_a_merge_repeatable<A: CrdtAdapter + Default>() {
         b.ensure_text("text").unwrap();
         let ua = a.apply_txn(&[splice(0, 0, "aaa")]).unwrap();
         let ub = b.apply_txn(&[splice(0, 0, "bbb")]).unwrap();
-        a.apply_updates(std::slice::from_ref(&ub)).unwrap();
-        b.apply_updates(std::slice::from_ref(&ua)).unwrap();
+        a.apply_updates(&[ub.as_slice()]).unwrap();
+        b.apply_updates(&[ua.as_slice()]).unwrap();
         a.read_text("text").unwrap()
     };
     let first = run();

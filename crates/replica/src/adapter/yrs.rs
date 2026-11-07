@@ -411,7 +411,7 @@ impl CrdtAdapter for YrsAdapter {
         Ok(txn.encode_update_v2())
     }
 
-    fn apply_updates(&mut self, updates: &[Vec<u8>]) -> anyhow::Result<()> {
+    fn apply_updates(&mut self, updates: &[&[u8]]) -> anyhow::Result<()> {
         let mut txn = self.doc.transact_mut();
         for update in updates {
             let update = Update::decode_v2(update).context("decoding a Yrs update")?;
@@ -429,7 +429,7 @@ impl CrdtAdapter for YrsAdapter {
 
     fn load(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
         *self = Self::new();
-        self.apply_updates(std::slice::from_ref(&bytes.to_vec()))
+        self.apply_updates(&[bytes])
     }
 }
 

@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering::Relaxed};
 static ENABLED: AtomicBool = AtomicBool::new(false);
 /// The live bytes counted so far.
 static CURRENT: AtomicI64 = AtomicI64::new(0);
-/// The highest value of [`CURRENT`] since the last [`reset_peak`].
+/// The highest value of [`CURRENT`] since [`Counting::start`].
 static PEAK: AtomicI64 = AtomicI64::new(0);
 
 /// Wraps the system allocator and counts live bytes.
@@ -57,30 +57,36 @@ unsafe impl GlobalAlloc for CountingAlloc {
     }
 }
 
-/// Turns the count on or off.
-pub fn set_counting(on: bool) {
-    ENABLED.store(on, Relaxed);
+/// Keeps the count on while it lives. The count stops on drop, also on an early
+/// error return.
+#[must_use = "the count stops when this value drops"]
+pub struct Counting(());
+
+impl Counting {
+    /// Turns the count on, and sets the peak to the current value.
+    pub fn start() -> Self {
+        PEAK.store(CURRENT.load(Relaxed), Relaxed);
+        ENABLED.store(true, Relaxed);
+        Self(())
+    }
+
+    /// Returns the live bytes counted so far.
+    ///
+    /// The value can be negative, because a block allocated while the count was
+    /// off can be freed while it is on. So use only the difference of two calls.
+    /// In a binary without [`CountingAlloc`], the value stays at zero.
+    pub fn current(&self) -> i64 {
+        CURRENT.load(Relaxed)
+    }
+
+    /// Returns the peak of [`Self::current`] since [`Self::start`].
+    pub fn peak(&self) -> i64 {
+        PEAK.load(Relaxed)
+    }
 }
 
-/// Returns true if the binary installed [`CountingAlloc`] and the count is on.
-/// In a test binary the allocator is not installed, so the values stay at zero.
-pub fn is_counting() -> bool {
-    ENABLED.load(Relaxed)
-}
-
-/// Returns the live bytes counted so far. This can be negative, because a block
-/// allocated while the count was off can be freed while it is on. Use only the
-/// difference of two calls.
-pub fn current() -> i64 {
-    CURRENT.load(Relaxed)
-}
-
-/// Returns the peak of [`current`] since the last [`reset_peak`].
-pub fn peak() -> i64 {
-    PEAK.load(Relaxed)
-}
-
-/// Sets the peak to the current value.
-pub fn reset_peak() {
-    PEAK.store(CURRENT.load(Relaxed), Relaxed);
+impl Drop for Counting {
+    fn drop(&mut self) {
+        ENABLED.store(false, Relaxed);
+    }
 }

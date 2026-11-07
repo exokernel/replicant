@@ -711,6 +711,7 @@ impl Replica for ReplicaService {
         request: Request<proto::UpdatesRequest>,
     ) -> Result<Response<proto::TimedResponse>, Status> {
         let updates = request.into_inner().updates;
+        let updates: Vec<&[u8]> = updates.iter().map(Vec::as_slice).collect();
         let (result, adapter_ns) = self.state.timed(|a| a.apply_updates(&updates));
         result.map_err(internal)?;
         Ok(Response::new(proto::TimedResponse { adapter_ns }))
