@@ -92,8 +92,8 @@ pub fn seed_for(config: &PartitionConfig, node: usize, repetition: usize) -> u64
 /// The insert positions that one replica draws in one repetition of a cell.
 ///
 /// Each position is drawn against the replica's simulated text length. That
-/// length starts at 0 and grows by one per insert, so every position is a
-/// valid anchor.
+/// length starts at the length of the cell's baseline, or at 0 with no baseline,
+/// and grows by one per insert, so every position is a valid anchor.
 ///
 /// The simulated length is exact for singleton groups. In a multi-node group
 /// a replica also receives its peers' inserts during the partition, so its
@@ -116,7 +116,7 @@ impl PositionStream {
         Self {
             locality: config.locality,
             rng: SplitMix64::new(seed_for(config, node, repetition)),
-            len: 0,
+            len: config.baseline_len(),
         }
     }
 
@@ -153,6 +153,29 @@ mod tests {
             locality,
             ..PartitionConfig::for_test(2, &[&[0], &[1]])
         }
+    }
+
+    /// With a baseline, positions range over the shared text from the first op.
+    #[test]
+    fn a_position_stream_starts_at_the_baseline_length() {
+        let cell = PartitionConfig {
+            baseline: Some(crate::scenario::Baseline {
+                trace: "t".into(),
+                sha256: String::new(),
+                length: 1_000,
+            }),
+            ..text_cell(1, Locality::Append)
+        };
+        assert_eq!(PositionStream::new(&cell, 0, 1).next_pos(), 1_000);
+
+        let random = PartitionConfig {
+            locality: Locality::RandomPosition,
+            ..cell
+        };
+        let mut stream = PositionStream::new(&random, 0, 1);
+        let positions: Vec<usize> = (0..100).map(|_| stream.next_pos()).collect();
+        assert!(positions.iter().any(|&p| p > 100), "{positions:?}");
+        assert!(positions.iter().enumerate().all(|(i, &p)| p <= 1_000 + i));
     }
 
     #[test]

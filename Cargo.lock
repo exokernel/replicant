@@ -1725,6 +1725,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "replay",
  "replica",
  "serde",
  "serde_json",

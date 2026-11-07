@@ -5,7 +5,7 @@
 # 2 replicas partition into singleton groups, each applies 100,000 text-splice
 # ops, then heal and measure convergence.
 #
-# locality = random_position: each op inserts at a uniformly-random position.
+# locality = random_position: each op inserts at a uniformly-random position in a shared document.
 name = "divergence-n2-random_position-1e5"
 
 [partition_heal]
@@ -14,6 +14,11 @@ write_pattern = "concentrated"
 workload = "text_splice"
 locality = "random_position"
 ops_per_group = 100000
+
+[partition_heal.baseline]
+trace = "editing-traces/automerge-paper.json.gz"
+sha256 = "42c0ff1720c0cad77077e190e36135c9cab9f7bbc266351c0a7fe4981c6a1546"
+length = 104852
 
 [[partition_heal.groups]]
 nodes = [0]

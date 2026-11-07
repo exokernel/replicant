@@ -10,7 +10,8 @@
 //!
 //! # Phases
 //!
-//! 1. **Setup.** Reset every replica. For text workloads, create the shared
+//! 1. **Setup.** Reset every replica. If the cell has a baseline, load it on every
+//!    replica. For text workloads, create the shared
 //!    text object on every replica. Wire the *complete* post-heal graph, then
 //!    block every cross-group link. A blocked link stays open but carries no
 //!    data.
@@ -36,6 +37,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use tokio::task::JoinSet;
 
+use crate::baseline::BaselineStore;
 use crate::event_log::{Event, EventLog};
 use crate::replicas::{
     Client, NodeSource, TEXT_OBJ, acquire_nodes, apply_write, check_tasks, connect_edges,
@@ -55,6 +57,7 @@ pub async fn run_partition_heal(
     config: &PartitionConfig,
     source: NodeSource,
     repetition: usize,
+    baselines: &mut BaselineStore,
     log: &mut EventLog,
 ) -> Result<RunResult> {
     config.validate()?;
@@ -67,8 +70,13 @@ pub async fn run_partition_heal(
     // when the same external stack is reused across many scenarios/trials.
     reset_all(&clients).await?;
 
-    // Create the shared text object on every replica while the document is
-    // still empty and no links exist.
+    if let Some(baseline) = &config.baseline {
+        baselines.install(baseline, &mut clients).await?;
+    }
+
+    // Create the shared text object on every replica while no links exist, and,
+    // for a cell with no baseline, while the document is still empty. A replica
+    // that loaded a baseline has the object already, so this does not change it.
     //
     // This is what makes the heal interleave two sequences. The adapter creates
     // an object on first use. Without this step, replicas that diverge from an
@@ -180,11 +188,13 @@ pub async fn run_partition_heal(
 
     // Validity gate, outside the measured window: the healed text must contain
     // both sides' inserts. Operations are insert-only and one character each,
-    // so the final length must equal the total operation count. This is the
+    // so the final length must equal the starting length plus the total operation
+    // count. This is the
     // check that separates a real sequence interleave from a heal that
-    // converged by discarding one replica's work.
+    // converged by discarding one replica's work. A baseline adds its length.
     if config.workload == WriteKind::TextSplice {
-        verify_text_length(&mut clients, &all_nodes, config.total_ops()).await?;
+        let expected = config.baseline_len() + config.total_ops();
+        verify_text_length(&mut clients, &all_nodes, expected).await?;
     }
 
     // Report structural fields for the actual post-heal graph (intra-group
@@ -304,10 +314,12 @@ async fn verify_groups_diverged(clients: &mut [Client], groups: &[Group]) -> Res
 mod tests {
     use super::*;
 
+    use std::path::{Path, PathBuf};
+
     use replica::adapter::Crdt;
 
     use crate::replicas::{map_put, spawn_nodes};
-    use crate::scenario::WritePattern;
+    use crate::scenario::{Baseline, WritePattern};
     use crate::workload::Locality;
 
     // ── heal_edges ─────────────────────────────────────────────────────────
@@ -462,6 +474,7 @@ mod tests {
             &halves(2, 4),
             NodeSource::InProcess(Crdt::Automerge),
             1,
+            &mut BaselineStore::default(),
             &mut EventLog::off(),
         )
         .await
@@ -470,6 +483,7 @@ mod tests {
             &halves(6, 4),
             NodeSource::InProcess(Crdt::Automerge),
             1,
+            &mut BaselineStore::default(),
             &mut EventLog::off(),
         )
         .await
@@ -496,6 +510,7 @@ mod tests {
             &halves(4, 4),
             NodeSource::InProcess(Crdt::Automerge),
             1,
+            &mut BaselineStore::default(),
             &mut EventLog::off(),
         )
         .await
@@ -536,11 +551,111 @@ mod tests {
                 &config,
                 NodeSource::InProcess(Crdt::Automerge),
                 1,
+                &mut BaselineStore::default(),
                 &mut EventLog::off(),
             )
             .await
             .unwrap_or_else(|e| panic!("locality={locality:?}: {e:#}"));
             assert_eq!(result.total_ops, 50, "locality={locality:?}");
         }
+    }
+
+    // ── Baseline ───────────────────────────────────────────────────────────
+
+    /// A cell whose start is the committed smoke fixture, whose text is `hippo`.
+    fn baseline_cell(sha256: &str, length: usize) -> PartitionConfig {
+        PartitionConfig {
+            ops_per_group: 25,
+            write_pattern: WritePattern::Concentrated,
+            workload: WriteKind::TextSplice,
+            locality: Locality::RandomPosition,
+            baseline: Some(Baseline {
+                trace: "smoke-text.trace.json".into(),
+                sha256: sha256.to_owned(),
+                length,
+            }),
+            ..PartitionConfig::for_test(2, &[&[0], &[1]])
+        }
+    }
+
+    /// The directory that holds the smoke fixture.
+    fn fixtures() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../workloads/fixtures")
+    }
+
+    /// Runs one trial of `config` on `crdt`, with a new store.
+    async fn run_on(config: &PartitionConfig, crdt: Crdt, trial: usize) -> Result<RunResult> {
+        let mut store = BaselineStore::new(&fixtures());
+        run_partition_heal(
+            config,
+            NodeSource::InProcess(crdt),
+            trial,
+            &mut store,
+            &mut EventLog::off(),
+        )
+        .await
+    }
+
+    /// The hash of the smoke fixture, as `workloads/smoke.toml` pins it.
+    const FIXTURE_SHA256: &str = "d49ad91a6c882150cf0d7b020beaf3228b72bb72547da7e299fa355bd028a81e";
+
+    /// Each library merges inserts that attach to shared elements, and keeps the
+    /// baseline and both sides. The final gate in `run_partition_heal` fails if a
+    /// replica loses text. It also fails if two replicas share an author id,
+    /// because their ops then collide.
+    #[tokio::test]
+    async fn a_baseline_cell_keeps_the_start_and_both_sides_on_each_library() {
+        for crdt in Crdt::ALL {
+            let config = baseline_cell(FIXTURE_SHA256, 5);
+            for trial in 1..=3 {
+                let result = run_on(&config, crdt, trial)
+                    .await
+                    .unwrap_or_else(|e| panic!("{crdt} trial {trial}: {e:#}"));
+                assert_eq!(result.total_ops, 50, "{crdt}");
+            }
+        }
+    }
+
+    /// Later trials use the encoded bytes, and do not replay the trace again.
+    #[tokio::test]
+    async fn one_store_serves_many_trials_on_each_library() {
+        for crdt in Crdt::ALL {
+            let config = baseline_cell(FIXTURE_SHA256, 5);
+            let mut store = BaselineStore::new(&fixtures());
+            for trial in 1..=3 {
+                run_partition_heal(
+                    &config,
+                    NodeSource::InProcess(crdt),
+                    trial,
+                    &mut store,
+                    &mut EventLog::off(),
+                )
+                .await
+                .unwrap_or_else(|e| panic!("{crdt} trial {trial}: {e:#}"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_wrong_baseline_length_fails_before_the_partition() {
+        let err = run_on(&baseline_cell(FIXTURE_SHA256, 6), Crdt::Yrs, 1)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("expected 6 chars"), "{err:#}");
+    }
+
+    #[test]
+    fn a_wrong_baseline_hash_fails_the_check() {
+        let mut store = BaselineStore::new(&fixtures());
+        let config = baseline_cell(&"0".repeat(64), 5);
+        assert!(store.check(config.baseline.as_ref().unwrap()).is_err());
+    }
+
+    #[test]
+    fn a_missing_baseline_file_names_the_recipe() {
+        let mut store = BaselineStore::new(Path::new("no-such-directory"));
+        let config = baseline_cell(FIXTURE_SHA256, 5);
+        let err = store.check(config.baseline.as_ref().unwrap()).unwrap_err();
+        assert!(format!("{err:#}").contains("just gen-traces"), "{err:#}");
     }
 }

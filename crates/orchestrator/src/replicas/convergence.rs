@@ -121,9 +121,8 @@ pub async fn verify_text_length(
             .length as usize;
         if got != expected {
             bail!(
-                "text-length check failed on node {i}: expected {expected} chars \
-                 (one per op), found {got} — some replicas' inserts were lost \
-                 in the merge"
+                "text-length check failed on node {i}: expected {expected} chars, found \
+                 {got} — some replicas' inserts were lost in the merge"
             );
         }
     }

@@ -34,8 +34,21 @@ LOCALITIES = ["append", "random_position", "same_region"]
 # One-line gloss per locality, inlined into each cell's header comment.
 LOCALITY_BLURB = {
     "append": "each op inserts at the current end -- the low-contention floor",
-    "random_position": "each op inserts at a uniformly-random position",
+    "random_position": "each op inserts at a uniformly-random position in a shared document",
     "same_region": "every op prepends at the same anchor -- maximal contention",
+}
+
+# The document that each `random_position` replica holds before the partition: the
+# LaTeX paper of crdt-benchmarks B4. With an empty start, the replicas share no text,
+# so random inserts contest almost nothing. These values match `workloads/`.
+BASELINE = {
+    "random_position": """\
+[partition_heal.baseline]
+trace = "editing-traces/automerge-paper.json.gz"
+sha256 = "42c0ff1720c0cad77077e190e36135c9cab9f7bbc266351c0a7fe4981c6a1546"
+length = 104852
+
+""",
 }
 
 SCENARIO_DIR = Path(__file__).resolve().parent
@@ -66,7 +79,7 @@ workload = "text_splice"
 locality = "{locality}"
 ops_per_group = {ops}
 
-[[partition_heal.groups]]
+{BASELINE.get(locality, "")}[[partition_heal.groups]]
 nodes = [0]
 
 [[partition_heal.groups]]
