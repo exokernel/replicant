@@ -354,6 +354,14 @@ impl CrdtAdapter for YrsAdapter {
         Ok(text.get_string(&txn).chars().count())
     }
 
+    /// Replaces the document with an empty one that has this client id. Bit 52
+    /// keeps the varint width of a random id, which has 53 bits.
+    fn set_instance_id(&mut self, id: u32) -> anyhow::Result<()> {
+        self.doc = Doc::with_client_id(u64::from(id) | (1 << 52));
+        self.peer_sent.clear();
+        Ok(())
+    }
+
     /// Does a local lookup. Authors no change. See `ensure_text`.
     fn ensure_list(&mut self, obj: &str) -> anyhow::Result<()> {
         require_name(obj)?;
@@ -466,6 +474,16 @@ mod tests {
     #[test]
     fn yrs_partitioned_list_inserts_merge_after_ensure_list() {
         partitioned_list_inserts_merge_after_ensure_list::<YrsAdapter>();
+    }
+
+    #[test]
+    fn yrs_set_instance_id_gives_distinct_replicas() {
+        set_instance_id_gives_distinct_replicas::<YrsAdapter>();
+    }
+
+    #[test]
+    fn yrs_fixed_ids_make_a_merge_repeatable() {
+        fixed_ids_make_a_merge_repeatable::<YrsAdapter>();
     }
 
     #[test]

@@ -347,6 +347,13 @@ impl CrdtAdapter for LoroAdapter {
         Ok(self.doc.get_text(obj).len_unicode())
     }
 
+    /// Sets the peer id. The high bit keeps the width of a random `u64` id.
+    fn set_instance_id(&mut self, id: u32) -> anyhow::Result<()> {
+        self.doc
+            .set_peer_id(u64::from(id) | (1 << 63))
+            .context("setting the Loro peer id")
+    }
+
     /// Checks the name and authors no change. See `ensure_text`.
     fn ensure_list(&mut self, obj: &str) -> anyhow::Result<()> {
         require_name(obj)
@@ -467,6 +474,16 @@ mod tests {
     #[test]
     fn loro_partitioned_list_inserts_merge_after_ensure_list() {
         partitioned_list_inserts_merge_after_ensure_list::<LoroAdapter>();
+    }
+
+    #[test]
+    fn loro_set_instance_id_gives_distinct_replicas() {
+        set_instance_id_gives_distinct_replicas::<LoroAdapter>();
+    }
+
+    #[test]
+    fn loro_fixed_ids_make_a_merge_repeatable() {
+        fixed_ids_make_a_merge_repeatable::<LoroAdapter>();
     }
 
     #[test]

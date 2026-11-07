@@ -629,6 +629,16 @@ impl Replica for ReplicaService {
         Ok(Response::new(proto::Empty {}))
     }
 
+    async fn set_instance_id(
+        &self,
+        request: Request<proto::InstanceId>,
+    ) -> Result<Response<proto::Empty>, Status> {
+        let id = request.into_inner().id;
+        let (result, _) = self.state.timed(|a| a.set_instance_id(id));
+        result.map_err(internal)?;
+        Ok(Response::new(proto::Empty {}))
+    }
+
     async fn ensure_list(
         &self,
         request: Request<proto::ObjRef>,

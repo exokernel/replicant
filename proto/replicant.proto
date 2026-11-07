@@ -61,6 +61,7 @@ service Replica {
   // It moves updates between replicas itself, so no sync stream runs. Each
   // reply gives adapter_ns: the time in the adapter, without gRPC. Each RPC
   // matches the CrdtAdapter method of the same name.
+  rpc SetInstanceId       (InstanceId)     returns (Empty);
   rpc EnsureList          (ObjRef)         returns (Empty);
   rpc ReadText            (ObjRef)         returns (ReadTextResponse);
   rpc ReadList            (ObjRef)         returns (ReadListResponse);
@@ -184,6 +185,8 @@ message PeerStats {
 }
 
 // ── Replay messages ────────────────────────────────────────────────────────
+
+message InstanceId { uint32 id = 1; }
 
 message TimedResponse { uint64 adapter_ns = 1; }
 

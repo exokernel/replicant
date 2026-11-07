@@ -1139,3 +1139,41 @@ pub(crate) fn partitioned_list_inserts_merge_after_ensure_list<A: CrdtAdapter + 
     assert_eq!(merged.len(), 2, "a merge lost one side: {merged:?}");
     assert_eq!(merged, b.read_list("list").unwrap());
 }
+
+/// After `set_instance_id`, an edit works and syncs to another replica. Two ids
+/// give two distinct replicas, so both sides' ops survive.
+pub(crate) fn set_instance_id_gives_distinct_replicas<A: CrdtAdapter + Default>() {
+    let (mut a, mut b) = (A::default(), A::default());
+    a.set_instance_id(1).unwrap();
+    b.set_instance_id(2).unwrap();
+    a.ensure_text("text").unwrap();
+    b.ensure_text("text").unwrap();
+    let ua = a.apply_txn(&[splice(0, 0, "a")]).unwrap();
+    let ub = b.apply_txn(&[splice(0, 0, "b")]).unwrap();
+    a.apply_updates(std::slice::from_ref(&ub)).unwrap();
+    b.apply_updates(std::slice::from_ref(&ua)).unwrap();
+    let merged = a.read_text("text").unwrap();
+    assert_eq!(merged.chars().count(), 2);
+    assert_eq!(merged, b.read_text("text").unwrap());
+}
+
+/// The same ids give the same document size on each run, and the same order of
+/// concurrent inserts.
+pub(crate) fn fixed_ids_make_a_merge_repeatable<A: CrdtAdapter + Default>() {
+    let run = || {
+        let (mut a, mut b) = (A::default(), A::default());
+        a.set_instance_id(1).unwrap();
+        b.set_instance_id(2).unwrap();
+        a.ensure_text("text").unwrap();
+        b.ensure_text("text").unwrap();
+        let ua = a.apply_txn(&[splice(0, 0, "aaa")]).unwrap();
+        let ub = b.apply_txn(&[splice(0, 0, "bbb")]).unwrap();
+        a.apply_updates(std::slice::from_ref(&ub)).unwrap();
+        b.apply_updates(std::slice::from_ref(&ua)).unwrap();
+        a.read_text("text").unwrap()
+    };
+    let first = run();
+    for _ in 0..8 {
+        assert_eq!(run(), first);
+    }
+}

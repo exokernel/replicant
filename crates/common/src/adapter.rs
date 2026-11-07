@@ -136,6 +136,16 @@ pub trait CrdtAdapter: Send + 'static {
     /// on a length mismatch instead of an error.
     fn text_length(&mut self, obj: &str) -> anyhow::Result<usize>;
 
+    /// Sets the id that the library uses for this replica's ops. Call this on
+    /// an empty document.
+    ///
+    /// The library breaks ties between concurrent ops with this id. It is random
+    /// by default, so a replay can have a different result on each run. A replay
+    /// sets a fixed id for each agent, and the ids must differ. The adapter keeps
+    /// the encoded width of a random id, so a fixed id does not change the
+    /// document size.
+    fn set_instance_id(&mut self, id: u32) -> anyhow::Result<()>;
+
     /// Creates the named list object under ROOT, so that every replica has the
     /// same object identity without any sync.
     ///
@@ -173,8 +183,11 @@ pub trait CrdtAdapter: Send + 'static {
 
     /// Applies updates that [`Self::apply_txn`] returned on another replica.
     ///
-    /// The caller must give the updates in causal order. If the library has a
-    /// batch path, the adapter uses it for all `updates` in one call.
+    /// The caller must give the updates in causal order. An adapter can use a
+    /// batch path for all `updates` in one call. Each adapter uses the same path
+    /// as its crdt-benchmarks factory, so that the two can be compared: Yrs uses
+    /// one transaction, Loro uses a batch import, and Automerge applies one
+    /// update at a time.
     fn apply_updates(&mut self, updates: &[Vec<u8>]) -> anyhow::Result<()>;
 
     /// Returns the full encoded document. [`Self::load`] accepts it.
