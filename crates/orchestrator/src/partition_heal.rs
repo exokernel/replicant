@@ -49,6 +49,14 @@ use crate::scenario::{Group, HealTopology, PartitionConfig, WriteKind};
 use crate::topology::{self, Connections, intra_group_edges};
 use crate::workload::{PositionStream, target_node};
 
+/// The longest heal that a trial waits for before it fails.
+///
+/// This only detects a heal that never ends. It does not change a measurement.
+/// Some cells take many seconds: on `same_region` at 10^4 operations per side,
+/// some Loro peer ids make a heal take more than 10 s on the docker lane, and a
+/// cell at 10^5 takes longer.
+const HEAL_TIMEOUT: Duration = Duration::from_secs(600);
+
 /// Runs one partition-heal scenario and returns its measurements.
 ///
 /// See the module documentation for the phase order and for why the graph is
@@ -175,14 +183,8 @@ pub async fn run_partition_heal(
     log.record(Event::Kicked);
 
     let all_nodes: Vec<usize> = (0..n).collect();
-    let convergence_ms = wait_for_nodes(
-        &mut clients,
-        &all_nodes,
-        heal_start,
-        Duration::from_secs(10),
-        log,
-    )
-    .await?;
+    let convergence_ms =
+        wait_for_nodes(&mut clients, &all_nodes, heal_start, HEAL_TIMEOUT, log).await?;
     check_tasks(&mut tasks)?;
     record_stats(&mut clients, log).await?;
 
