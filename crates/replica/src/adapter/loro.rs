@@ -439,164 +439,42 @@ mod tests {
     use crate::adapter::conformance::*;
     use common::{CrdtAdapter, Op};
 
-    // ── Universal conformance (see adapter::conformance) ───────────────────
-
-    #[test]
-    fn loro_reads_return_the_written_content() {
-        reads_return_the_written_content::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_txn_updates_carry_inserts_and_deletes() {
-        txn_updates_carry_inserts_and_deletes::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_txn_applies_ops_in_sequence() {
-        txn_applies_ops_in_sequence::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_txn_update_excludes_received_ops() {
-        txn_update_excludes_received_ops::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_update_batch_equals_one_by_one() {
-        update_batch_equals_one_by_one::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_encode_and_load_round_trip() {
-        encode_and_load_round_trip::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_partitioned_list_inserts_merge_after_ensure_list() {
-        partitioned_list_inserts_merge_after_ensure_list::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_set_instance_id_gives_distinct_replicas() {
-        set_instance_id_gives_distinct_replicas::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_fixed_ids_make_a_merge_repeatable() {
-        fixed_ids_make_a_merge_repeatable::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_identical_ops_yield_equal_fingerprints() {
-        identical_ops_yield_equal_fingerprints::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_disjoint_edits_converge_after_sync() {
-        disjoint_edits_converge_after_sync::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_concurrent_edits_to_same_key_converge() {
-        concurrent_edits_to_same_key_converge::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_post_sync_divergence_is_detected() {
-        post_sync_divergence_is_detected::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_root_map_ops_are_supported() {
-        root_map_ops_are_supported::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_each_op_variant_mutates_the_doc() {
-        each_op_variant_mutates_the_doc::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_reads_are_stable_without_writes() {
-        reads_are_stable_without_writes::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_sync_is_idempotent_once_converged() {
-        sync_is_idempotent_once_converged::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_three_replicas_converge_through_a_hub() {
-        three_replicas_converge_through_a_hub::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_reset_returns_adapter_to_a_fresh_state() {
-        reset_returns_adapter_to_a_fresh_state::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_reset_drops_stale_peer_state() {
-        reset_drops_stale_peer_state::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_reset_allows_clean_re_sync_with_equal_fingerprint() {
-        reset_allows_clean_re_sync_with_equal_fingerprint::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_ensure_text_is_idempotent() {
-        ensure_text_is_idempotent::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_partitioned_text_edits_interleave_after_bootstrap() {
-        partitioned_text_edits_interleave_after_bootstrap::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_ensure_text_adopts_synced_in_object() {
-        ensure_text_adopts_synced_in_object::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_first_local_write_reuses_synced_in_object() {
-        first_local_write_reuses_synced_in_object::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_sync_reset_forgets_quiescence() {
-        sync_reset_forgets_quiescence::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_sync_reset_recovers_from_a_lost_message() {
-        sync_reset_recovers_from_a_lost_message::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_sync_reset_unknown_peer_is_noop() {
-        sync_reset_unknown_peer_is_noop::<LoroAdapter>();
-    }
-
-    // ── Characterization shared with Yrs (see adapter::conformance) ────────
-
-    #[test]
-    fn loro_ensure_text_is_a_pure_lookup_no_change_authored() {
-        ensure_text_is_a_pure_lookup_no_change_authored::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_partitioned_text_edits_interleave_even_without_ensure_text() {
-        partitioned_text_edits_interleave_even_without_ensure_text::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_uint_above_i64_max_is_rejected() {
-        uint_above_i64_max_is_rejected::<LoroAdapter>();
-    }
+    conformance_tests!(
+        LoroAdapter:
+        // Universal conformance.
+        reads_return_the_written_content,
+        txn_updates_carry_inserts_and_deletes,
+        txn_applies_ops_in_sequence,
+        txn_update_excludes_received_ops,
+        update_batch_equals_one_by_one,
+        encode_and_load_round_trip,
+        partitioned_list_inserts_merge_after_ensure_list,
+        set_instance_id_gives_distinct_replicas,
+        fixed_ids_make_a_merge_repeatable,
+        identical_ops_yield_equal_fingerprints,
+        disjoint_edits_converge_after_sync,
+        concurrent_edits_to_same_key_converge,
+        post_sync_divergence_is_detected,
+        root_map_ops_are_supported,
+        each_op_variant_mutates_the_doc,
+        reads_are_stable_without_writes,
+        sync_is_idempotent_once_converged,
+        three_replicas_converge_through_a_hub,
+        reset_returns_adapter_to_a_fresh_state,
+        reset_drops_stale_peer_state,
+        reset_allows_clean_re_sync_with_equal_fingerprint,
+        ensure_text_is_idempotent,
+        partitioned_text_edits_interleave_after_bootstrap,
+        ensure_text_adopts_synced_in_object,
+        first_local_write_reuses_synced_in_object,
+        sync_reset_forgets_quiescence,
+        sync_reset_recovers_from_a_lost_message,
+        sync_reset_unknown_peer_is_noop,
+        // Characterization shared with Yrs.
+        ensure_text_is_a_pure_lookup_no_change_authored,
+        partitioned_text_edits_interleave_even_without_ensure_text,
+        uint_above_i64_max_is_rejected,
+    );
 
     // Not wrapped here. Each has a test that asserts what Loro does instead,
     // above or below:

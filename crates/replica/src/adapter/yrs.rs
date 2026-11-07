@@ -439,174 +439,44 @@ mod tests {
     use crate::adapter::conformance::*;
     use common::{CrdtAdapter, Op};
 
-    // ── Universal conformance (see adapter::conformance) ───────────────────
-
-    #[test]
-    fn yrs_reads_return_the_written_content() {
-        reads_return_the_written_content::<YrsAdapter>();
-    }
-
-    #[test]
-    fn yrs_txn_updates_carry_inserts_and_deletes() {
-        txn_updates_carry_inserts_and_deletes::<YrsAdapter>();
-    }
-
-    #[test]
-    fn yrs_txn_applies_ops_in_sequence() {
-        txn_applies_ops_in_sequence::<YrsAdapter>();
-    }
-
-    #[test]
-    fn yrs_txn_update_excludes_received_ops() {
-        txn_update_excludes_received_ops::<YrsAdapter>();
-    }
-
-    #[test]
-    fn yrs_update_batch_equals_one_by_one() {
-        update_batch_equals_one_by_one::<YrsAdapter>();
-    }
-
-    #[test]
-    fn yrs_encode_and_load_round_trip() {
-        encode_and_load_round_trip::<YrsAdapter>();
-    }
-
-    #[test]
-    fn yrs_partitioned_list_inserts_merge_after_ensure_list() {
-        partitioned_list_inserts_merge_after_ensure_list::<YrsAdapter>();
-    }
-
-    #[test]
-    fn yrs_set_instance_id_gives_distinct_replicas() {
-        set_instance_id_gives_distinct_replicas::<YrsAdapter>();
-    }
-
-    #[test]
-    fn yrs_fixed_ids_make_a_merge_repeatable() {
-        fixed_ids_make_a_merge_repeatable::<YrsAdapter>();
-    }
-
-    #[test]
-    fn yrs_identical_ops_yield_equal_fingerprints() {
-        identical_ops_yield_equal_fingerprints::<YrsAdapter>();
-    }
-
-    #[test]
-    fn yrs_disjoint_edits_converge_after_sync() {
-        disjoint_edits_converge_after_sync::<YrsAdapter>();
-    }
-
-    #[test]
-    fn yrs_concurrent_edits_to_same_key_converge() {
-        concurrent_edits_to_same_key_converge::<YrsAdapter>();
-    }
-
-    #[test]
-    fn yrs_post_sync_divergence_is_detected() {
-        post_sync_divergence_is_detected::<YrsAdapter>();
-    }
-
-    #[test]
-    fn yrs_root_map_ops_are_supported() {
-        root_map_ops_are_supported::<YrsAdapter>();
-    }
-
-    #[test]
-    fn yrs_each_op_variant_mutates_the_doc() {
-        each_op_variant_mutates_the_doc::<YrsAdapter>();
-    }
-
-    #[test]
-    fn yrs_reads_are_stable_without_writes() {
-        reads_are_stable_without_writes::<YrsAdapter>();
-    }
-
-    #[test]
-    fn yrs_sync_is_idempotent_once_converged() {
-        sync_is_idempotent_once_converged::<YrsAdapter>();
-    }
-
-    #[test]
-    fn yrs_three_replicas_converge_through_a_hub() {
-        three_replicas_converge_through_a_hub::<YrsAdapter>();
-    }
-
-    #[test]
-    fn yrs_doc_size_grows_with_every_op() {
-        doc_size_grows_with_every_op::<YrsAdapter>();
-    }
-
-    #[test]
-    fn yrs_reset_returns_adapter_to_a_fresh_state() {
-        reset_returns_adapter_to_a_fresh_state::<YrsAdapter>();
-    }
-
-    #[test]
-    fn yrs_reset_drops_stale_peer_state() {
-        reset_drops_stale_peer_state::<YrsAdapter>();
-    }
-
-    #[test]
-    fn yrs_reset_allows_clean_re_sync_with_equal_fingerprint() {
-        reset_allows_clean_re_sync_with_equal_fingerprint::<YrsAdapter>();
-    }
-
-    #[test]
-    fn yrs_ensure_text_is_idempotent() {
-        ensure_text_is_idempotent::<YrsAdapter>();
-    }
-
-    #[test]
-    fn yrs_partitioned_text_edits_interleave_after_bootstrap() {
-        partitioned_text_edits_interleave_after_bootstrap::<YrsAdapter>();
-    }
-
-    #[test]
-    fn yrs_ensure_text_adopts_synced_in_object() {
-        ensure_text_adopts_synced_in_object::<YrsAdapter>();
-    }
-
-    #[test]
-    fn yrs_first_local_write_reuses_synced_in_object() {
-        first_local_write_reuses_synced_in_object::<YrsAdapter>();
-    }
-
-    #[test]
-    fn yrs_sync_reset_forgets_quiescence() {
-        sync_reset_forgets_quiescence::<YrsAdapter>();
-    }
-
-    #[test]
-    fn yrs_sync_reset_recovers_from_a_lost_message() {
-        sync_reset_recovers_from_a_lost_message::<YrsAdapter>();
-    }
-
-    #[test]
-    fn yrs_sync_reset_unknown_peer_is_noop() {
-        sync_reset_unknown_peer_is_noop::<YrsAdapter>();
-    }
-
-    #[test]
-    fn yrs_text_length_errors_on_missing_or_wrong_type() {
-        text_length_errors_on_missing_or_wrong_type::<YrsAdapter>();
-    }
-
-    // ── Characterization shared with Loro (see adapter::conformance) ───────
-
-    #[test]
-    fn yrs_ensure_text_is_a_pure_lookup_no_change_authored() {
-        ensure_text_is_a_pure_lookup_no_change_authored::<YrsAdapter>();
-    }
-
-    #[test]
-    fn yrs_partitioned_text_edits_interleave_even_without_ensure_text() {
-        partitioned_text_edits_interleave_even_without_ensure_text::<YrsAdapter>();
-    }
-
-    #[test]
-    fn yrs_uint_above_i64_max_is_rejected() {
-        uint_above_i64_max_is_rejected::<YrsAdapter>();
-    }
+    conformance_tests!(
+        YrsAdapter:
+        // Universal conformance.
+        reads_return_the_written_content,
+        txn_updates_carry_inserts_and_deletes,
+        txn_applies_ops_in_sequence,
+        txn_update_excludes_received_ops,
+        update_batch_equals_one_by_one,
+        encode_and_load_round_trip,
+        partitioned_list_inserts_merge_after_ensure_list,
+        set_instance_id_gives_distinct_replicas,
+        fixed_ids_make_a_merge_repeatable,
+        identical_ops_yield_equal_fingerprints,
+        disjoint_edits_converge_after_sync,
+        concurrent_edits_to_same_key_converge,
+        post_sync_divergence_is_detected,
+        root_map_ops_are_supported,
+        each_op_variant_mutates_the_doc,
+        reads_are_stable_without_writes,
+        sync_is_idempotent_once_converged,
+        three_replicas_converge_through_a_hub,
+        doc_size_grows_with_every_op,
+        reset_returns_adapter_to_a_fresh_state,
+        reset_drops_stale_peer_state,
+        reset_allows_clean_re_sync_with_equal_fingerprint,
+        ensure_text_is_idempotent,
+        partitioned_text_edits_interleave_after_bootstrap,
+        ensure_text_adopts_synced_in_object,
+        first_local_write_reuses_synced_in_object,
+        sync_reset_forgets_quiescence,
+        sync_reset_recovers_from_a_lost_message,
+        sync_reset_unknown_peer_is_noop,
+        text_length_errors_on_missing_or_wrong_type,
+        // Characterization shared with Loro.
+        ensure_text_is_a_pure_lookup_no_change_authored,
+        partitioned_text_edits_interleave_even_without_ensure_text,
+        uint_above_i64_max_is_rejected,
+    );
 
     // Not wrapped here, because they are Automerge-only (see
     // adapter::conformance):

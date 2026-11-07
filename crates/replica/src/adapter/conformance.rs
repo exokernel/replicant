@@ -1,18 +1,19 @@
 //! Generic conformance suite for any [`CrdtAdapter`] implementation.
 //!
 //! Every function here is generic over the adapter. Each adapter module
-//! (`automerge.rs`, `yrs.rs`, `loro.rs`) wraps the functions it supports in a
-//! `#[test]`. If an adapter does not wrap a function, that is a known
+//! (`automerge.rs`, `yrs.rs`, `loro.rs`) names the functions it supports in one
+//! `conformance_tests!` call. The macro makes each function a `#[test]`. If an
+//! adapter does not name a function, that is a known
 //! difference, not an omission. A mirror test then asserts what the adapter
 //! does instead. The mirror is in the adapter's own test module, or here if
 //! more than one adapter needs it.
 //!
-//! A new adapter is complete when every function that it wraps passes.
+//! A new adapter is complete when every function that it names passes.
 //!
 //! # Two kinds of function
 //!
 //! - **Universal**: a property that every adapter must have. Every adapter
-//!   wraps these.
+//!   names these.
 //! - **Characterization** (marked `ACCOMMODATION` in the doc comment): a
 //!   property that only some libraries have. These stay here, not in one
 //!   adapter module, because the body uses no library-specific code and a
@@ -27,6 +28,27 @@
 //! `ensure_text_is_a_pure_lookup_no_change_authored` is.
 
 use common::{CrdtAdapter, Op, ScalarVal};
+
+/// Defines one `#[test]` per conformance function, for one adapter.
+///
+/// The tests go in a `suite` module, so that a test name cannot hide a function
+/// that the adapter's own tests call. The list stays explicit, so a function that
+/// an adapter leaves out is visible.
+macro_rules! conformance_tests {
+    ($adapter:ty: $($name:ident,)+) => {
+        mod suite {
+            use super::*;
+
+            $(
+                #[test]
+                fn $name() {
+                    $crate::adapter::conformance::$name::<$adapter>();
+                }
+            )+
+        }
+    };
+}
+pub(crate) use conformance_tests;
 
 /// Sends sync messages between two adapters until both return `None`.
 /// `None` means that each side believes the other is up to date.

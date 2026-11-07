@@ -394,185 +394,45 @@ mod tests {
     use crate::adapter::conformance::*;
     use common::CrdtAdapter;
 
-    #[test]
-    fn automerge_reads_return_the_written_content() {
-        reads_return_the_written_content::<AutomergeAdapter>();
-    }
-
-    #[test]
-    fn automerge_txn_updates_carry_inserts_and_deletes() {
-        txn_updates_carry_inserts_and_deletes::<AutomergeAdapter>();
-    }
-
-    #[test]
-    fn automerge_txn_applies_ops_in_sequence() {
-        txn_applies_ops_in_sequence::<AutomergeAdapter>();
-    }
-
-    #[test]
-    fn automerge_txn_update_excludes_received_ops() {
-        txn_update_excludes_received_ops::<AutomergeAdapter>();
-    }
-
-    #[test]
-    fn automerge_update_batch_equals_one_by_one() {
-        update_batch_equals_one_by_one::<AutomergeAdapter>();
-    }
-
-    #[test]
-    fn automerge_encode_and_load_round_trip() {
-        encode_and_load_round_trip::<AutomergeAdapter>();
-    }
-
-    #[test]
-    fn automerge_partitioned_list_inserts_merge_after_ensure_list() {
-        partitioned_list_inserts_merge_after_ensure_list::<AutomergeAdapter>();
-    }
-
-    #[test]
-    fn automerge_set_instance_id_gives_distinct_replicas() {
-        set_instance_id_gives_distinct_replicas::<AutomergeAdapter>();
-    }
-
-    #[test]
-    fn automerge_fixed_ids_make_a_merge_repeatable() {
-        fixed_ids_make_a_merge_repeatable::<AutomergeAdapter>();
-    }
-
-    #[test]
-    fn automerge_identical_ops_yield_equal_fingerprints() {
-        identical_ops_yield_equal_fingerprints::<AutomergeAdapter>();
-    }
-
-    #[test]
-    fn automerge_disjoint_edits_converge_after_sync() {
-        disjoint_edits_converge_after_sync::<AutomergeAdapter>();
-    }
-
-    #[test]
-    fn automerge_concurrent_edits_to_same_key_converge() {
-        concurrent_edits_to_same_key_converge::<AutomergeAdapter>();
-    }
-
-    #[test]
-    fn automerge_post_sync_divergence_is_detected() {
-        post_sync_divergence_is_detected::<AutomergeAdapter>();
-    }
-
-    #[test]
-    fn automerge_root_map_ops_are_supported() {
-        root_map_ops_are_supported::<AutomergeAdapter>();
-    }
-
-    #[test]
-    fn automerge_each_op_variant_mutates_the_doc() {
-        each_op_variant_mutates_the_doc::<AutomergeAdapter>();
-    }
-
-    #[test]
-    fn automerge_reads_are_stable_without_writes() {
-        reads_are_stable_without_writes::<AutomergeAdapter>();
-    }
-
-    #[test]
-    fn automerge_sync_is_idempotent_once_converged() {
-        sync_is_idempotent_once_converged::<AutomergeAdapter>();
-    }
-
-    #[test]
-    fn automerge_three_replicas_converge_through_a_hub() {
-        three_replicas_converge_through_a_hub::<AutomergeAdapter>();
-    }
-
-    #[test]
-    fn automerge_doc_size_grows_with_every_op() {
-        doc_size_grows_with_every_op::<AutomergeAdapter>();
-    }
-
-    #[test]
-    fn automerge_reset_returns_adapter_to_a_fresh_state() {
-        reset_returns_adapter_to_a_fresh_state::<AutomergeAdapter>();
-    }
-
-    #[test]
-    fn automerge_reset_drops_stale_peer_state() {
-        reset_drops_stale_peer_state::<AutomergeAdapter>();
-    }
-
-    #[test]
-    fn automerge_reset_allows_clean_re_sync_with_equal_fingerprint() {
-        reset_allows_clean_re_sync_with_equal_fingerprint::<AutomergeAdapter>();
-    }
-
-    #[test]
-    fn automerge_reset_clears_doc_and_sync_state() {
-        reset_clears_doc_and_sync_state::<AutomergeAdapter>();
-    }
-
-    #[test]
-    fn automerge_reset_allows_clean_re_sync_to_another_replica() {
-        reset_allows_clean_re_sync_to_another_replica::<AutomergeAdapter>();
-    }
-
-    #[test]
-    fn automerge_ensure_text_is_deterministic_across_replicas() {
-        ensure_text_is_deterministic_across_replicas::<AutomergeAdapter>();
-    }
-
-    #[test]
-    fn automerge_ensure_text_is_idempotent() {
-        ensure_text_is_idempotent::<AutomergeAdapter>();
-    }
-
-    #[test]
-    fn automerge_partitioned_text_edits_interleave_after_bootstrap() {
-        partitioned_text_edits_interleave_after_bootstrap::<AutomergeAdapter>();
-    }
-
-    #[test]
-    fn automerge_without_bootstrap_partitioned_text_loses_a_side() {
-        without_bootstrap_partitioned_text_loses_a_side::<AutomergeAdapter>();
-    }
-
-    #[test]
-    fn automerge_ensure_text_rejects_non_empty_doc_without_the_object() {
-        ensure_text_rejects_non_empty_doc_without_the_object::<AutomergeAdapter>();
-    }
-
-    #[test]
-    fn automerge_ensure_text_adopts_synced_in_object() {
-        ensure_text_adopts_synced_in_object::<AutomergeAdapter>();
-    }
-
-    #[test]
-    fn automerge_first_local_write_reuses_synced_in_object() {
-        first_local_write_reuses_synced_in_object::<AutomergeAdapter>();
-    }
-
-    #[test]
-    fn automerge_sync_reset_forgets_quiescence() {
-        sync_reset_forgets_quiescence::<AutomergeAdapter>();
-    }
-
-    #[test]
-    fn automerge_sync_reset_recovers_from_a_lost_message() {
-        sync_reset_recovers_from_a_lost_message::<AutomergeAdapter>();
-    }
-
-    #[test]
-    fn automerge_sync_reset_unknown_peer_is_noop() {
-        sync_reset_unknown_peer_is_noop::<AutomergeAdapter>();
-    }
-
-    #[test]
-    fn automerge_text_length_errors_on_missing_or_wrong_type() {
-        text_length_errors_on_missing_or_wrong_type::<AutomergeAdapter>();
-    }
-
-    #[test]
-    fn automerge_save_bytes_not_canonical_across_converged_replicas() {
-        save_bytes_not_canonical_across_converged_replicas::<AutomergeAdapter>();
-    }
+    conformance_tests!(
+        AutomergeAdapter:
+        reads_return_the_written_content,
+        txn_updates_carry_inserts_and_deletes,
+        txn_applies_ops_in_sequence,
+        txn_update_excludes_received_ops,
+        update_batch_equals_one_by_one,
+        encode_and_load_round_trip,
+        partitioned_list_inserts_merge_after_ensure_list,
+        set_instance_id_gives_distinct_replicas,
+        fixed_ids_make_a_merge_repeatable,
+        identical_ops_yield_equal_fingerprints,
+        disjoint_edits_converge_after_sync,
+        concurrent_edits_to_same_key_converge,
+        post_sync_divergence_is_detected,
+        root_map_ops_are_supported,
+        each_op_variant_mutates_the_doc,
+        reads_are_stable_without_writes,
+        sync_is_idempotent_once_converged,
+        three_replicas_converge_through_a_hub,
+        doc_size_grows_with_every_op,
+        reset_returns_adapter_to_a_fresh_state,
+        reset_drops_stale_peer_state,
+        reset_allows_clean_re_sync_with_equal_fingerprint,
+        reset_clears_doc_and_sync_state,
+        reset_allows_clean_re_sync_to_another_replica,
+        ensure_text_is_deterministic_across_replicas,
+        ensure_text_is_idempotent,
+        partitioned_text_edits_interleave_after_bootstrap,
+        without_bootstrap_partitioned_text_loses_a_side,
+        ensure_text_rejects_non_empty_doc_without_the_object,
+        ensure_text_adopts_synced_in_object,
+        first_local_write_reuses_synced_in_object,
+        sync_reset_forgets_quiescence,
+        sync_reset_recovers_from_a_lost_message,
+        sync_reset_unknown_peer_is_noop,
+        text_length_errors_on_missing_or_wrong_type,
+        save_bytes_not_canonical_across_converged_replicas,
+    );
 
     // Not wrapped here: uint_above_i64_max_is_rejected and the two Yrs and
     // Loro mirrors of the bootstrap tests. The test below asserts what

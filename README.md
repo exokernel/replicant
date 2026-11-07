@@ -116,8 +116,8 @@ The rest of the code is generic over the trait.
 
 **An adapter is done when it passes the conformance suite**,
 `crates/replica/src/adapter/conformance.rs`. The suite holds test functions
-that are generic over `A: CrdtAdapter + Default`. Each adapter module wraps the
-functions that apply to it in a `#[test]`. There are two kinds:
+that are generic over `A: CrdtAdapter + Default`. Each adapter module names the
+functions that apply to it in one `conformance_tests!` call. There are two kinds:
 
 - **Universal**: every adapter must pass it.
 - **Characterization** (marked `ACCOMMODATION`): only some libraries pass it.

@@ -1,9 +1,10 @@
 //! [`common::CrdtAdapter`] implementations, one per CRDT library.
 //!
-//! Each submodule holds one adapter struct. It also holds the `#[test]`
-//! wrappers that run the generic functions of the `conformance` test module
-//! against that adapter. A new adapter is complete when every generic function
-//! it wraps passes. The `conformance` module doc defines "generic" and "wraps".
+//! Each submodule holds one adapter struct. It also holds one
+//! `conformance_tests!` call, which runs the generic functions of the
+//! `conformance` test module against that adapter. A new adapter is complete when
+//! every function that it names passes. The `conformance` module doc explains
+//! the two kinds of function.
 
 /// The adapter for Automerge.
 mod automerge;
