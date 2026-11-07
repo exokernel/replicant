@@ -7,6 +7,9 @@ members = [
 ]
 resolver = "2"
 
+[workspace.package]
+license = "MIT"
+
 # Every item needs a doc comment, also a private one. `just lint` and CI turn
 # these warnings into errors. Generated proto code has an exemption in the common
 # crate.
