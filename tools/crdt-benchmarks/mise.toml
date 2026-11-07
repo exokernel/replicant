@@ -1,0 +1,5 @@
+# The Node version for the crdt-benchmarks tools. The suite declares Node ^20. The
+# runtime is part of a JS timing, so this is an exact version. Change it only with
+# a new calibration run.
+[tools]
+node = "20.20.2"

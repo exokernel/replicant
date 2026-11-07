@@ -97,6 +97,7 @@ class Recorder {
     this.heads.add(update.index)
   }
 
+  /** Applies one op to the plain content. */
   applyPlain (kind, args) {
     if (kind === 'text') {
       const [p, d, s] = args
@@ -110,6 +111,7 @@ class Recorder {
     }
   }
 
+  // The factory interface of crdt-benchmarks.
   insertText (i, s) { this.edit('text', [i, 0, s]) }
   deleteText (i, n) { this.edit('text', [i, n, '']) }
   insertArray (i, v) { this.edit('list', [i, 0, v]) }
@@ -122,10 +124,12 @@ class Recorder {
     if (this.depth === 0) this.flush()
   }
 
+  /** Returns the whole document state. `applyUpdate` accepts it. */
   getEncodedState () {
     return Buffer.from(JSON.stringify({ text: this.text, list: this.list, map: this.map, diverged: this.diverged, bag: this.bag }))
   }
 
+  /** Records the content that the suite last read. It gives the exact oracle. */
   remember () { bench().last = { text: this.text, list: this.list } }
   getText () { this.remember(); return this.diverged ? [...this.bag].sort().join('|') : this.text }
   getArray () { this.remember(); return this.diverged ? [...this.bag].sort() : this.list }

@@ -1,0 +1,270 @@
+--- a/benchmarks/automerge/factory.js
++++ b/benchmarks/automerge/factory.js
+@@ -170,7 +170,7 @@
+       //
+       // See: https://github.com/automerge/automerge/issues/705
+       if (typeof val === 'string') {
+-        d.map[key] = new automerge.RawString(val)
++        d.map[key] = new automerge.ImmutableString(val)
+       } else {
+         d.map[key] = val
+       }
+@@ -186,7 +186,7 @@
+     // that the comparison checks the benchmark makes are valid.
+     const result = {}
+     for (const [key, value] of Object.entries(this.doc.map)) {
+-      if (value instanceof automerge.RawString) {
++      if (automerge.isImmutableString(value)) {
+         result[key] = value.toString()
+       } else {
+         result[key] = value
+--- a/benchmarks/automerge/package.json
++++ b/benchmarks/automerge/package.json
+@@ -11,6 +11,6 @@
+     "dist": "npm run clean && rollup -c && gzip --keep dist/*"
+   },
+   "dependencies": {
+-    "@automerge/automerge": "^2.1.10"
++    "@automerge/automerge": "3.5.0"
+   }
+-}
++}
+\ No newline at end of file
+--- a/benchmarks/automerge-wasm/factory.js
++++ b/benchmarks/automerge-wasm/factory.js
+@@ -1,7 +1,10 @@
+ import { AbstractCrdt, CrdtFactory } from '../../js-lib/index.js' // eslint-disable-line
+-import * as Automerge from '@automerge/automerge-wasm'
++import { next as A } from '@automerge/automerge'
+ 
+-const INITIAL_DOC = Automerge.create()
++// The raw handle of the automerge 3.5.0 package. This is the closest match to the
++// Rust adapter, because no JS document proxy sits between the caller and the core.
++const rawHandle = doc => A.getBackend(doc)
++const INITIAL_DOC = rawHandle(A.init())
+ const ARRAY_ID = INITIAL_DOC.putObject('/', 'array', [])
+ const MAP_ID = INITIAL_DOC.putObject('/', 'map', {})
+ const TEXT_ID = INITIAL_DOC.putObject('/', 'text', '')
+@@ -44,7 +47,7 @@
+    */
+   constructor (updateHandler, bin = INITIAL_DOC_BINARY) {
+     this.updateHandler = updateHandler
+-    this.doc = Automerge.load(bin)
++    this.doc = rawHandle(A.load(bin))
+   }
+ 
+   update () {
+@@ -91,7 +94,8 @@
+    * @return {Array<any>}
+    */
+   getArray () {
+-    return /** @type {any} */ (this.doc.materialize(ARRAY_ID))
++    // The raw handle returns boxed strings. See getMap.
++    return JSON.parse(JSON.stringify(this.doc.materialize(ARRAY_ID)))
+   }
+ 
+   /**
+@@ -147,6 +151,7 @@
+    * @return {Map<string,any> | Object<string, any>}
+    */
+   getMap () {
+-    return /** @type {any} */ (this.doc.materialize(MAP_ID))
++    // The raw handle returns boxed strings, which t.compare compares by identity.
++    return JSON.parse(JSON.stringify(this.doc.materialize(MAP_ID)))
+   }
+ }
+--- a/benchmarks/automerge-wasm/package.json
++++ b/benchmarks/automerge-wasm/package.json
+@@ -10,6 +10,6 @@
+     "dist": "npm run clean && rollup -c && gzip --keep dist/*"
+   },
+   "dependencies": {
+-    "@automerge/automerge-wasm": "^0.9.0"
++    "@automerge/automerge": "3.5.0"
+   }
+-}
++}
+\ No newline at end of file
+--- a/benchmarks/loro/factory.js
++++ b/benchmarks/loro/factory.js
+@@ -1,6 +1,6 @@
+ 
+ import { AbstractCrdt, CrdtFactory } from '../../js-lib/index.js' // eslint-disable-line
+-import { Loro } from 'loro-crdt'
++import { LoroDoc } from 'loro-crdt'
+ 
+ export const name = 'loro'
+ 
+@@ -39,7 +39,7 @@
+    * @param {function(Uint8Array):void} updateHandler
+    */
+   constructor (updateHandler) {
+-    this.doc = new Loro()
++    this.doc = new LoroDoc()
+     this.version = undefined
+     this.updateHandler = updateHandler
+     this.list = this.doc.getList('list')
+@@ -66,7 +66,7 @@
+      *
+      * We use the snapshot feature by default, as this is what the Loro team recommends.
+      */
+-    return this.doc.exportSnapshot() // use the snapshot format
++    return this.doc.export({ mode: 'snapshot' }) // use the snapshot format
+     // return this.doc.exportFrom() // use the update format
+   }
+ 
+@@ -156,10 +156,10 @@
+     this.inTransact = true
+     f(this)
+     if (this.cachedUpdates.length > 0) {
+-      this.doc.importUpdateBatch(this.cachedUpdates)
++      this.doc.importBatch(this.cachedUpdates)
+       this.cachedUpdates = []
+     }
+-    this.updateHandler(this.doc.exportFrom(this.version))
++    this.updateHandler(this.doc.export({ mode: 'update', from: this.version }))
+     this.version = this.doc.version()
+     this.inTransact = false
+   }
+@@ -178,6 +178,6 @@
+    * @return {Map<string,any> | Object<string, any>}
+    */
+   getMap () {
+-    return this.map.toJson()
++    return this.map.toJSON()
+   }
+ }
+--- a/benchmarks/loro/package.json
++++ b/benchmarks/loro/package.json
+@@ -16,7 +16,6 @@
+   "author": "Kevin Jahns",
+   "license": "MIT",
+   "dependencies": {
+-    "loro-crdt": "^0.10.1",
+-    "loro-wasm": "^0.10.1"
++    "loro-crdt": "1.17.1"
+   }
+-}
++}
+\ No newline at end of file
+--- a/benchmarks/loro/run.js
++++ b/benchmarks/loro/run.js
+@@ -2,6 +2,6 @@
+ import { runBenchmarks, writeBenchmarkResultsToFile } from '../../js-lib/index.js'
+ 
+ ; (async () => {
+-  await runBenchmarks(new LoroFactory(), testName => true)
++  await runBenchmarks(new LoroFactory(), testName => !testName.startsWith('[B4x100'))
+   writeBenchmarkResultsToFile('../results.json', testName => true)
+ })()
+--- a/benchmarks/yjs/package.json
++++ b/benchmarks/yjs/package.json
+@@ -16,6 +16,6 @@
+   "author": "Kevin Jahns",
+   "license": "MIT",
+   "dependencies": {
+-    "yjs": "^13.5.12"
++    "yjs": "13.6.33"
+   }
+-}
++}
+\ No newline at end of file
+--- a/benchmarks/yjs/run.js
++++ b/benchmarks/yjs/run.js
+@@ -2,6 +2,6 @@
+ import { runBenchmarks, writeBenchmarkResultsToFile } from '../../js-lib/index.js'
+ 
+ ;(async () => {
+-  await runBenchmarks(new YjsFactory(), testName => true) // !testName.startsWith('[B4x'))
++  await runBenchmarks(new YjsFactory(), testName => !testName.startsWith('[B4x100'))
+   writeBenchmarkResultsToFile('../results.json', testName => true)
+ })()
+--- a/benchmarks/ywasm/factory.js
++++ b/benchmarks/ywasm/factory.js
+@@ -40,7 +40,7 @@
+    */
+   constructor (updateHandler) {
+     this.ydoc = new Y.YDoc({})
+-    this.ydoc.onUpdateV2(/** @param {Uint8Array} update */ update => {
++    this.ydoc.on('updateV2', /** @param {Uint8Array} update */ update => {
+       updateHandler(update)
+     })
+     this.yarray = this.ydoc.getArray('array')
+@@ -131,10 +131,11 @@
+       // use current transaction
+       f(this)
+     } else {
+-      this.txn = this.ydoc.writeTransaction(null)
++      this.txn = this.ydoc.beginTransaction(null)
+       try {
+         f(this)
+       } finally {
++        this.txn.commit()
+         this.txn.free()
+         this.txn = null
+       }
+--- a/benchmarks/ywasm/package.json
++++ b/benchmarks/ywasm/package.json
+@@ -16,6 +16,6 @@
+   "author": "Kevin Jahns",
+   "license": "MIT",
+   "dependencies": {
+-    "ywasm": "^0.17.4"
++    "ywasm": "0.28.1"
+   }
+-}
++}
+\ No newline at end of file
+--- a/benchmarks/ywasm/run.js
++++ b/benchmarks/ywasm/run.js
+@@ -2,6 +2,6 @@
+ import { runBenchmarks, writeBenchmarkResultsToFile } from '../../js-lib/index.js'
+ 
+ ;(async () => {
+-  await runBenchmarks(new YwasmFactory(), testName => !testName.startsWith('[B4x100')) // !testName.startsWith('[B4'))
++  await runBenchmarks(new YwasmFactory(), testName => !testName.startsWith('[B4x100'))
+   writeBenchmarkResultsToFile('../results.json', testName => true)
+ })()
+--- a/package.json
++++ b/package.json
+@@ -5,7 +5,7 @@
+   "description": "CRDT benchmarks",
+   "type": "module",
+   "funding": {
+-    "type": "GitHub Sponsors ❤",
++    "type": "GitHub Sponsors \u2764",
+     "url": "https://github.com/sponsors/dmonad"
+   },
+   "workspaces": [
+@@ -13,8 +13,7 @@
+     "benchmarks/ywasm",
+     "benchmarks/loro",
+     "benchmarks/automerge",
+-    "benchmarks/automerge-wasm",
+-    "benchmarks/diamond-types"
++    "benchmarks/automerge-wasm"
+   ],
+   "scripts": {
+     "clean": "rm -rf node_modules ./benchmarks/*/node_modules ./benchmarks/*/dist",
+@@ -46,17 +45,7 @@
+     "node": "^20.0.0"
+   },
+   "dependencies": {
+-    "lib0": "^0.2.42"
++    "lib0": "0.2.88"
+   },
+-  "devDependencies": {
+-    "@rollup/plugin-commonjs": "^20.0.0",
+-    "@rollup/plugin-node-resolve": "^13.0.5",
+-    "@rollup/plugin-wasm": "^6.2.2",
+-    "rollup": "^2.77.0",
+-    "rollup-plugin-node-builtins": "^2.1.2",
+-    "rollup-plugin-node-globals": "^1.4.0",
+-    "rollup-plugin-terser": "^7.0.2",
+-    "standard": "^16.0.3",
+-    "typescript": "^5.3.3"
+-  }
+-}
++  "devDependencies": {}
++}
+\ No newline at end of file
