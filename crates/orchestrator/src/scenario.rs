@@ -502,11 +502,11 @@ mod tests {
         assert!(cfg.validate().is_ok());
     }
 
-    /// Each `random_position` cell starts from the B4 paper, and no other cell has
-    /// a baseline. The hash must match the one that the B4 workload pins, so both
+    /// Each main-grid cell starts from the B4 paper, and each `-empty-` control cell
+    /// starts empty. The hash must match the one that the B4 workload pins, so both
     /// use one file.
     #[test]
-    fn only_random_position_cells_start_from_the_b4_paper() {
+    fn main_grid_cells_start_from_the_b4_paper() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let spec: toml::Value = toml::from_str(
             &std::fs::read_to_string(root.join("workloads/crdt-benchmarks.toml")).unwrap(),
@@ -519,7 +519,7 @@ mod tests {
             .find(|w| w["name"].as_str() == Some("b4"))
             .unwrap();
 
-        let mut random_cells = 0;
+        let (mut main, mut control) = (0, 0);
         for entry in std::fs::read_dir(root.join("scenarios")).unwrap() {
             let path = entry.unwrap().path();
             let name = path.file_name().unwrap().to_str().unwrap().to_owned();
@@ -532,8 +532,11 @@ mod tests {
             let ScenarioBody::PartitionHeal(cell) = file.body else {
                 panic!("{name} is not a partition-heal cell");
             };
-            if cell.locality == Locality::RandomPosition {
-                random_cells += 1;
+            if name.contains("-empty-") {
+                control += 1;
+                assert!(cell.baseline.is_none(), "{name} has a baseline");
+            } else {
+                main += 1;
                 let baseline = cell
                     .baseline
                     .unwrap_or_else(|| panic!("{name}: no baseline"));
@@ -544,11 +547,9 @@ mod tests {
                 );
                 assert_eq!(baseline.sha256, b4["sha256"].as_str().unwrap(), "{name}");
                 assert_eq!(baseline.length, 104_852, "{name}: length");
-            } else {
-                assert!(cell.baseline.is_none(), "{name} has a baseline");
             }
         }
-        assert_eq!(random_cells, 4);
+        assert_eq!((main, control), (12, 6));
     }
 
     #[test]

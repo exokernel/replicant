@@ -2,8 +2,9 @@
 # the generator to refresh. One cell of the RQ-1 offline-divergence grid
 # (ops-per-side x edit-locality).
 #
-# 2 replicas partition into singleton groups, each applies 1,000 text-splice
-# ops, then heal and measure convergence.
+# 2 replicas start from the B4 paper, 104,852 characters, partition into
+# singleton groups, each applies 1,000 text-splice ops, then heal and measure
+# convergence.
 #
 # locality = append: each op inserts at the current end -- the low-contention floor.
 name = "divergence-n2-append-1e3"
@@ -14,6 +15,11 @@ write_pattern = "concentrated"
 workload = "text_splice"
 locality = "append"
 ops_per_group = 1000
+
+[partition_heal.baseline]
+trace = "editing-traces/automerge-paper.json.gz"
+sha256 = "42c0ff1720c0cad77077e190e36135c9cab9f7bbc266351c0a7fe4981c6a1546"
+length = 104852
 
 [[partition_heal.groups]]
 nodes = [0]

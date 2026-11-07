@@ -231,8 +231,10 @@ goes. The position is drawn for each op, against the text length on the
 replica that issues it:
 
 - **`append`**: at the end (`pos = len`). This is the low-contention floor.
-- **`random_position`**: uniform in `[0, len]`. This exercises positional
-  access.
+- **`random_position`**: uniform in `[0, len]`. In the divergence grid, each
+  replica starts from the B4 paper, so the replicas share its characters and
+  their inserts can conflict on them. See
+  [`divergence-sweep.md`](divergence-sweep.md#the-shared-starting-document).
 - **`same_region`**: always `pos = 0`. Every op contests the same anchor. This
   is maximal contention.
 
@@ -254,7 +256,7 @@ Two mechanisms keep text workloads correct:
 
 ## The divergence grid
 
-The `divergence-n2-*` scenarios are a 12-cell grid: {1e2..1e5} ops per side ×
+The `divergence-n2-*` scenarios are a 12-cell grid, plus six control cells: {1e2..1e5} ops per side ×
 the three localities. Each cell models two replicas that edit offline and then
 merge. It is a partition-heal scenario with one node in each group, so
 `convergence_ms` is the heal-to-merge time.
@@ -264,6 +266,12 @@ A script generates the cells. Do not edit them by hand:
 - `just gen-scenarios` writes them.
 - `just check-scenarios` fails if a file differs from its generator output.
   `just ci` runs this check.
+
+The main-grid cells start from the B4 paper, and six `-empty-` control cells start
+from an empty document. The main-grid cells need the trace of the paper in `traces/`. Make it
+with `just gen-traces`. A scenario with a `[partition_heal.baseline]` table names
+the trace, its SHA-256 hash, and its length, and the orchestrator reads the file
+from `--data-dir`, which is `traces` by default.
 
 For what the grid measures and why, see
 [`divergence-sweep.md`](divergence-sweep.md).
