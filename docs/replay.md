@@ -5,6 +5,9 @@ and checks the final content. It runs the crdt-benchmarks suite (B1 to B4) and
 editing traces through every adapter. The same format can hold real traces and
 parameterized conflict sweeps.
 
+This file is the reference. For an explanation of the replay and its results, read
+[the guide](crdt-benchmarks-guide.md) first.
+
 ## Quick start
 
 ```sh
@@ -250,12 +253,12 @@ on B3.4.
 
 | Actors | Each new actor goes | B3.1 | B3.4 | B3.5 |
 |---|---|---|---|---|
-| Ascending, above the bootstrap actor (`0x73`, `0x80`, `0xa5`, `0xf0`) | At the end | 85 | 108 | 391 |
+| Ascending, above the bootstrap actor (`0x73`, `0x80`, `0xa5`, `0xf0`) | At the end | 85-86 | 108 | 387-392 |
 | Ascending, below it (`0x00`, `0x10`, `0x71`) | Just before it | 85-89 | 134-138 | 481-487 |
 | Ascending `0x00`, bootstrap actor moved to the lowest position | At the end | 86 | 108 | 392 |
 | Ascending `0xa5`, bootstrap actor moved to the highest position | Just before it | 86 | 135 | 485 |
 | Descending (`0xa5` or `0x00`) | Near the start | 106-107 | 142 | 501-503 |
-| Seeded, with the bootstrap actor at any of three positions | At random positions | 109-110 | 148-149 | 499-504 |
+| Seeded, with the bootstrap actor at any of three positions | At random positions | 109-110 | 147-149 | 499-504 |
 
 What this shows:
 
