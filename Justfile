@@ -94,6 +94,11 @@ run *args:
 replay *args:
     cargo run --release --bin replay -- {{ args }}
 
+# Replay workloads on containerized replicas, e.g. `just replay-docker 1 yrs --only b4`
+[group('docker')]
+replay-docker replicas crdt *args:
+    scripts/replay-docker.sh '{{ replicas }}' '{{ crdt }}' {{ args }}
+
 # Make the trace files in traces/ and the specs in workloads/ from a crdt-benchmarks clone
 [group('data')]
 gen-traces clone:

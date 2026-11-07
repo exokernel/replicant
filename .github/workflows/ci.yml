@@ -89,3 +89,11 @@ jobs:
           for crdt in $(just --evaluate crdts); do
             just smoke-docker scenarios/full-mesh-n2-text.toml "$crdt"
           done
+      # One containerized replica runs the workload for one replica, and reports
+      # the workload for two replicas as skipped. The replay checks the content.
+      - name: Run a replay on one containerized replica for each CRDT library
+        run: |
+          for crdt in $(just --evaluate crdts); do
+            just replay-docker 1 "$crdt" --spec workloads/smoke.toml \
+              --data-dir workloads/fixtures --trials 1
+          done
