@@ -43,7 +43,7 @@ use crate::replicas::{
     text_splice, verify_text_length, wait_for_nodes,
 };
 use crate::runner::RunResult;
-use crate::scenario::{Group, HealTopology, PartitionConfig, Workload};
+use crate::scenario::{Group, HealTopology, PartitionConfig, WriteKind};
 use crate::topology::{self, Connections, intra_group_edges};
 use crate::workload::{PositionStream, target_node};
 
@@ -74,7 +74,7 @@ pub async fn run_partition_heal(
     // an object on first use. Without this step, replicas that diverge from an
     // empty document each create their own `ROOT["text"]`, and the heal then
     // resolves a map-key conflict that discards one side's text completely.
-    if config.workload == Workload::TextSplice {
+    if config.workload == WriteKind::TextSplice {
         ensure_text_all(&mut clients, 0..n).await?;
     }
 
@@ -107,10 +107,10 @@ pub async fn run_partition_heal(
         for i in 0..config.ops_per_group {
             let target = target_node(&config.write_pattern, i, &group.nodes);
             match config.workload {
-                Workload::MapPut => {
-                    apply_write(&mut clients[target], Workload::MapPut, op_idx).await?;
+                WriteKind::MapPut => {
+                    apply_write(&mut clients[target], WriteKind::MapPut, op_idx).await?;
                 }
-                Workload::TextSplice => {
+                WriteKind::TextSplice => {
                     let pos = streams
                         .entry(target)
                         .or_insert_with(|| PositionStream::new(config, target, repetition))
@@ -183,7 +183,7 @@ pub async fn run_partition_heal(
     // so the final length must equal the total operation count. This is the
     // check that separates a real sequence interleave from a heal that
     // converged by discarding one replica's work.
-    if config.workload == Workload::TextSplice {
+    if config.workload == WriteKind::TextSplice {
         verify_text_length(&mut clients, &all_nodes, config.total_ops()).await?;
     }
 
@@ -528,7 +528,7 @@ mod tests {
             let config = PartitionConfig {
                 ops_per_group: 25,
                 write_pattern: WritePattern::Concentrated,
-                workload: Workload::TextSplice,
+                workload: WriteKind::TextSplice,
                 locality,
                 ..PartitionConfig::for_test(2, &[&[0], &[1]])
             };

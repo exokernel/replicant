@@ -101,7 +101,7 @@ pub enum WritePattern {
 /// field keeps its original behaviour.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Workload {
+pub enum WriteKind {
     /// Each write is a `MapPut` on the root map.
     #[default]
     MapPut,
@@ -136,7 +136,7 @@ pub struct TopologyConfig {
     pub write_pattern: WritePattern,
     /// Which CRDT operation each write applies. Defaults to `MapPut`.
     #[serde(default)]
-    pub workload: Workload,
+    pub workload: WriteKind,
     /// Total operations to apply.
     pub op_count: usize,
     /// Delay between one operation and the next, in milliseconds.
@@ -177,7 +177,7 @@ pub struct PartitionConfig {
     pub write_pattern: WritePattern,
     /// Which CRDT operation each write applies. Defaults to `MapPut`.
     #[serde(default)]
-    pub workload: Workload,
+    pub workload: WriteKind,
     /// Where each insert lands under the `TextSplice` workload. This is the
     /// anchor-contention axis of the sweep. Ignored by `MapPut`. Defaults to
     /// `Append`.
@@ -299,7 +299,7 @@ impl PartitionConfig {
                 .collect(),
             ops_per_group: 1,
             write_pattern: WritePattern::RoundRobin,
-            workload: Workload::MapPut,
+            workload: WriteKind::MapPut,
             locality: Locality::Append,
             heal_topology: HealTopology::FullMesh,
         }

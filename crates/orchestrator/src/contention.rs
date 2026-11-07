@@ -45,7 +45,7 @@
 //! sync schedule. [`simulate`] returns `None` instead of guessing.
 //! [`PositionStream`]'s length counter has the same limit.
 
-use crate::scenario::{PartitionConfig, Workload};
+use crate::scenario::{PartitionConfig, WriteKind};
 use crate::workload::PositionStream;
 
 /// The contention one cell's operation stream actually produces.
@@ -72,7 +72,7 @@ pub struct AchievedContention {
 /// non-text workloads, which have no anchors, and for non-singleton groups. See
 /// the Scope section of the module documentation.
 pub fn simulate(config: &PartitionConfig, repetition: usize) -> Option<AchievedContention> {
-    if config.workload != Workload::TextSplice || !all_singleton(config) {
+    if config.workload != WriteKind::TextSplice || !all_singleton(config) {
         return None;
     }
 
@@ -123,7 +123,7 @@ fn all_singleton(config: &PartitionConfig) -> bool {
 /// on small cells.
 #[cfg(test)]
 fn simulate_general(config: &PartitionConfig, repetition: usize) -> Option<AchievedContention> {
-    if config.workload != Workload::TextSplice || !all_singleton(config) {
+    if config.workload != WriteKind::TextSplice || !all_singleton(config) {
         return None;
     }
 
@@ -187,7 +187,7 @@ mod tests {
         PartitionConfig {
             ops_per_group: ops,
             write_pattern: WritePattern::Concentrated,
-            workload: Workload::TextSplice,
+            workload: WriteKind::TextSplice,
             locality,
             ..PartitionConfig::for_test(2, &[&[0], &[1]])
         }
@@ -278,13 +278,13 @@ mod tests {
     #[test]
     fn none_for_map_put_and_multi_node_groups() {
         let mut c = cell(100, Locality::Append);
-        c.workload = Workload::MapPut;
+        c.workload = WriteKind::MapPut;
         assert!(simulate(&c, 1).is_none(), "map_put has no anchors");
 
         let multi = PartitionConfig {
             ops_per_group: 100,
             write_pattern: WritePattern::Concentrated,
-            workload: Workload::TextSplice,
+            workload: WriteKind::TextSplice,
             ..PartitionConfig::for_test(4, &[&[0, 1], &[2, 3]])
         };
         assert!(

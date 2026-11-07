@@ -27,7 +27,7 @@ use replica::adapter::Crdt;
 use replica::server::{self, ReplicaState};
 
 use crate::event_log::{Event, EventLog, PeerStats};
-use crate::scenario::Workload;
+use crate::scenario::WriteKind;
 
 /// The gRPC client the orchestrator uses for one replica.
 pub type Client = ReplicaClient<Channel>;
@@ -385,10 +385,10 @@ pub async fn text_splice(client: &mut Client, obj: &str, pos: usize, insert: &st
 ///
 /// The divergence sweep uses this for `MapPut` only. It draws its text
 /// positions from the locality rule instead. See [`crate::partition_heal`].
-pub async fn apply_write(client: &mut Client, workload: Workload, seq: usize) -> Result<()> {
+pub async fn apply_write(client: &mut Client, workload: WriteKind, seq: usize) -> Result<()> {
     match workload {
-        Workload::MapPut => map_put(client, &format!("k{seq}"), &format!("v{seq}")).await,
-        Workload::TextSplice => text_splice(client, TEXT_OBJ, 0, "x").await,
+        WriteKind::MapPut => map_put(client, &format!("k{seq}"), &format!("v{seq}")).await,
+        WriteKind::TextSplice => text_splice(client, TEXT_OBJ, 0, "x").await,
     }
 }
 

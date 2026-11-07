@@ -14,7 +14,7 @@ use crate::replicas::{
     NodeSource, acquire_nodes, apply_write, check_tasks, connect_edges, ensure_text_all,
     record_stats, reset_all, verify_text_length, wait_for_nodes,
 };
-use crate::scenario::{TopologyConfig, Workload};
+use crate::scenario::{TopologyConfig, WriteKind};
 use crate::workload::target_node;
 
 /// What one completed trial measured.
@@ -69,7 +69,7 @@ pub async fn run(
     // Create the shared text object on every node before any edge exists. See
     // `ensure_text_all`. Without this each node creates its own object on first
     // write, and those creations then collide as a map-key conflict.
-    if config.workload == Workload::TextSplice {
+    if config.workload == WriteKind::TextSplice {
         ensure_text_all(&mut clients, 0..n).await?;
     }
 
@@ -122,7 +122,7 @@ pub async fn run(
 
     // Validity gate, outside the measured window: the converged text must hold
     // one character per operation, because operations are insert-only.
-    if config.workload == Workload::TextSplice {
+    if config.workload == WriteKind::TextSplice {
         verify_text_length(&mut clients, &all_nodes, config.op_count).await?;
     }
 

@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 
 use crate::contention::{self, AchievedContention};
 use crate::replicas::ReplicaEndpoint;
-use crate::scenario::{PartitionConfig, ScenarioBody, ScenarioFile, Workload};
+use crate::scenario::{PartitionConfig, ScenarioBody, ScenarioFile, WriteKind};
 use crate::workload::{DIVERGENCE_SEED_BASE, seed_for};
 
 /// Version of the emitted JSON shape. Raise it whenever the shape changes in a
@@ -146,7 +146,7 @@ fn scenario_entry(scenario: &ScenarioFile, path: Option<&PathBuf>, trials: usize
             );
             // Seeds only mean something for the text workload — `MapPut` keys
             // are derived from the op index, not from the PRNG.
-            if c.workload == Workload::TextSplice {
+            if c.workload == WriteKind::TextSplice {
                 let repetitions: Vec<Value> = (1..=trials)
                     .map(|rep| {
                         let by_node: Vec<Value> = c
@@ -267,7 +267,7 @@ mod tests {
             body: ScenarioBody::PartitionHeal(PartitionConfig {
                 ops_per_group: ops,
                 write_pattern: WritePattern::Concentrated,
-                workload: Workload::TextSplice,
+                workload: WriteKind::TextSplice,
                 locality,
                 ..PartitionConfig::for_test(2, &[&[0], &[1]])
             }),
