@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use common::{CrdtAdapter, Op, ScalarVal};
 use loro::{ExportMode, LoroDoc, LoroValue, VersionVector};
 
@@ -103,8 +103,21 @@ impl LoroAdapter {
     }
 }
 
-impl CrdtAdapter for LoroAdapter {
-    fn apply_op(&mut self, op: &Op) -> anyhow::Result<()> {
+/// Converts one Loro value to a [`ScalarVal`]. Fails on a value that the op
+/// model does not have.
+fn from_loro_value(value: &LoroValue) -> anyhow::Result<ScalarVal> {
+    Ok(match value {
+        LoroValue::String(s) => ScalarVal::Str(s.to_string()),
+        LoroValue::I64(n) => ScalarVal::Int(*n),
+        LoroValue::Bool(b) => ScalarVal::Bool(*b),
+        LoroValue::Binary(b) => ScalarVal::Bytes(b.to_vec()),
+        other => bail!("value {other:?} has no ScalarVal form"),
+    })
+}
+
+impl LoroAdapter {
+    /// Applies `op` in the implicit transaction. Does not commit.
+    fn apply_uncommitted(&mut self, op: &Op) -> anyhow::Result<()> {
         // Every arm converts its inputs before the first edit. An error after
         // an edit would leave half an op in the implicit transaction, and the
         // next commit would keep it.
@@ -169,6 +182,13 @@ impl CrdtAdapter for LoroAdapter {
                     .splice(*pos, *del_count, insert)?;
             }
         }
+        Ok(())
+    }
+}
+
+impl CrdtAdapter for LoroAdapter {
+    fn apply_op(&mut self, op: &Op) -> anyhow::Result<()> {
+        self.apply_uncommitted(op)?;
         // Commit the implicit transaction now. Then `op_duration_ms` includes
         // the commit cost, and the next `sync_generate` sees exactly this
         // change. Without this, Loro commits lazily at the next export or
@@ -325,6 +345,84 @@ impl CrdtAdapter for LoroAdapter {
         require_name(obj)?;
         Ok(self.doc.get_text(obj).len_unicode())
     }
+
+    /// Checks the name and authors no change. See `ensure_text`.
+    fn ensure_list(&mut self, obj: &str) -> anyhow::Result<()> {
+        require_name(obj)
+    }
+
+    /// Returns the text. An unused name is an empty text. See `text_length`.
+    fn read_text(&mut self, obj: &str) -> anyhow::Result<String> {
+        require_name(obj)?;
+        Ok(self.doc.get_text(obj).to_string())
+    }
+
+    /// Returns the list. An unused name is an empty list. See `text_length`.
+    fn read_list(&mut self, obj: &str) -> anyhow::Result<Vec<ScalarVal>> {
+        require_name(obj)?;
+        self.doc
+            .get_list(obj)
+            .to_vec()
+            .iter()
+            .map(from_loro_value)
+            .collect()
+    }
+
+    /// Returns the map. An unused name is an empty map. See `text_length`.
+    fn read_map(&mut self, obj: &str) -> anyhow::Result<BTreeMap<String, ScalarVal>> {
+        match self.doc.get_map(map_name(obj)).get_value() {
+            LoroValue::Map(values) => values
+                .iter()
+                .map(|(k, v)| Ok((k.to_string(), from_loro_value(v)?)))
+                .collect(),
+            other => bail!("read_map: unexpected value {other:?}"),
+        }
+    }
+
+    fn apply_txn(&mut self, ops: &[Op]) -> anyhow::Result<Vec<u8>> {
+        if ops.is_empty() {
+            return Ok(Vec::new());
+        }
+        let before = self.doc.oplog_vv();
+        for op in ops {
+            self.apply_uncommitted(op)?;
+        }
+        self.doc.commit();
+        self.doc
+            .export(ExportMode::updates(&before))
+            .context("exporting a Loro update")
+    }
+
+    fn apply_updates(&mut self, updates: &[Vec<u8>]) -> anyhow::Result<()> {
+        // One update takes `import`. More take the batch path, which merges
+        // them before it updates the document state.
+        match updates {
+            [] => Ok(()),
+            [one] => self.doc.import(one).map(drop),
+            many => self.doc.import_batch(many).map(drop),
+        }
+        .context("importing Loro updates")
+    }
+
+    /// Returns a snapshot: full history plus the materialized state.
+    fn encode(&mut self) -> Vec<u8> {
+        // See `doc_size_bytes` for why an error here is not fatal to the caller.
+        match self.doc.export(ExportMode::Snapshot) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::error!(error = %e, "Loro snapshot export failed");
+                Vec::new()
+            }
+        }
+    }
+
+    fn load(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
+        *self = Self::new();
+        self.doc
+            .import(bytes)
+            .context("importing a Loro snapshot")?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -334,6 +432,41 @@ mod tests {
     use common::{CrdtAdapter, Op};
 
     // ── Universal conformance (see adapter::conformance) ───────────────────
+
+    #[test]
+    fn loro_reads_return_the_written_content() {
+        reads_return_the_written_content::<LoroAdapter>();
+    }
+
+    #[test]
+    fn loro_txn_updates_carry_inserts_and_deletes() {
+        txn_updates_carry_inserts_and_deletes::<LoroAdapter>();
+    }
+
+    #[test]
+    fn loro_txn_applies_ops_in_sequence() {
+        txn_applies_ops_in_sequence::<LoroAdapter>();
+    }
+
+    #[test]
+    fn loro_txn_update_excludes_received_ops() {
+        txn_update_excludes_received_ops::<LoroAdapter>();
+    }
+
+    #[test]
+    fn loro_update_batch_equals_one_by_one() {
+        update_batch_equals_one_by_one::<LoroAdapter>();
+    }
+
+    #[test]
+    fn loro_encode_and_load_round_trip() {
+        encode_and_load_round_trip::<LoroAdapter>();
+    }
+
+    #[test]
+    fn loro_partitioned_list_inserts_merge_after_ensure_list() {
+        partitioned_list_inserts_merge_after_ensure_list::<LoroAdapter>();
+    }
 
     #[test]
     fn loro_identical_ops_yield_equal_fingerprints() {

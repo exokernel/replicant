@@ -15,6 +15,12 @@ pub use adapter::CrdtAdapter;
 pub use node_id::NodeId;
 pub use op::{Op, ScalarVal};
 
+/// The largest gRPC message that a replica and its clients accept, in bytes.
+///
+/// The tonic default is 4 MiB. A replay reads and encodes whole documents, and
+/// these can be much larger. B4x100 has more than 10 MB of text.
+pub const MAX_RPC_BYTES: usize = 1 << 30;
+
 /// Generated protobuf types for the `replicant.v1` package.
 pub mod proto {
     tonic::include_proto!("replicant.v1");

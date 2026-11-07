@@ -1,8 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Context, bail};
 use automerge::{
-    ActorId, AutoCommit, ObjId, ObjType, ROOT, ReadDoc, ScalarValue as AmScalarValue, Value,
+    ActorId, AutoCommit, ObjId, ObjType, ROOT, ReadDoc, ScalarValue as AmScalarValue,
+    ScalarValueRef, Value, ValueRef,
     sync::{self, SyncDoc},
     transaction::{CommitOptions, Transactable},
 };
@@ -122,8 +123,9 @@ impl AutomergeAdapter {
     }
 }
 
-impl CrdtAdapter for AutomergeAdapter {
-    fn apply_op(&mut self, op: &Op) -> anyhow::Result<()> {
+impl AutomergeAdapter {
+    /// Applies `op` in the open transaction. Does not commit.
+    fn apply_uncommitted(&mut self, op: &Op) -> anyhow::Result<()> {
         match op {
             Op::MapPut { obj, key, value } => {
                 let id = self.resolve_obj(obj, ObjType::Map)?;
@@ -163,6 +165,66 @@ impl CrdtAdapter for AutomergeAdapter {
                 self.doc.splice_text(id, *pos, del_count, insert)?;
             }
         }
+        Ok(())
+    }
+
+    /// Creates the object at `ROOT[obj]` with a deterministic first change.
+    /// See [`CrdtAdapter::ensure_text`].
+    fn ensure_object(&mut self, obj: &str, obj_type: ObjType) -> anyhow::Result<()> {
+        if obj.is_empty() {
+            bail!("ensure_object: object name must not be empty (ROOT is a map)");
+        }
+        match self.lookup_obj(obj) {
+            Some((id, t)) if t == obj_type => {
+                // Already present: bootstrapped earlier, or received via sync.
+                self.objects.insert(obj.to_owned(), id);
+                return Ok(());
+            }
+            Some((_, t)) => bail!("ensure_object: '{obj}' exists with type {t:?}"),
+            None => {}
+        }
+        // The bootstrap change is deterministic only on an empty document. A
+        // prior change would go into `deps`. Two replicas that author
+        // different deps under the same (actor, seq) corrupt the DAG instead
+        // of deduplicating.
+        if !self.doc.get_heads().is_empty() {
+            bail!(
+                "ensure_object: document already has changes; bootstrap must be the first change"
+            );
+        }
+        let own_actor = self.doc.get_actor().clone();
+        self.doc.set_actor(ActorId::from(BOOTSTRAP_ACTOR));
+        let id = self
+            .doc
+            .put_object(ROOT, obj, obj_type)
+            .with_context(|| format!("bootstrapping object '{obj}'"))?;
+        // Time 0 keeps the change bytes identical across replicas and runs.
+        // The default commit also uses 0, but determinism is the purpose of
+        // this change, so set it explicitly.
+        self.doc.commit_with(CommitOptions::default().with_time(0));
+        self.doc.set_actor(own_actor);
+        self.objects.insert(obj.to_owned(), id);
+        Ok(())
+    }
+}
+
+/// Converts one Automerge value to a [`ScalarVal`]. Fails on an object or on a
+/// scalar type that the op model does not have.
+fn from_am_value(value: ValueRef<'_>) -> anyhow::Result<ScalarVal> {
+    match value {
+        ValueRef::Scalar(ScalarValueRef::Str(s)) => Ok(ScalarVal::Str(s.to_string())),
+        ValueRef::Scalar(ScalarValueRef::Int(n)) => Ok(ScalarVal::Int(n)),
+        ValueRef::Scalar(ScalarValueRef::Uint(n)) => Ok(ScalarVal::Uint(n)),
+        ValueRef::Scalar(ScalarValueRef::Boolean(b)) => Ok(ScalarVal::Bool(b)),
+        ValueRef::Scalar(ScalarValueRef::Bytes(b)) => Ok(ScalarVal::Bytes(b.to_vec())),
+        ValueRef::Scalar(other) => bail!("value {other:?} has no ScalarVal form"),
+        ValueRef::Object(t) => bail!("value is a nested {t:?}, not a scalar"),
+    }
+}
+
+impl CrdtAdapter for AutomergeAdapter {
+    fn apply_op(&mut self, op: &Op) -> anyhow::Result<()> {
+        self.apply_uncommitted(op)?;
         // Commit the open transaction now. Then `op_duration_ms` includes the
         // commit cost, and the next `sync_generate` sees exactly this change.
         self.doc.commit();
@@ -221,38 +283,7 @@ impl CrdtAdapter for AutomergeAdapter {
     }
 
     fn ensure_text(&mut self, obj: &str) -> anyhow::Result<()> {
-        if obj.is_empty() {
-            bail!("ensure_text: object name must not be empty (ROOT is a map)");
-        }
-        match self.lookup_obj(obj) {
-            Some((id, ObjType::Text)) => {
-                // Already present: bootstrapped earlier, or received via sync.
-                self.objects.insert(obj.to_owned(), id);
-                return Ok(());
-            }
-            Some((_, t)) => bail!("ensure_text: '{obj}' exists with type {t:?}"),
-            None => {}
-        }
-        // The bootstrap change is deterministic only on an empty document. A
-        // prior change would go into `deps`. Two replicas that author
-        // different deps under the same (actor, seq) corrupt the DAG instead
-        // of deduplicating.
-        if !self.doc.get_heads().is_empty() {
-            bail!("ensure_text: document already has changes; bootstrap must be the first change");
-        }
-        let own_actor = self.doc.get_actor().clone();
-        self.doc.set_actor(ActorId::from(BOOTSTRAP_ACTOR));
-        let id = self
-            .doc
-            .put_object(ROOT, obj, ObjType::Text)
-            .with_context(|| format!("bootstrapping text object '{obj}'"))?;
-        // Time 0 keeps the change bytes identical across replicas and runs.
-        // The default commit also uses 0, but determinism is the purpose of
-        // this change, so set it explicitly.
-        self.doc.commit_with(CommitOptions::default().with_time(0));
-        self.doc.set_actor(own_actor);
-        self.objects.insert(obj.to_owned(), id);
-        Ok(())
+        self.ensure_object(obj, ObjType::Text)
     }
 
     fn text_length(&mut self, obj: &str) -> anyhow::Result<usize> {
@@ -267,6 +298,85 @@ impl CrdtAdapter for AutomergeAdapter {
             None => bail!("text_length: no object named '{obj}'"),
         }
     }
+
+    fn ensure_list(&mut self, obj: &str) -> anyhow::Result<()> {
+        self.ensure_object(obj, ObjType::List)
+    }
+
+    fn read_text(&mut self, obj: &str) -> anyhow::Result<String> {
+        match self.lookup_obj(obj) {
+            Some((id, ObjType::Text)) => self
+                .doc
+                .text(&id)
+                .with_context(|| format!("reading text object '{obj}'")),
+            Some((_, t)) => bail!("read_text: '{obj}' exists with type {t:?}, not Text"),
+            None => bail!("read_text: no object named '{obj}'"),
+        }
+    }
+
+    fn read_list(&mut self, obj: &str) -> anyhow::Result<Vec<ScalarVal>> {
+        match self.lookup_obj(obj) {
+            Some((id, ObjType::List)) => self
+                .doc
+                .list_range(&id, ..)
+                .map(|item| from_am_value(item.value))
+                .collect(),
+            Some((_, t)) => bail!("read_list: '{obj}' exists with type {t:?}, not List"),
+            None => bail!("read_list: no object named '{obj}'"),
+        }
+    }
+
+    fn read_map(&mut self, obj: &str) -> anyhow::Result<BTreeMap<String, ScalarVal>> {
+        let id = if obj.is_empty() {
+            ROOT
+        } else {
+            match self.lookup_obj(obj) {
+                Some((id, ObjType::Map)) => id,
+                Some((_, t)) => bail!("read_map: '{obj}' exists with type {t:?}, not Map"),
+                None => bail!("read_map: no object named '{obj}'"),
+            }
+        };
+        self.doc
+            .map_range(&id, ..)
+            .map(|item| Ok((item.key.to_string(), from_am_value(item.value)?)))
+            .collect()
+    }
+
+    fn apply_txn(&mut self, ops: &[Op]) -> anyhow::Result<Vec<u8>> {
+        if ops.is_empty() {
+            return Ok(Vec::new());
+        }
+        for op in ops {
+            self.apply_uncommitted(op)?;
+        }
+        self.doc.commit();
+        // The last local change holds these ops and no others, so the update
+        // does not repeat changes that this replica received from a peer.
+        self.doc
+            .get_last_local_change()
+            .map(|change| change.raw_bytes().to_vec())
+            .context("apply_txn: no local change after a commit")
+    }
+
+    fn apply_updates(&mut self, updates: &[Vec<u8>]) -> anyhow::Result<()> {
+        for update in updates {
+            self.doc
+                .load_incremental(update)
+                .context("applying an Automerge update")?;
+        }
+        Ok(())
+    }
+
+    fn encode(&mut self) -> Vec<u8> {
+        self.doc.save()
+    }
+
+    fn load(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
+        self.doc = AutoCommit::load(bytes).context("loading an Automerge document")?;
+        self.objects.clear();
+        self.sync_states.clear();
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -274,6 +384,41 @@ mod tests {
     use super::AutomergeAdapter;
     use crate::adapter::conformance::*;
     use common::CrdtAdapter;
+
+    #[test]
+    fn automerge_reads_return_the_written_content() {
+        reads_return_the_written_content::<AutomergeAdapter>();
+    }
+
+    #[test]
+    fn automerge_txn_updates_carry_inserts_and_deletes() {
+        txn_updates_carry_inserts_and_deletes::<AutomergeAdapter>();
+    }
+
+    #[test]
+    fn automerge_txn_applies_ops_in_sequence() {
+        txn_applies_ops_in_sequence::<AutomergeAdapter>();
+    }
+
+    #[test]
+    fn automerge_txn_update_excludes_received_ops() {
+        txn_update_excludes_received_ops::<AutomergeAdapter>();
+    }
+
+    #[test]
+    fn automerge_update_batch_equals_one_by_one() {
+        update_batch_equals_one_by_one::<AutomergeAdapter>();
+    }
+
+    #[test]
+    fn automerge_encode_and_load_round_trip() {
+        encode_and_load_round_trip::<AutomergeAdapter>();
+    }
+
+    #[test]
+    fn automerge_partitioned_list_inserts_merge_after_ensure_list() {
+        partitioned_list_inserts_merge_after_ensure_list::<AutomergeAdapter>();
+    }
 
     #[test]
     fn automerge_identical_ops_yield_equal_fingerprints() {

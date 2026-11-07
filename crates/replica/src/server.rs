@@ -25,7 +25,7 @@ use common::proto::{
     replica_server::{Replica, ReplicaServer},
     sync_server::SyncServer,
 };
-use common::{CrdtAdapter, Op};
+use common::{CrdtAdapter, MAX_RPC_BYTES, Op};
 
 use crate::metrics::Metrics;
 
@@ -145,6 +145,16 @@ impl ReplicaState {
         Ok(t0.elapsed().as_secs_f64() * 1000.0)
     }
 
+    /// Runs `f` on the adapter. Returns its result and the time in the adapter
+    /// in nanoseconds. The timer starts after the lock is acquired, as in
+    /// [`Self::apply_op_timed`].
+    fn timed<T>(&self, f: impl FnOnce(&mut dyn CrdtAdapter) -> T) -> (T, u64) {
+        let mut adapter = self.adapter();
+        let t0 = Instant::now();
+        let out = f(adapter.as_mut());
+        (out, t0.elapsed().as_nanos() as u64)
+    }
+
     fn get_heads(&self) -> Vec<Vec<u8>> {
         self.adapter().get_heads()
     }
@@ -232,10 +242,9 @@ impl ReplicaState {
 
     /// Samples the document size and records it on the gauge.
     fn record_doc_size(&self, size_bytes: u64) {
-        self.metrics.doc_size_bytes.record(
-            size_bytes,
-            std::slice::from_ref(&self.actor_attr),
-        );
+        self.metrics
+            .doc_size_bytes
+            .record(size_bytes, std::slice::from_ref(&self.actor_attr));
     }
 
     fn record_sync_tx(&self, peer_id: &NodeId) {
@@ -448,7 +457,11 @@ impl ReplicaState {
 pub fn router(state: Arc<ReplicaState>) -> Router {
     let service = ReplicaService { state };
     Server::builder()
-        .add_service(ReplicaServer::new(service.clone()))
+        .add_service(
+            ReplicaServer::new(service.clone())
+                .max_decoding_message_size(MAX_RPC_BYTES)
+                .max_encoding_message_size(MAX_RPC_BYTES),
+        )
         .add_service(SyncServer::new(service))
 }
 
@@ -593,6 +606,106 @@ impl Replica for ReplicaService {
         self.state.kick_sync(&peer_ids);
         Ok(Response::new(proto::Empty {}))
     }
+
+    async fn ensure_list(
+        &self,
+        request: Request<proto::ObjRef>,
+    ) -> Result<Response<proto::Empty>, Status> {
+        let obj = request.into_inner().obj;
+        let (result, _) = self.state.timed(|a| a.ensure_list(&obj));
+        result.map_err(internal)?;
+        Ok(Response::new(proto::Empty {}))
+    }
+
+    async fn read_text(
+        &self,
+        request: Request<proto::ObjRef>,
+    ) -> Result<Response<proto::ReadTextResponse>, Status> {
+        let obj = request.into_inner().obj;
+        let (text, adapter_ns) = self.state.timed(|a| a.read_text(&obj));
+        Ok(Response::new(proto::ReadTextResponse {
+            text: text.map_err(internal)?,
+            adapter_ns,
+        }))
+    }
+
+    async fn read_list(
+        &self,
+        request: Request<proto::ObjRef>,
+    ) -> Result<Response<proto::ReadListResponse>, Status> {
+        let obj = request.into_inner().obj;
+        let (values, adapter_ns) = self.state.timed(|a| a.read_list(&obj));
+        let values = values.map_err(internal)?;
+        Ok(Response::new(proto::ReadListResponse {
+            values: values.iter().map(Into::into).collect(),
+            adapter_ns,
+        }))
+    }
+
+    async fn read_map(
+        &self,
+        request: Request<proto::ObjRef>,
+    ) -> Result<Response<proto::ReadMapResponse>, Status> {
+        let obj = request.into_inner().obj;
+        let (values, adapter_ns) = self.state.timed(|a| a.read_map(&obj));
+        let values = values.map_err(internal)?;
+        Ok(Response::new(proto::ReadMapResponse {
+            values: values.iter().map(|(k, v)| (k.clone(), v.into())).collect(),
+            adapter_ns,
+        }))
+    }
+
+    async fn apply_txn(
+        &self,
+        request: Request<proto::TxnRequest>,
+    ) -> Result<Response<proto::TxnResponse>, Status> {
+        let ops = request
+            .into_inner()
+            .ops
+            .into_iter()
+            .map(Op::try_from)
+            .collect::<anyhow::Result<Vec<_>>>()
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let (update, adapter_ns) = self.state.timed(|a| a.apply_txn(&ops));
+        let update = update.map_err(internal)?;
+        self.state
+            .record_op_duration("apply_txn", adapter_ns as f64 / 1e6);
+        self.state.flush_to_peers();
+        Ok(Response::new(proto::TxnResponse { update, adapter_ns }))
+    }
+
+    async fn apply_updates(
+        &self,
+        request: Request<proto::UpdatesRequest>,
+    ) -> Result<Response<proto::TimedResponse>, Status> {
+        let updates = request.into_inner().updates;
+        let (result, adapter_ns) = self.state.timed(|a| a.apply_updates(&updates));
+        result.map_err(internal)?;
+        Ok(Response::new(proto::TimedResponse { adapter_ns }))
+    }
+
+    async fn encode(
+        &self,
+        _: Request<proto::Empty>,
+    ) -> Result<Response<proto::EncodeResponse>, Status> {
+        let (state, adapter_ns) = self.state.timed(|a| a.encode());
+        Ok(Response::new(proto::EncodeResponse { state, adapter_ns }))
+    }
+
+    async fn load(
+        &self,
+        request: Request<proto::LoadRequest>,
+    ) -> Result<Response<proto::TimedResponse>, Status> {
+        let state = request.into_inner().state;
+        let (result, adapter_ns) = self.state.timed(|a| a.load(&state));
+        result.map_err(internal)?;
+        Ok(Response::new(proto::TimedResponse { adapter_ns }))
+    }
+}
+
+/// Converts an adapter error to a gRPC status.
+fn internal(e: anyhow::Error) -> Status {
+    Status::internal(format!("{e:#}"))
 }
 
 /// Converts a list of peer IDs from the wire. If any ID is bad, the whole

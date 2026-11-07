@@ -72,6 +72,20 @@ impl TryFrom<proto::ScalarValue> for ScalarVal {
     }
 }
 
+impl From<&ScalarVal> for proto::ScalarValue {
+    fn from(v: &ScalarVal) -> Self {
+        use proto::scalar_value::Value;
+        let value = match v {
+            ScalarVal::Str(s) => Value::StrVal(s.clone()),
+            ScalarVal::Uint(n) => Value::UintVal(*n),
+            ScalarVal::Int(n) => Value::IntVal(*n),
+            ScalarVal::Bool(b) => Value::BoolVal(*b),
+            ScalarVal::Bytes(b) => Value::BytesVal(b.clone()),
+        };
+        Self { value: Some(value) }
+    }
+}
+
 // ── Op model ───────────────────────────────────────────────────────────────
 
 /// A CRDT document operation.
@@ -166,6 +180,64 @@ impl Op {
 /// 64 bits. A truncated index would address the wrong element.
 fn to_index(v: u64, field: &str) -> anyhow::Result<usize> {
     usize::try_from(v).with_context(|| format!("{field} ({v}) does not fit in usize"))
+}
+
+/// Converts a `usize` count to the proto's `uint32` delete count.
+fn to_del_count(n: usize) -> anyhow::Result<u32> {
+    u32::try_from(n).with_context(|| format!("delete count {n} does not fit in a proto uint32"))
+}
+
+impl TryFrom<&Op> for proto::OpRequest {
+    type Error = anyhow::Error;
+
+    /// Fails if a delete count does not fit in the proto's `uint32`.
+    fn try_from(op: &Op) -> anyhow::Result<Self> {
+        use proto::op_request::Op as P;
+
+        let op = match op {
+            Op::MapPut { obj, key, value } => P::MapPut(proto::MapPut {
+                obj: obj.clone(),
+                key: key.clone(),
+                value: Some(value.into()),
+            }),
+            Op::MapDelete { obj, key } => P::MapDelete(proto::MapDelete {
+                obj: obj.clone(),
+                key: key.clone(),
+            }),
+            Op::ListInsert { obj, index, value } => P::ListInsert(proto::ListInsert {
+                obj: obj.clone(),
+                index: *index as u64,
+                value: Some(value.into()),
+            }),
+            Op::ListDelete { obj, index } => P::ListDelete(proto::ListDelete {
+                obj: obj.clone(),
+                index: *index as u64,
+            }),
+            Op::ListSplice {
+                obj,
+                pos,
+                del_count,
+                values,
+            } => P::ListSplice(proto::ListSplice {
+                obj: obj.clone(),
+                pos: *pos as u64,
+                del_count: to_del_count(*del_count)?,
+                values: values.iter().map(Into::into).collect(),
+            }),
+            Op::TextSplice {
+                obj,
+                pos,
+                del_count,
+                insert,
+            } => P::TextSplice(proto::TextSplice {
+                obj: obj.clone(),
+                pos: *pos as u64,
+                del_count: to_del_count(*del_count)?,
+                insert: insert.clone(),
+            }),
+        };
+        Ok(Self { op: Some(op) })
+    }
 }
 
 impl TryFrom<proto::OpRequest> for Op {
@@ -376,6 +448,57 @@ mod tests {
             Op::try_from(req).unwrap(),
             Op::TextSplice { pos: 5, del_count: 0, insert, .. } if insert == "hello"
         ));
+    }
+
+    #[test]
+    fn every_op_round_trips_through_the_proto() {
+        let cases = [
+            Op::MapPut {
+                obj: "m".into(),
+                key: "k".into(),
+                value: ScalarVal::Int(-1),
+            },
+            Op::MapDelete {
+                obj: "m".into(),
+                key: "k".into(),
+            },
+            Op::ListInsert {
+                obj: "l".into(),
+                index: 1,
+                value: ScalarVal::Str("v".into()),
+            },
+            Op::ListDelete {
+                obj: "l".into(),
+                index: 2,
+            },
+            Op::ListSplice {
+                obj: "l".into(),
+                pos: 3,
+                del_count: 4,
+                values: vec![ScalarVal::Bool(true), ScalarVal::Bytes(vec![1])],
+            },
+            Op::TextSplice {
+                obj: "t".into(),
+                pos: 5,
+                del_count: 6,
+                insert: "x".into(),
+            },
+        ];
+        for op in cases {
+            let back = Op::try_from(OpRequest::try_from(&op).unwrap()).unwrap();
+            assert_eq!(format!("{op:?}"), format!("{back:?}"));
+        }
+    }
+
+    #[test]
+    fn delete_count_above_u32_is_rejected_when_encoding() {
+        let op = Op::TextSplice {
+            obj: "t".into(),
+            pos: 0,
+            del_count: u32::MAX as usize + 1,
+            insert: String::new(),
+        };
+        assert!(OpRequest::try_from(&op).is_err());
     }
 
     #[test]

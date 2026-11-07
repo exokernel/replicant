@@ -1,10 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Context, bail};
 use common::{CrdtAdapter, Op, ScalarVal};
 use yrs::{
     Any, Array, ArrayRef, Doc, GetString, In, Map, MapRef, Number, ReadTxn, Root, RootRef,
-    StateVector, Text, TextRef, Transact, TransactionMut, Update, branch::Branch, types::TypeRef,
+    StateVector, Text, TextRef, Transact, TransactionMut, Update,
+    branch::Branch,
+    types::{ToJson, TypeRef},
     updates::decoder::Decode,
 };
 
@@ -33,6 +35,19 @@ fn get_or_create<S: RootRef>(txn: &mut TransactionMut, name: &str) -> anyhow::Re
         );
     }
     Ok(root)
+}
+
+/// Returns the root shared type `S` named `name`. Fails if it does not exist or
+/// has a different type.
+///
+/// A root type that arrives only through an update has no known type until a
+/// local call names one. `get_or_create` sets the type. Thus a read needs a
+/// write transaction, also on a document that came from `load`.
+fn existing<S: RootRef>(txn: &mut TransactionMut, name: &str, what: &str) -> anyhow::Result<S> {
+    if Root::<S>::new(name).get(txn).is_none() {
+        bail!("{what}: no object named '{name}'");
+    }
+    get_or_create(txn, name)
 }
 
 /// Converts an `Op` index or count to the `u32` that Yrs uses.
@@ -114,43 +129,41 @@ impl YrsAdapter {
         })
     }
 
-    /// Encodes the full document: every block and the delete set.
-    ///
-    /// `state_fingerprint` and `doc_size_bytes` both use this encoding.
+    /// Encodes the full document in the v1 format: every block and the delete
+    /// set. `state_fingerprint` uses this encoding.
     fn full_update_bytes(&self) -> Vec<u8> {
         let txn = self.doc.transact();
         txn.encode_state_as_update_v1(&StateVector::default())
     }
-}
 
-impl CrdtAdapter for YrsAdapter {
-    fn apply_op(&mut self, op: &Op) -> anyhow::Result<()> {
-        // Convert and check every input before the first edit. `txn` commits
-        // when it drops, also on an error return, so an error after an edit
-        // would leave half an op in the document.
-        let mut txn = self.doc.transact_mut();
+    /// Applies `op` in `txn`.
+    ///
+    /// Convert and check every input before the first edit. `txn` commits when
+    /// it drops, also on an error return, so an error after an edit would leave
+    /// half an op in the document.
+    fn apply_in(txn: &mut TransactionMut, op: &Op) -> anyhow::Result<()> {
         match op {
             Op::MapPut { obj, key, value } => {
                 let value = Self::to_any(value)?;
-                let map: MapRef = get_or_create(&mut txn, map_name(obj))?;
-                map.insert(&mut txn, key.as_str(), In::Any(value));
+                let map: MapRef = get_or_create(txn, map_name(obj))?;
+                map.insert(txn, key.as_str(), In::Any(value));
             }
             Op::MapDelete { obj, key } => {
-                let map: MapRef = get_or_create(&mut txn, map_name(obj))?;
-                map.remove(&mut txn, key);
+                let map: MapRef = get_or_create(txn, map_name(obj))?;
+                map.remove(txn, key);
             }
             Op::ListInsert { obj, index, value } => {
                 require_name(obj)?;
                 let index = to_u32(*index)?;
                 let value = Self::to_any(value)?;
-                let arr: ArrayRef = get_or_create(&mut txn, obj)?;
-                arr.insert(&mut txn, index, In::Any(value));
+                let arr: ArrayRef = get_or_create(txn, obj)?;
+                arr.insert(txn, index, In::Any(value));
             }
             Op::ListDelete { obj, index } => {
                 require_name(obj)?;
                 let index = to_u32(*index)?;
-                let arr: ArrayRef = get_or_create(&mut txn, obj)?;
-                arr.remove(&mut txn, index);
+                let arr: ArrayRef = get_or_create(txn, obj)?;
+                arr.remove(txn, index);
             }
             Op::ListSplice {
                 obj,
@@ -160,19 +173,18 @@ impl CrdtAdapter for YrsAdapter {
             } => {
                 require_name(obj)?;
                 let del_count = to_u32(*del_count)?;
-                let inserts = values
+                let values = values
                     .iter()
-                    .enumerate()
-                    .map(|(i, v)| Ok((to_u32(*pos + i)?, Self::to_any(v)?)))
+                    .map(Self::to_any)
                     .collect::<anyhow::Result<Vec<_>>>()?;
                 let pos = to_u32(*pos)?;
-                let arr: ArrayRef = get_or_create(&mut txn, obj)?;
+                let arr: ArrayRef = get_or_create(txn, obj)?;
                 if del_count > 0 {
-                    arr.remove_range(&mut txn, pos, del_count);
+                    arr.remove_range(txn, pos, del_count);
                 }
-                for (index, value) in inserts {
-                    arr.insert(&mut txn, index, In::Any(value));
-                }
+                // One range insert, as Yjs does. One insert per value costs
+                // more time for the same document.
+                arr.insert_range(txn, pos, values);
             }
             Op::TextSplice {
                 obj,
@@ -188,17 +200,36 @@ impl CrdtAdapter for YrsAdapter {
                 require_name(obj)?;
                 let pos = to_u32(*pos)?;
                 let del_count = to_u32(*del_count)?;
-                let text: TextRef = get_or_create(&mut txn, obj)?;
+                let text: TextRef = get_or_create(txn, obj)?;
                 if del_count > 0 {
-                    text.remove_range(&mut txn, pos, del_count);
+                    text.remove_range(txn, pos, del_count);
                 }
                 if !insert.is_empty() {
-                    text.insert(&mut txn, pos, insert);
+                    text.insert(txn, pos, insert);
                 }
             }
         }
-        // `txn` commits when it drops. There is no separate commit call.
         Ok(())
+    }
+}
+
+/// Converts one Yrs value to a [`ScalarVal`]. Fails on a value that the op
+/// model does not have.
+fn from_any(value: &Any) -> anyhow::Result<ScalarVal> {
+    Ok(match value {
+        Any::String(s) => ScalarVal::Str(s.to_string()),
+        Any::Bool(b) => ScalarVal::Bool(*b),
+        Any::Number(Number::Int(n)) => ScalarVal::Int(*n),
+        Any::Buffer(b) => ScalarVal::Bytes(b.to_vec()),
+        other => bail!("value {other:?} has no ScalarVal form"),
+    })
+}
+
+impl CrdtAdapter for YrsAdapter {
+    fn apply_op(&mut self, op: &Op) -> anyhow::Result<()> {
+        let mut txn = self.doc.transact_mut();
+        Self::apply_in(&mut txn, op)
+        // `txn` commits when it drops. There is no separate commit call.
     }
 
     fn get_heads(&mut self) -> Vec<Vec<u8>> {
@@ -237,9 +268,8 @@ impl CrdtAdapter for YrsAdapter {
 
     fn doc_size_bytes(&mut self) -> usize {
         // Yrs has no separate save format. The full document encoding is an
-        // update from the empty state vector. These are the same bytes as
-        // `state_fingerprint`.
-        self.full_update_bytes().len()
+        // update from the empty state vector.
+        self.encode().len()
     }
 
     fn sync_generate(&mut self, peer: &str) -> Option<Vec<u8>> {
@@ -321,6 +351,76 @@ impl CrdtAdapter for YrsAdapter {
         }
         Ok(text.get_string(&txn).chars().count())
     }
+
+    /// Does a local lookup. Authors no change. See `ensure_text`.
+    fn ensure_list(&mut self, obj: &str) -> anyhow::Result<()> {
+        require_name(obj)?;
+        let mut txn = self.doc.transact_mut();
+        get_or_create::<ArrayRef>(&mut txn, obj)?;
+        Ok(())
+    }
+
+    fn read_text(&mut self, obj: &str) -> anyhow::Result<String> {
+        let mut txn = self.doc.transact_mut();
+        let text: TextRef = existing(&mut txn, obj, "read_text")?;
+        Ok(text.get_string(&txn))
+    }
+
+    fn read_list(&mut self, obj: &str) -> anyhow::Result<Vec<ScalarVal>> {
+        let mut txn = self.doc.transact_mut();
+        let arr: ArrayRef = existing(&mut txn, obj, "read_list")?;
+        match arr.to_json(&txn) {
+            Any::Array(values) => values.iter().map(from_any).collect(),
+            other => bail!("read_list: unexpected JSON form {other:?}"),
+        }
+    }
+
+    fn read_map(&mut self, obj: &str) -> anyhow::Result<BTreeMap<String, ScalarVal>> {
+        let mut txn = self.doc.transact_mut();
+        let map: MapRef = existing(&mut txn, map_name(obj), "read_map")?;
+        match map.to_json(&txn) {
+            Any::Map(values) => values
+                .iter()
+                .map(|(k, v)| Ok((k.clone(), from_any(v)?)))
+                .collect(),
+            other => bail!("read_map: unexpected JSON form {other:?}"),
+        }
+    }
+
+    fn apply_txn(&mut self, ops: &[Op]) -> anyhow::Result<Vec<u8>> {
+        if ops.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut txn = self.doc.transact_mut();
+        for op in ops {
+            Self::apply_in(&mut txn, op)?;
+        }
+        // Commit first. The commit squashes the delete set, and the update
+        // must hold the same bytes that an update observer would see.
+        txn.commit();
+        Ok(txn.encode_update_v2())
+    }
+
+    fn apply_updates(&mut self, updates: &[Vec<u8>]) -> anyhow::Result<()> {
+        let mut txn = self.doc.transact_mut();
+        for update in updates {
+            let update = Update::decode_v2(update).context("decoding a Yrs update")?;
+            txn.apply_update(update).context("applying a Yrs update")?;
+        }
+        Ok(())
+    }
+
+    /// Returns the v2 encoding. Yjs and ywasm benchmarks use this encoding too.
+    /// The v1 encoding of the same B4 document is 2.4 times larger.
+    fn encode(&mut self) -> Vec<u8> {
+        let txn = self.doc.transact();
+        txn.encode_state_as_update_v2(&StateVector::default())
+    }
+
+    fn load(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
+        *self = Self::new();
+        self.apply_updates(std::slice::from_ref(&bytes.to_vec()))
+    }
 }
 
 #[cfg(test)]
@@ -330,6 +430,41 @@ mod tests {
     use common::{CrdtAdapter, Op};
 
     // ── Universal conformance (see adapter::conformance) ───────────────────
+
+    #[test]
+    fn yrs_reads_return_the_written_content() {
+        reads_return_the_written_content::<YrsAdapter>();
+    }
+
+    #[test]
+    fn yrs_txn_updates_carry_inserts_and_deletes() {
+        txn_updates_carry_inserts_and_deletes::<YrsAdapter>();
+    }
+
+    #[test]
+    fn yrs_txn_applies_ops_in_sequence() {
+        txn_applies_ops_in_sequence::<YrsAdapter>();
+    }
+
+    #[test]
+    fn yrs_txn_update_excludes_received_ops() {
+        txn_update_excludes_received_ops::<YrsAdapter>();
+    }
+
+    #[test]
+    fn yrs_update_batch_equals_one_by_one() {
+        update_batch_equals_one_by_one::<YrsAdapter>();
+    }
+
+    #[test]
+    fn yrs_encode_and_load_round_trip() {
+        encode_and_load_round_trip::<YrsAdapter>();
+    }
+
+    #[test]
+    fn yrs_partitioned_list_inserts_merge_after_ensure_list() {
+        partitioned_list_inserts_merge_after_ensure_list::<YrsAdapter>();
+    }
 
     #[test]
     fn yrs_identical_ops_yield_equal_fingerprints() {
