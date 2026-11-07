@@ -179,7 +179,8 @@ impl Replica for ReplicaService {
         &self,
         request: Request<proto::InstanceId>,
     ) -> Result<Response<proto::Empty>, Status> {
-        let id = request.into_inner().id;
+        let proto::InstanceId { high, low } = request.into_inner();
+        let id = (u128::from(high) << 64) | u128::from(low);
         let (result, _) = self.state.timed(|a| a.set_instance_id(id));
         result.map_err(internal)?;
         Ok(Response::new(proto::Empty {}))

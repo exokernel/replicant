@@ -298,11 +298,11 @@ impl CrdtAdapter for AutomergeAdapter {
         }
     }
 
-    /// Uses 16 bytes, the width of a random actor id.
-    fn set_instance_id(&mut self, id: u32) -> anyhow::Result<()> {
-        let mut actor = [0xa5u8; 16];
-        actor[12..].copy_from_slice(&id.to_be_bytes());
-        self.doc.set_actor(ActorId::from(actor.as_slice()));
+    /// Uses all 16 bytes, the width of a random actor id. The bytes are big-endian,
+    /// so the order of the actor ids is the order of the `id` values.
+    fn set_instance_id(&mut self, id: u128) -> anyhow::Result<()> {
+        self.doc
+            .set_actor(ActorId::from(id.to_be_bytes().as_slice()));
         Ok(())
     }
 
@@ -406,6 +406,7 @@ mod tests {
         encode_and_load_round_trip,
         partitioned_list_inserts_merge_after_ensure_list,
         set_instance_id_gives_distinct_replicas,
+        wide_ids_stay_distinct,
         fixed_ids_make_a_merge_repeatable,
         identical_ops_yield_equal_fingerprints,
         disjoint_edits_converge_after_sync,

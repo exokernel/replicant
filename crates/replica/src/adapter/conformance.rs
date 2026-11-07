@@ -1180,6 +1180,24 @@ pub(crate) fn set_instance_id_gives_distinct_replicas<A: CrdtAdapter + Default>(
     assert_eq!(merged, b.read_text("text").unwrap());
 }
 
+/// Ids that use all 128 bits and differ only in their low bits stay distinct, so
+/// two replicas do not merge into one author.
+pub(crate) fn wide_ids_stay_distinct<A: CrdtAdapter + Default>() {
+    const HIGH: u128 = 0xfedc_ba98_7654_3210_0123_4567_89ab_cdef << 1;
+    let (mut a, mut b) = (A::default(), A::default());
+    a.set_instance_id(HIGH | 1).unwrap();
+    b.set_instance_id(HIGH | 2).unwrap();
+    a.ensure_text("text").unwrap();
+    b.ensure_text("text").unwrap();
+    let ua = a.apply_txn(&[splice(0, 0, "aaa")]).unwrap();
+    let ub = b.apply_txn(&[splice(0, 0, "bbb")]).unwrap();
+    a.apply_updates(&[ub.as_slice()]).unwrap();
+    b.apply_updates(&[ua.as_slice()]).unwrap();
+    let merged = a.read_text("text").unwrap();
+    assert_eq!(merged.len(), 6, "both inserts survive: {merged:?}");
+    assert_eq!(merged, b.read_text("text").unwrap());
+}
+
 /// The same ids give the same order of concurrent inserts on each run.
 pub(crate) fn fixed_ids_make_a_merge_repeatable<A: CrdtAdapter + Default>() {
     let run = || {

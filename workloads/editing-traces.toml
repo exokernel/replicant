@@ -7,6 +7,7 @@ name = "et.friendsforever"
 description = "Two users typing with 1 s of latency"
 trace = "editing-traces/friendsforever.json.gz"
 sha256 = "c80f9ee71bb2f063d58d1db8513d60145f0f7e209f6c72c8600b22eee73a2769"
+id_order = "ascending"
 
 [[workload]]
 name = "et.clownschool"

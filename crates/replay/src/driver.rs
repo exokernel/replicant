@@ -22,38 +22,71 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
+use common::{INSTANCE_ID_BITS, SplitMix64};
 use serde::Serialize;
 
 use crate::alloc;
 use crate::oracle::{CheckPlan, Content};
-use crate::spec::{Timing, Workload};
+use crate::spec::{IdOrder, Timing, Workload};
 use crate::target::{Lane, Target};
 use crate::trace::Trace;
 
-/// The order of the fixed library ids across agents.
+/// The default of `--id-seed`.
+pub const DEFAULT_ID_SEED: u64 = 1;
+
+/// The high bits of the ids in the fixed orders.
 ///
-/// A library breaks ties between concurrent ops with these ids. So this order
-/// can change the final text of a trace that has concurrent inserts at one
-/// position. Under Yjs and Yrs, the upstream `friendsforever` trace reaches its
-/// `endContent` only with ascending ids.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, clap::ValueEnum)]
-#[serde(rename_all = "snake_case")]
-pub enum IdOrder {
-    /// Agent 0 has the lowest id.
-    #[default]
-    Ascending,
-    /// Agent 0 has the highest id.
-    Descending,
+/// Automerge sorts actors by their bytes, and this order can change a merge time.
+/// See `docs/replay.md`. This value makes the actors sort after the bootstrap
+/// actor of the adapter.
+const FIXED_ID_BASE: u128 = 0xa5a5_a5a5_a5a5_a5a5_a5a5_a5a5_0000_0000;
+
+/// How one trial chooses its library ids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ids {
+    /// The order across agents.
+    pub order: IdOrder,
+    /// The seed of [`IdOrder::Seeded`]. The other orders ignore it.
+    pub seed: u64,
 }
 
-impl IdOrder {
-    /// Returns the library id of `replica`, out of `replicas`. All ids differ.
-    fn id(self, replica: usize, replicas: usize) -> Result<u32> {
-        let position = match self {
-            Self::Ascending => replica,
-            Self::Descending => replicas - 1 - replica,
+impl Ids {
+    /// Seeded ids with the default seed.
+    pub const SEEDED: Self = Self {
+        order: IdOrder::Seeded,
+        seed: DEFAULT_ID_SEED,
+    };
+    /// Ascending ids.
+    pub const ASCENDING: Self = Self {
+        order: IdOrder::Ascending,
+        seed: DEFAULT_ID_SEED,
+    };
+
+    /// Returns the id of each of `replicas` replicas.
+    ///
+    /// Each adapter keeps only the low bits that its library can hold, so this
+    /// fails if two ids are the same in the bits that every adapter keeps.
+    fn all(self, replicas: usize) -> Result<Vec<u128>> {
+        let ascending = (1..=replicas as u128).map(|position| FIXED_ID_BASE | position);
+        let ids: Vec<u128> = match self.order {
+            IdOrder::Ascending => ascending.collect(),
+            IdOrder::Descending => ascending.rev().collect(),
+            IdOrder::Seeded => {
+                let mut rng = SplitMix64::new(self.seed);
+                let mut draw = || u128::from(rng.next_u64());
+                (0..replicas).map(|_| (draw() << 64) | draw()).collect()
+            }
         };
-        u32::try_from(position + 1).context("too many replicas for a 32-bit id")
+        let kept: HashSet<u128> = ids
+            .iter()
+            .map(|id| id & ((1 << INSTANCE_ID_BITS) - 1))
+            .collect();
+        ensure!(
+            kept.len() == replicas,
+            "id seed {} gives two replicas the same id",
+            self.seed
+        );
+        Ok(ids)
     }
 }
 
@@ -145,6 +178,12 @@ impl Plan {
             check_replicas,
             check,
         })
+    }
+
+    /// Returns the id order for this plan. `requested` overrides the workload.
+    #[must_use]
+    pub fn id_order(&self, requested: Option<IdOrder>) -> IdOrder {
+        requested.or(self.workload.id_order).unwrap_or_default()
     }
 
     /// Returns the workload name.
@@ -256,11 +295,11 @@ struct Trial<'a> {
 
 impl<'a> Trial<'a> {
     /// Creates the replicas and their shared object.
-    fn new(plan: &'a Plan, lane: &Lane, ids: IdOrder) -> Result<Self> {
+    fn new(plan: &'a Plan, lane: &Lane, ids: Ids) -> Result<Self> {
         let replicas = plan.replica_count();
         let mut targets = lane.acquire(replicas)?;
-        for (r, target) in targets.iter_mut().enumerate() {
-            target.set_instance_id(ids.id(r, replicas)?)?;
+        for (target, id) in targets.iter_mut().zip(ids.all(replicas)?) {
+            target.set_instance_id(id)?;
             target.ensure(plan.trace.kind)?;
         }
         let delivers = replicas > 1;
@@ -462,7 +501,7 @@ impl<'a> Trial<'a> {
 }
 
 /// Runs one timed trial on `lane`. Returns an error if any check fails.
-pub fn run_trial(plan: &Plan, lane: &Lane, ids: IdOrder) -> Result<TrialResult> {
+pub fn run_trial(plan: &Plan, lane: &Lane, ids: Ids) -> Result<TrialResult> {
     let mut trial = Trial::new(plan, lane, ids)?;
     trial.run_setup()?;
     let timed = trial.run_timed()?;
@@ -484,7 +523,7 @@ pub fn run_trial(plan: &Plan, lane: &Lane, ids: IdOrder) -> Result<TrialResult> 
 
 /// Runs one trial with the allocation count on. Returns an error if any check
 /// fails. This trial gives no timing, because the count adds work.
-pub fn run_memory_trial(plan: &Plan, lane: &Lane, ids: IdOrder) -> Result<MemoryResult> {
+pub fn run_memory_trial(plan: &Plan, lane: &Lane, ids: Ids) -> Result<MemoryResult> {
     let mut trial = Trial::new(plan, lane, ids)?;
     let count = alloc::Counting::start();
     trial.run_setup()?;

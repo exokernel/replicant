@@ -14,7 +14,7 @@ mod op;
 pub mod provenance;
 mod split_mix64;
 
-pub use adapter::CrdtAdapter;
+pub use adapter::{CrdtAdapter, INSTANCE_ID_BITS};
 pub use node_id::NodeId;
 pub use op::{Op, ScalarVal};
 pub use split_mix64::SplitMix64;

@@ -8,6 +8,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::driver::{MemoryResult, TrialResult};
+use crate::spec::IdOrder;
 use crate::trace::GraphStats;
 
 /// The lock file of this build. It gives the exact library versions.
@@ -34,6 +35,8 @@ pub enum Row<'a> {
         workload: &'a str,
         /// The number of agents.
         agents: usize,
+        /// The order of the library ids.
+        id_order: IdOrder,
         /// The graph.
         #[serde(flatten)]
         stats: GraphStats,

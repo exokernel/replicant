@@ -11,9 +11,9 @@ use serde::Serialize;
 use serde_json::json;
 
 use replay::alloc::CountingAlloc;
-use replay::driver::{IdOrder, Plan, run_memory_trial, run_trial};
+use replay::driver::{DEFAULT_ID_SEED, Ids, Plan, run_memory_trial, run_trial};
 use replay::output::{self, Row, RowKey};
-use replay::spec::{self, Workload};
+use replay::spec::{self, IdOrder, Workload};
 use replay::target::Lane;
 use replay::trace::{Trace, read_verified};
 
@@ -31,9 +31,13 @@ struct Args {
     /// The directory that holds the trace files.
     #[arg(long, default_value = "traces")]
     data_dir: PathBuf,
-    /// The order of the fixed library ids across agents.
-    #[arg(long, value_enum, default_value_t)]
-    id_order: IdOrder,
+    /// The order of the library ids across agents, for every workload. Omit this
+    /// to use the order that each workload names, or else `seeded`.
+    #[arg(long, value_enum)]
+    id_order: Option<IdOrder>,
+    /// The seed of `--id-order seeded`.
+    #[arg(long, default_value_t = DEFAULT_ID_SEED)]
+    id_seed: u64,
     /// Runs one trace file with default settings, and ignores the spec.
     #[arg(long, conflicts_with_all = ["spec", "only", "include_heavy"])]
     trace: Option<PathBuf>,
@@ -115,8 +119,12 @@ fn run_plan(plan: &Plan, lane: &Lane, args: &Args, out: &mut dyn Write) -> Resul
         write_row(out, &Row::Skipped { key, reason })?;
         return Ok(true);
     }
+    let ids = Ids {
+        order: plan.id_order(args.id_order),
+        seed: args.id_seed,
+    };
     for trial in 1..=args.trials {
-        match run_trial(plan, lane, args.id_order) {
+        match run_trial(plan, lane, ids) {
             Ok(result) => {
                 eprintln!(
                     "{} {crdt} trial {trial}: {:.1} ms, {} bytes",
@@ -145,7 +153,7 @@ fn run_plan(plan: &Plan, lane: &Lane, args: &Args, out: &mut dyn Write) -> Resul
     // The memory count covers this process only, so it has no meaning for a
     // remote replica.
     if !args.no_memory && matches!(lane, Lane::InProcess(_)) {
-        match run_memory_trial(plan, lane, args.id_order) {
+        match run_memory_trial(plan, lane, ids) {
             Ok(result) => write_row(out, &Row::Memory { key, result })?,
             Err(e) => {
                 let error = format!("{e:#}");
@@ -237,6 +245,7 @@ fn main() -> Result<()> {
         "trials": args.trials,
         "replicas": args.replicas,
         "id_order": args.id_order,
+        "id_seed": args.id_seed,
     });
     write_row(&mut out, &output::run_row(&run_args))?;
 
@@ -244,6 +253,7 @@ fn main() -> Result<()> {
         let row = Row::Workload {
             workload: plan.name(),
             agents: plan.trace.num_agents,
+            id_order: plan.id_order(args.id_order),
             stats: plan.trace.graph_stats(),
         };
         write_row(&mut out, &row)?;

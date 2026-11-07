@@ -10,7 +10,7 @@ fn run_all(json: &str, workload: Workload) -> Vec<TrialResult> {
         .map(|&crdt| {
             let trace = Trace::parse(json.as_bytes()).unwrap();
             let plan = Plan::new(workload.clone(), trace).unwrap();
-            run_trial(&plan, &Lane::InProcess(crdt), IdOrder::Ascending)
+            run_trial(&plan, &Lane::InProcess(crdt), Ids::ASCENDING)
                 .unwrap_or_else(|e| panic!("{crdt}: {e:#}"))
         })
         .collect()
@@ -30,6 +30,7 @@ fn workload() -> Workload {
         merge_batch: false,
         check_replicas: None,
         heavy: false,
+        id_order: None,
     }
 }
 
@@ -207,7 +208,7 @@ fn a_wrong_final_text_fails_the_trial() {
             Trace::parse(br#"{"endContent":"not this","txns":[{"patches":[[0,0,"abc"]]}]}"#)
                 .unwrap();
         let plan = Plan::new(workload(), trace).unwrap();
-        let e = run_trial(&plan, &Lane::InProcess(crdt), IdOrder::Ascending).unwrap_err();
+        let e = run_trial(&plan, &Lane::InProcess(crdt), Ids::ASCENDING).unwrap_err();
         assert!(format!("{e:#}").contains("final content is wrong"), "{e:#}");
     }
 }
@@ -216,13 +217,13 @@ fn a_wrong_final_text_fails_the_trial() {
 fn a_memory_trial_runs_without_the_allocator_installed() {
     let trace = Trace::parse(br#"{"endContent":"a","txns":[{"patches":[[0,0,"a"]]}]}"#).unwrap();
     let plan = Plan::new(workload(), trace).unwrap();
-    run_memory_trial(&plan, &Lane::InProcess(Crdt::Yrs), IdOrder::Ascending).unwrap();
+    run_memory_trial(&plan, &Lane::InProcess(Crdt::Yrs), Ids::ASCENDING).unwrap();
 }
 
-/// A fixed id order gives the same encoded size on each run. Random ids
-/// change the size, because the encoded id width can change.
+/// Each id order gives the same encoded size on each run. Unseeded random ids
+/// can change the size, because the encoded id width can change.
 #[test]
-fn a_fixed_id_order_repeats_the_document_size() {
+fn each_id_order_repeats_the_document_size() {
     let json = br#"{"kind":"concurrent","oracle":{"kind":"tree_invariants"},"numAgents":2,
         "txns":[
         {"agent":0,"parents":[],"patches":[[0,0,"a"]]},
@@ -234,8 +235,63 @@ fn a_fixed_id_order_repeats_the_document_size() {
                 .unwrap()
                 .doc_size
         };
-        assert_eq!(size(IdOrder::Ascending), size(IdOrder::Ascending), "{crdt}");
+        assert_eq!(size(Ids::ASCENDING), size(Ids::ASCENDING), "{crdt}");
+        assert_eq!(size(Ids::SEEDED), size(Ids::SEEDED), "{crdt}");
     }
+}
+
+#[test]
+fn fixed_orders_give_ids_in_order() {
+    let positions = |order| {
+        let ids = Ids { order, seed: 1 }.all(3).unwrap();
+        ids.iter().map(|id| id - FIXED_ID_BASE).collect::<Vec<_>>()
+    };
+    assert_eq!(positions(IdOrder::Ascending), [1, 2, 3]);
+    assert_eq!(positions(IdOrder::Descending), [3, 2, 1]);
+}
+
+/// B3 has 1540 clients, so the seeded ids must stay distinct at that scale, in
+/// the bits that every adapter keeps.
+#[test]
+fn seeded_ids_repeat_for_a_seed_and_change_with_the_seed() {
+    let ids = |seed| {
+        Ids {
+            order: IdOrder::Seeded,
+            seed,
+        }
+        .all(1540)
+        .unwrap()
+    };
+    assert_eq!(ids(1), ids(1));
+    assert_ne!(ids(1), ids(2));
+    assert!(
+        ids(1).iter().all(|id| id >> 64 != 0),
+        "ids use the high bits"
+    );
+}
+
+/// The default order is seeded. A workload can pin another order, and a request
+/// overrides both.
+#[test]
+fn a_requested_id_order_overrides_the_workload() {
+    let plan = |pinned| {
+        let trace = Trace::parse(br#"{"endContent":"a","txns":[{"patches":[[0,0,"a"]]}]}"#);
+        Plan::new(
+            Workload {
+                id_order: pinned,
+                ..workload()
+            },
+            trace.unwrap(),
+        )
+        .unwrap()
+    };
+    assert_eq!(plan(None).id_order(None), IdOrder::Seeded);
+    let pinned = plan(Some(IdOrder::Ascending));
+    assert_eq!(pinned.id_order(None), IdOrder::Ascending);
+    assert_eq!(
+        pinned.id_order(Some(IdOrder::Descending)),
+        IdOrder::Descending
+    );
 }
 
 /// Setup transactions on a lone replica need no delivery.
@@ -345,7 +401,7 @@ fn the_remote_lane_runs_the_same_plan() {
         )
         .unwrap();
         let plan = Plan::new(workload(), trace).unwrap();
-        let r = run_trial(&plan, &lane, IdOrder::Ascending).unwrap();
+        let r = run_trial(&plan, &lane, Ids::ASCENDING).unwrap();
         assert!(r.adapter_ms.is_some_and(|a| a > 0.0 && a <= r.time_ms));
         assert!(r.doc_size > 0);
     }
@@ -368,7 +424,7 @@ fn the_remote_lane_moves_updates_between_replicas() {
         trace,
     )
     .unwrap();
-    run_trial(&plan, &lane, IdOrder::Ascending).unwrap();
+    run_trial(&plan, &lane, Ids::ASCENDING).unwrap();
 }
 
 #[test]

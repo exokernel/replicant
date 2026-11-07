@@ -4,6 +4,10 @@ use std::collections::BTreeMap;
 
 use crate::{Op, ScalarVal};
 
+/// The number of low bits of an instance id that every adapter keeps. Yrs keeps
+/// the fewest: its client ids have 53 bits, and the adapter always sets the top bit.
+pub const INSTANCE_ID_BITS: u32 = 52;
+
 /// The library-agnostic interface between the replica scaffolding and a CRDT
 /// library.
 ///
@@ -141,10 +145,10 @@ pub trait CrdtAdapter: Send + 'static {
     ///
     /// The library breaks ties between concurrent ops with this id. It is random
     /// by default, so a replay can have a different result on each run. A replay
-    /// sets a fixed id for each agent, and the ids must differ. The adapter keeps
-    /// the encoded width of a random id, so a fixed id does not change the
-    /// document size.
-    fn set_instance_id(&mut self, id: u32) -> anyhow::Result<()>;
+    /// sets an id for each agent. The adapter keeps as many low bits of `id` as
+    /// its library can hold, and keeps the encoded width of a random id. Ids must
+    /// differ in their low [`INSTANCE_ID_BITS`] bits.
+    fn set_instance_id(&mut self, id: u128) -> anyhow::Result<()>;
 
     /// Creates the named list object under ROOT, so that every replica has the
     /// same object identity without any sync.
