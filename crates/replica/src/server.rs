@@ -231,9 +231,9 @@ impl ReplicaState {
     }
 
     /// Samples the document size and records it on the gauge.
-    fn record_doc_size(&self) {
+    fn record_doc_size(&self, size_bytes: u64) {
         self.metrics.doc_size_bytes.record(
-            self.doc_size_bytes() as u64,
+            size_bytes,
             std::slice::from_ref(&self.actor_attr),
         );
     }
@@ -263,7 +263,12 @@ impl ReplicaState {
     }
 
     /// Returns the document size and the per-peer sync counts since the last
-    /// reset, sorted by peer ID.
+    /// reset, sorted by peer ID. Also records the size gauge.
+    ///
+    /// This is the only place that records the gauge. The size comes from a
+    /// full encode of the document, and its cost grows with the document. Do
+    /// not call this on the op path or the sync path. There it adds a full
+    /// encode to each op and to each sync message.
     fn stats(&self) -> proto::ReplicaStats {
         let mut peers: Vec<proto::PeerStats> = self
             .peer_stats
@@ -278,8 +283,10 @@ impl ReplicaState {
             })
             .collect();
         peers.sort_by(|a, b| a.peer_id.cmp(&b.peer_id));
+        let doc_size_bytes = self.doc_size_bytes() as u64;
+        self.record_doc_size(doc_size_bytes);
         proto::ReplicaStats {
-            doc_size_bytes: self.doc_size_bytes() as u64,
+            doc_size_bytes,
             peers,
         }
     }
@@ -470,7 +477,6 @@ impl Replica for ReplicaService {
             .map_err(|e| Status::internal(e.to_string()))?;
 
         self.state.record_op_duration(op.name(), elapsed_ms);
-        self.state.record_doc_size();
 
         self.state.flush_to_peers();
 

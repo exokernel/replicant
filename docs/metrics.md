@@ -91,14 +91,22 @@ the group is one orchestrator invocation against one stack. Use
 
 ### Document state metrics
 
-Sampled on every local op application AND on every received sync message,
-so post-convergence the gauge reflects each replica's final save() byte
-length. See [[finding_automerge_save_not_canonical]] in the analysis notebook
+Recorded when a replica answers `GetStats`. The orchestrator calls `GetStats`
+on every node after each trial, outside the timed window. The gauge therefore
+shows each replica's size at the end of the trial. It does not show the size
+during a trial.
+
+The gauge is not recorded on the op path or on the sync path. The size comes
+from a full encode of the document. An encode per op or per sync message adds
+work inside the timed windows, and that work grows with the document. Runs made
+before this change include that work in `convergence_ms`.
+
+See [[finding_automerge_save_not_canonical]] in the analysis notebook
 for why these values can differ across logically-converged replicas.
 
 | Name                       | Type           | Unit  | Attributes | Description                                          |
 |----------------------------|----------------|-------|------------|------------------------------------------------------|
-| `replicant.doc.size_bytes` | Gauge<u64>     | By    | `actor`    | Serialized document size (`AutoCommit::save()` byte length). |
+| `replicant.doc.size_bytes` | Gauge<u64>     | By    | `actor`    | Serialized document size, in the encoding of `CrdtAdapter::encode`. |
 
 ---
 
@@ -187,11 +195,7 @@ when we add a second adapter.
 
 Candidates that would earn their place:
 
-- `replicant.automerge.save.duration_us` — cost of `AutoCommit::save()`.
-  Worth adding if op latency histograms start showing `save()` as the
-  dominant term (currently it's not, but the call is now on the
-  sync_receive path too — see the doc_size_bytes overhead note in
-  [NEXT_SESSION.md](../NEXT_SESSION.md)).
+- `replicant.automerge.save.duration_us`: the cost of `AutoCommit::save()`.
 - `replicant.sync.bytes` — replication bandwidth in addition to message
   counts. Useful for distinguishing "many small messages" from "few large
   messages" at the topology level.

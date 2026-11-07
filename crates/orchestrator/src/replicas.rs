@@ -469,14 +469,17 @@ pub async fn wait_for_nodes(
     }
 }
 
-/// Records each node's `GetStats` reply in `trace`. Does nothing when `trace`
-/// is disabled. Call it after the timed window.
+/// Calls `GetStats` on each node and records the replies in `trace`.
+///
+/// Call it after the timed window. Each call does a full encode of the document.
+/// The call also makes the replica record its `replicant.doc.size_bytes` gauge,
+/// so run it also when `trace` is disabled.
 pub async fn record_stats(clients: &mut [Client], trace: &mut Trace) -> Result<()> {
-    if !trace.enabled() {
-        return Ok(());
-    }
     for (node, client) in clients.iter_mut().enumerate() {
         let stats = client.get_stats(Request::new(Empty {})).await?.into_inner();
+        if !trace.enabled() {
+            continue;
+        }
         let peers = stats
             .peers
             .into_iter()
