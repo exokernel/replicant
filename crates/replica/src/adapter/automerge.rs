@@ -270,6 +270,13 @@ impl CrdtAdapter for AutomergeAdapter {
         Ok(())
     }
 
+    fn sync_pending(&mut self, peer: &str) -> bool {
+        // Generate on a copy of the state, so the real state does not record
+        // a message that is never sent.
+        let mut state = self.sync_states.get(peer).cloned().unwrap_or_default();
+        self.doc.sync().generate_sync_message(&mut state).is_some()
+    }
+
     fn sync_reset(&mut self, peer: &str) {
         // Removing the entry is the whole reset. The next generate or receive
         // creates a fresh `sync::State`, which starts the protocol from the
@@ -416,6 +423,8 @@ mod tests {
         each_op_variant_mutates_the_doc,
         reads_are_stable_without_writes,
         sync_is_idempotent_once_converged,
+        sync_pending_matches_generate,
+        a_heal_after_a_quiet_partition_sends_little,
         three_replicas_converge_through_a_hub,
         doc_size_grows_with_every_op,
         reset_returns_adapter_to_a_fresh_state,

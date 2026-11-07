@@ -43,9 +43,10 @@ service Replica {
   //
   // While blocked: outbound flushes skip the peer (never consuming sync
   // protocol state toward it) and inbound messages from it are dropped
-  // unprocessed. Unblocking also discards the per-peer sync protocol state,
-  // so the post-heal exchange restarts from a fresh handshake rather than
-  // trusting beliefs formed before or during the partition.
+  // unprocessed. Unblocking keeps the per-peer sync protocol state, so the
+  // heal sends only what changed during the partition. Block a link only when
+  // its sync is idle (see SyncPending). A message dropped by a block would
+  // leave that state wrong.
   //
   // Unblocking does NOT initiate any sync traffic. The orchestrator must
   // unblock BOTH endpoints of every healed link before calling KickSync —
@@ -56,6 +57,10 @@ service Replica {
   // unblocked both endpoints of every healed link. Peers with nothing to
   // exchange or no open stream are skipped silently.
   rpc KickSync            (PeerIds)    returns (Empty);
+  // The connected peers to which the adapter has a sync message to send now.
+  // Sync between two replicas is idle when neither has one, and every sent
+  // message has arrived (see GetStats). Changes no state.
+  rpc SyncPending         (Empty)      returns (PeerIds);
 
   // The replay surface. The `replay` binary drives a replica with these calls.
   // It moves updates between replicas itself, so no sync stream runs. Each

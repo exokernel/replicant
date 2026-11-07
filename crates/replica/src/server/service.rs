@@ -166,6 +166,19 @@ impl Replica for ReplicaService {
         Ok(Response::new(proto::Empty {}))
     }
 
+    async fn sync_pending(
+        &self,
+        _: Request<proto::Empty>,
+    ) -> Result<Response<proto::PeerIds>, Status> {
+        let peer_ids = self
+            .state
+            .sync_pending_peers()
+            .into_iter()
+            .map(|p| p.to_string())
+            .collect();
+        Ok(Response::new(proto::PeerIds { peer_ids }))
+    }
+
     async fn kick_sync(
         &self,
         request: Request<proto::PeerIds>,

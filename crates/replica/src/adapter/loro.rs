@@ -2,8 +2,9 @@ use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Context, bail};
 use common::{CrdtAdapter, Op, ScalarVal};
-use loro::{ExportMode, LoroDoc, LoroValue, VersionVector};
+use loro::{ExportMode, ID, LoroDoc, LoroValue, VersionVector};
 
+use super::frame::Frame;
 use super::{map_name, require_name};
 
 /// [`common::CrdtAdapter`] implementation backed by `loro::LoroDoc`.
@@ -25,20 +26,45 @@ use super::{map_name, require_name};
 /// 2. **Loro has no sync protocol.** (`loro::sync` holds lock wrappers, not a
 ///    peer protocol.) The sync primitive is a version-vector diff:
 ///    `export(ExportMode::updates(&their_vv))`. As with Yrs, the caller must
-///    track what each peer has. See `peer_vv`.
+///    track what each peer has. See `PeerSync`.
 pub struct LoroAdapter {
     /// The document.
     doc: LoroDoc,
-    /// The version vector this adapter believes each peer has, based on what
-    /// it has sent. Loro keeps no per-peer state (fact 2), so the adapter must.
-    /// [`super::YrsAdapter`] does the same.
+    /// The sync state of each peer. Loro keeps none (fact 2), so the adapter
+    /// keeps it. See [`PeerSync`]. [`super::YrsAdapter`] does the same.
     ///
-    /// Without this map, `sync_generate` would export from the empty version
+    /// Without this state, `sync_generate` would export from the empty version
     /// vector every time. The result would still be correct, because Loro
     /// imports are idempotent. But it would never return `None`, and both the
     /// replica's `flush_to_peers` loop and `sync_is_idempotent_once_converged`
     /// need that `None`.
-    peer_vv: HashMap<String, VersionVector>,
+    peers: HashMap<String, PeerSync>,
+}
+
+/// The sync state of [`LoroAdapter`] for one peer.
+///
+/// The protocol follows the Yjs sync protocol, with version vectors in place of
+/// state vectors. Each side sends its version vector. The other side answers with
+/// the ops that this version vector lacks. After that, each side sends what it
+/// adds. See [`super::frame`].
+#[derive(Clone)]
+struct PeerSync {
+    /// The ops that the peer has, as far as this adapter knows: its version
+    /// vector, what this adapter sent, and what the peer sent. `None` until the
+    /// peer sends its version vector.
+    known: Option<VersionVector>,
+    /// True if this adapter must send its own version vector.
+    version_due: bool,
+}
+
+impl PeerSync {
+    /// Returns the state of a peer that has sent nothing yet.
+    fn new() -> Self {
+        Self {
+            known: None,
+            version_due: true,
+        }
+    }
 }
 
 /// Converts one Loro value to a [`ScalarVal`]. Fails on a value that the op
@@ -60,6 +86,54 @@ impl Default for LoroAdapter {
 }
 
 impl LoroAdapter {
+    /// Returns the next sync message for `peer` and the peer state after it, or
+    /// `None` if there is nothing to send. Changes no state.
+    fn next_message(&self, peer: &str) -> Option<(Frame, PeerSync)> {
+        let state = self.peers.get(peer).cloned().unwrap_or_else(PeerSync::new);
+        let my_vv = self.doc.oplog_vv();
+        // Send data only to a peer whose version vector is known. `None` must
+        // come from this comparison, not from an empty export. An update with no
+        // ops is still 22 bytes (magic, checksum, header), so the bytes are
+        // never empty and the push loop would never stop.
+        let update = match &state.known {
+            Some(known) if !known.includes_vv(&my_vv) => {
+                match self.doc.export(ExportMode::updates(known)) {
+                    Ok(bytes) => Some(bytes),
+                    Err(e) => {
+                        // The trait gives no error channel here. Log the failure
+                        // and send no data. The state does not change, so the
+                        // next call tries again. If the export keeps failing, the
+                        // replicas do not converge, and the convergence check
+                        // reports it.
+                        tracing::error!(peer, error = %e, "Loro update export failed");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+        if !state.version_due && update.is_none() {
+            return None;
+        }
+        let frame = Frame {
+            version: state.version_due.then(|| my_vv.encode()),
+            asks_version: state.known.is_none(),
+            update,
+        };
+        let mut next = state;
+        next.version_due = false;
+        if frame.update.is_some() {
+            // Assume this message arrives, and record that the peer now has
+            // `my_vv`. Then the next call does not resend the same ops.
+            // Automerge's `sync::State` does the same with the heads it sends. If
+            // the message is lost, `sync_reset` recovers.
+            let mut known = next.known.take().unwrap_or_default();
+            known.merge(&my_vv);
+            next.known = Some(known);
+        }
+        Some((frame, next))
+    }
+
     /// Creates an empty Loro document with no peer state.
     ///
     /// `LoroDoc::new()` assigns a random `PeerID` (a `u64`) and turns on
@@ -69,7 +143,7 @@ impl LoroAdapter {
     pub fn new() -> Self {
         Self {
             doc: LoroDoc::new(),
-            peer_vv: HashMap::new(),
+            peers: HashMap::new(),
         }
     }
 
@@ -78,9 +152,9 @@ impl LoroAdapter {
     ///
     /// The replica keeps a random id per instance, like the other two
     /// adapters, and Loro's docs warn against fixed ids for concurrent
-    /// writers. Tests need pinned ids because peer-id width is the only thing
-    /// that makes the snapshots of two converged replicas differ. See
-    /// `loro_snapshot_is_canonical_across_converged_replicas_with_pinned_peer_ids`.
+    /// writers. Tests need pinned ids because peer-id width is one cause of a
+    /// difference between the snapshots of two converged replicas. See
+    /// `loro_snapshot_sizes_of_converged_replicas_differ_by_under_one_percent`.
     #[cfg(test)]
     fn with_peer_id(peer: u64) -> anyhow::Result<Self> {
         let me = Self::new();
@@ -230,9 +304,10 @@ impl CrdtAdapter for LoroAdapter {
         //
         // Do not use the snapshot bytes. Converged replicas can produce
         // different snapshots: five line-topology replicas with an identical
-        // frontier produced snapshots of 654/667/654/667/654 bytes. The cause
-        // is the encoded width of random peer ids. See
-        // `loro_snapshot_is_canonical_across_converged_replicas_with_pinned_peer_ids`.
+        // frontier produced snapshots of 654/667/654/667/654 bytes. The causes
+        // are the encoded width of random peer ids, and the order in which the
+        // changes arrived. See
+        // `loro_snapshot_sizes_of_converged_replicas_differ_by_under_one_percent`.
         self.get_heads().into_iter().flatten().collect()
     }
 
@@ -263,53 +338,58 @@ impl CrdtAdapter for LoroAdapter {
     }
 
     fn sync_generate(&mut self, peer: &str) -> Option<Vec<u8>> {
-        let my_vv = self.doc.oplog_vv();
-        let empty = VersionVector::default();
-        let known = self.peer_vv.get(peer).unwrap_or(&empty);
-        // `None` must come from this comparison, not from an empty export.
-        // An update with no ops is still 22 bytes (magic, checksum, header),
-        // so the bytes are never empty and the push loop would never stop.
-        if known.includes_vv(&my_vv) {
-            return None;
-        }
-        let bytes = match self.doc.export(ExportMode::updates(known)) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                // The trait gives no error channel here. Log the failure and
-                // send nothing. `peer_vv` does not change, so the next call
-                // tries again. If the export keeps failing, the replicas do
-                // not converge, and the convergence check reports it.
-                tracing::error!(peer, error = %e, "Loro update export failed");
-                return None;
-            }
-        };
-        // Assume this message arrives, and record that the peer now has
-        // `my_vv`. Then the next call does not resend the same ops.
-        // Automerge's `sync::State` does the same with the heads it sends. If
-        // the message is lost, `sync_reset` recovers.
-        self.peer_vv.insert(peer.to_owned(), my_vv);
-        Some(bytes)
+        let (frame, next) = self.next_message(peer)?;
+        self.peers.insert(peer.to_owned(), next);
+        Some(frame.encode())
     }
 
     fn sync_receive(&mut self, peer: &str, msg: Vec<u8>) -> anyhow::Result<()> {
-        // Loro accepts causally incomplete updates. Ops whose dependencies
-        // have not arrived are buffered, reported in `ImportStatus::pending`,
-        // and applied when the gap fills. This is normal for out-of-order
-        // delivery, so it is not an error. It is also safe for the
-        // convergence check: pending ops are not in the oplog, so they do not
-        // move `get_heads`. A replica with a permanent gap correctly reads as
-        // not converged.
-        self.doc
-            .import(&msg)
-            .with_context(|| format!("applying update from '{peer}'"))?;
+        let frame =
+            Frame::decode(&msg).with_context(|| format!("decoding sync message from '{peer}'"))?;
+        let mut state = self.peers.get(peer).cloned().unwrap_or_else(PeerSync::new);
+        if let Some(version) = &frame.version {
+            let vv = VersionVector::decode(version)
+                .with_context(|| format!("decoding the version vector from '{peer}'"))?;
+            let mut known = state.known.take().unwrap_or_default();
+            known.merge(&vv);
+            state.known = Some(known);
+        }
+        if frame.asks_version {
+            state.version_due = true;
+        }
+        if let Some(bytes) = &frame.update {
+            // Loro accepts causally incomplete updates. Ops whose dependencies
+            // have not arrived are buffered, reported in `ImportStatus::pending`,
+            // and applied when the gap fills. This is normal for out-of-order
+            // delivery, so it is not an error. It is also safe for the
+            // convergence check: pending ops are not in the oplog, so they do not
+            // move `get_heads`. A replica with a permanent gap correctly reads as
+            // not converged.
+            let status = self
+                .doc
+                .import(bytes)
+                .with_context(|| format!("applying update from '{peer}'"))?;
+            // The peer has what it sent, so do not send it back.
+            if let Some(known) = &mut state.known {
+                for (&peer_id, &(_, end)) in status.success.iter() {
+                    if end > 0 {
+                        known.extend_to_include_last_id(ID::new(peer_id, end - 1));
+                    }
+                }
+            }
+        }
+        self.peers.insert(peer.to_owned(), state);
         Ok(())
     }
 
+    fn sync_pending(&mut self, peer: &str) -> bool {
+        self.next_message(peer).is_some()
+    }
+
     fn sync_reset(&mut self, peer: &str) {
-        // Removing the entry is the whole reset. The next `sync_generate`
-        // compares against an empty version vector, so it re-exports
-        // everything this peer might have missed.
-        self.peer_vv.remove(peer);
+        // Removing the entry is the full reset. The next `sync_generate` sends
+        // the version vector again, and waits for the peer's.
+        self.peers.remove(peer);
     }
 
     fn reset(&mut self) {
@@ -462,6 +542,9 @@ mod tests {
         each_op_variant_mutates_the_doc,
         reads_are_stable_without_writes,
         sync_is_idempotent_once_converged,
+        sync_pending_matches_generate,
+        a_heal_after_a_quiet_partition_sends_little,
+        first_sync_of_a_shared_document_sends_little,
         three_replicas_converge_through_a_hub,
         reset_returns_adapter_to_a_fresh_state,
         reset_drops_stale_peer_state,
@@ -591,24 +674,25 @@ mod tests {
     /// (Automerge-only) and of
     /// `yrs_save_bytes_are_canonical_across_converged_replicas`.
     ///
-    /// Loro's snapshot is canonical in structure. Only the encoded width of
-    /// the random `PeerID`s makes the snapshots of two converged replicas
-    /// differ.
+    /// Loro's snapshot is nearly canonical. Two causes can make the snapshots of
+    /// two converged replicas differ by a few bytes:
     ///
-    /// Measured on the same 5-replica line topology as the Automerge test:
-    /// with random peer ids, the snapshots differed in 16/100 trials at 10
-    /// ops and 12/100 at 40 ops. The rate does not grow with history, so the
-    /// cause is not integration order, as it is for Automerge. With peer ids
-    /// pinned to 1..=5, the rate is 0/100 at both sizes.
+    /// - The encoded width of random `PeerID`s. With random peer ids on a
+    ///   5-replica line, the snapshots differed in 16/100 trials at 10 ops and
+    ///   12/100 at 40 ops.
+    /// - The order in which the changes arrived. With peer ids pinned to 1..=5,
+    ///   the old sync layer gave 0/100. The sync layer of 2026-11-07, which first
+    ///   exchanges version vectors, gives 554, 552, 554, 552, 554 bytes. All five
+    ///   replicas hold the same 10 changes and the same version vector.
     ///
-    /// The test therefore pins the peer ids. With random ids the outcome
-    /// would be random, and a flaky test is worse than none.
+    /// The test pins the peer ids, so the outcome does not change between runs,
+    /// and it bounds the spread.
     ///
-    /// Consequence for the doc-size results: a Loro size spread across
-    /// replicas is peer-id noise. It is not the graph-position effect that
-    /// Automerge's spread shows. Do not read the two the same way.
+    /// Consequence for the doc-size results: a Loro size spread across replicas
+    /// is a few bytes of encoding noise. It is much smaller than the
+    /// graph-position effect that Automerge's spread shows.
     #[test]
-    fn loro_snapshot_is_canonical_across_converged_replicas_with_pinned_peer_ids() {
+    fn loro_snapshot_sizes_of_converged_replicas_differ_by_under_one_percent() {
         let mut replicas: Vec<LoroAdapter> = (1..=5)
             .map(LoroAdapter::with_peer_id)
             .collect::<Result<_, _>>()
@@ -619,12 +703,12 @@ mod tests {
             .iter_mut()
             .map(LoroAdapter::doc_size_bytes)
             .collect();
+        let (min, max) = (sizes.iter().min().unwrap(), sizes.iter().max().unwrap());
         assert!(
-            sizes.iter().min() == sizes.iter().max(),
-            "snapshot stopped being canonical for equal-width peer ids — \
-             sizes: {sizes:?}. If this starts failing, Loro's encoder gained \
-             an integration-order dependence and the doc-size table's \
-             interpretation above needs revisiting.",
+            (max - min) * 100 < *max,
+            "converged snapshot sizes differ by 1% or more: {sizes:?}. If this \
+             starts failing, Loro's encoder gained a larger order dependence, and \
+             the doc-size table's interpretation above needs revisiting.",
         );
     }
 

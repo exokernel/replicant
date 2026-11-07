@@ -7,9 +7,10 @@ use yrs::{
     StateVector, Text, TextRef, Transact, TransactionMut, Update,
     branch::Branch,
     types::{ToJson, TypeRef},
-    updates::decoder::Decode,
+    updates::{decoder::Decode, encoder::Encode},
 };
 
+use super::frame::Frame;
 use super::{map_name, require_name};
 
 /// Returns the actual type of a root shared type if it is not `S`.
@@ -67,33 +68,48 @@ fn to_u32(n: usize) -> anyhow::Result<u32> {
 pub struct YrsAdapter {
     /// The document.
     doc: Doc,
-    /// What this adapter has already sent to each peer.
-    ///
-    /// Yrs keeps no per-peer sync state, so the adapter keeps it. Without this
-    /// map, `sync_generate` would send the full document on every call. That
-    /// is correct, because Yrs updates are idempotent. But it never returns
-    /// `None`, and the replica's push loop and the
-    /// `sync_is_idempotent_once_converged` test both need `None` once the
-    /// peers agree.
-    peer_sent: HashMap<String, PeerSent>,
+    /// The sync state of each peer. Yrs keeps none, so the adapter keeps it.
+    /// See [`PeerSync`].
+    peers: HashMap<String, PeerSync>,
 }
 
-/// What [`YrsAdapter`] has already sent to one peer.
+/// The sync state of [`YrsAdapter`] for one peer.
 ///
-/// Both fields are necessary. **A state vector alone cannot detect a
-/// deletion.** A Yrs delete marks an existing block and adds the range to a
-/// separate delete set. It authors no block and advances no clock. If the
-/// "nothing new" check used only the state vector, a delete made after the
-/// replicas went quiet would never be sent.
+/// The protocol follows the Yjs sync protocol. Each side sends its state vector.
+/// The other side answers with the blocks that this state vector lacks, and its
+/// delete set. After that, each side sends what it adds. See
+/// [`super::frame`].
+///
+/// **A state vector alone cannot detect a deletion.** A Yrs delete marks an
+/// existing block and adds the range to a separate delete set. It authors no
+/// block and advances no clock. So the state also records the delete set at the
+/// last send, and a changed delete set is sent again.
 ///
 /// Rule: any Yrs bookkeeping that counts what each client authored cannot see
 /// deletes. `state_fingerprint` has the same constraint (see `get_heads`).
-struct PeerSent {
-    /// The state vector at the last send.
-    sv: StateVector,
-    /// The encoded delete set at the last send. It is compared by value, not
-    /// by hash, so a hash collision cannot hide a deletion.
-    ds: Vec<u8>,
+#[derive(Clone)]
+struct PeerSync {
+    /// The blocks that the peer has, as far as this adapter knows: its state
+    /// vector, what this adapter sent, and what the peer sent. `None` until the
+    /// peer sends its state vector.
+    known: Option<StateVector>,
+    /// The encoded delete set at the last send. `None` if this adapter has not
+    /// sent one since it learned the peer's state vector. It is compared by
+    /// value, not by hash, so a hash collision cannot hide a deletion.
+    sent_ds: Option<Vec<u8>>,
+    /// True if this adapter must send its own state vector.
+    version_due: bool,
+}
+
+impl PeerSync {
+    /// Returns the state of a peer that has sent nothing yet.
+    fn new() -> Self {
+        Self {
+            known: None,
+            sent_ds: None,
+            version_due: true,
+        }
+    }
 }
 
 impl Default for YrsAdapter {
@@ -111,7 +127,7 @@ impl YrsAdapter {
     pub fn new() -> Self {
         Self {
             doc: Doc::new(),
-            peer_sent: HashMap::new(),
+            peers: HashMap::new(),
         }
     }
 
@@ -129,6 +145,51 @@ impl YrsAdapter {
             ScalarVal::Bool(b) => Any::Bool(*b),
             ScalarVal::Bytes(b) => Any::Buffer(b.as_slice().into()),
         })
+    }
+
+    /// Returns the next sync message for `peer` and the peer state after it, or
+    /// `None` if there is nothing to send. Changes no state.
+    fn next_message(&self, peer: &str) -> Option<(Frame, PeerSync)> {
+        let state = self.peers.get(peer).cloned().unwrap_or_else(PeerSync::new);
+        let txn = self.doc.transact();
+        let my_sv = txn.state_vector();
+        // A diff against my own state vector contains no blocks. A Yrs update
+        // always carries the full delete set, so this is the delete set plus
+        // a few bytes of framing. Yrs has no delete-set version or counter,
+        // so this is the cheapest way to see whether a delete occurred.
+        let my_ds = txn.encode_diff_v1(&my_sv);
+        // Send data only to a peer whose state vector is known. Send nothing
+        // only if both conditions are true:
+        // 1. The peer already has every clock in my state vector.
+        // 2. My delete set has not changed since the last send.
+        // Condition 2 is necessary. See `PeerSync`.
+        let update = state.known.as_ref().and_then(|known| {
+            let blocks_covered = my_sv
+                .iter()
+                .all(|(client, clock)| known.get(client) >= *clock);
+            let deletes_covered = state.sent_ds.as_ref() == Some(&my_ds);
+            (!(blocks_covered && deletes_covered)).then(|| txn.encode_diff_v1(known))
+        });
+        if !state.version_due && update.is_none() {
+            return None;
+        }
+        let frame = Frame {
+            version: state.version_due.then(|| my_sv.encode_v1()),
+            asks_version: state.known.is_none(),
+            update,
+        };
+        let mut next = state;
+        next.version_due = false;
+        if frame.update.is_some() {
+            // Assume that this message arrives, so the next call does not send
+            // the same bytes again. Automerge's `sync::State` does the same.
+            // If the message is lost, `sync_reset` recovers.
+            let mut known = next.known.take().unwrap_or_default();
+            known.merge(my_sv);
+            next.known = Some(known);
+            next.sent_ds = Some(my_ds);
+        }
+        Some((frame, next))
     }
 
     /// Encodes the full document in the v1 format: every block and the delete
@@ -242,7 +303,7 @@ impl CrdtAdapter for YrsAdapter {
         // not documented as canonical.
         //
         // CAUTION: the heads are not a convergence fingerprint. A delete does
-        // not change the state vector (see `PeerSent`). Two documents can
+        // not change the state vector (see `PeerSync`). Two documents can
         // have the same heads and different content. `state_fingerprint`
         // therefore does not use this method.
         let txn = self.doc.transact();
@@ -275,56 +336,51 @@ impl CrdtAdapter for YrsAdapter {
     }
 
     fn sync_generate(&mut self, peer: &str) -> Option<Vec<u8>> {
-        let txn = self.doc.transact();
-        let my_sv = txn.state_vector();
-        // A diff against my own state vector contains no blocks. A Yrs update
-        // always carries the full delete set, so this is the delete set plus
-        // a few bytes of framing. Yrs has no delete-set version or counter,
-        // so this is the cheapest way to see whether a delete occurred.
-        let my_ds = txn.encode_diff_v1(&my_sv);
-        let sent = self.peer_sent.get(peer);
-        let empty = StateVector::default();
-        let known = sent.map_or(&empty, |s| &s.sv);
-        // Send nothing only if both conditions are true:
-        // 1. The peer already has every clock in my state vector.
-        // 2. My delete set has not changed since the last send.
-        // Condition 2 is necessary. See `PeerSent`.
-        let blocks_covered = my_sv
-            .iter()
-            .all(|(client, clock)| known.get(client) >= *clock);
-        let deletes_covered = sent.is_some_and(|s| s.ds == my_ds);
-        if blocks_covered && deletes_covered {
-            return None;
-        }
-        let bytes = txn.encode_diff_v1(known);
-        drop(txn);
-        // Assume that this message arrives, so the next call does not send
-        // the same bytes again. Automerge's `sync::State` does the same. If
-        // the message is lost, `sync_reset` recovers.
-        self.peer_sent.insert(
-            peer.to_owned(),
-            PeerSent {
-                sv: my_sv,
-                ds: my_ds,
-            },
-        );
-        Some(bytes)
+        let (frame, next) = self.next_message(peer)?;
+        self.peers.insert(peer.to_owned(), next);
+        Some(frame.encode())
     }
 
     fn sync_receive(&mut self, peer: &str, msg: Vec<u8>) -> anyhow::Result<()> {
-        let update = Update::decode_v1(&msg)
-            .with_context(|| format!("decoding sync message from '{peer}'"))?;
-        let mut txn = self.doc.transact_mut();
-        txn.apply_update(update)
-            .with_context(|| format!("applying update from '{peer}'"))?;
+        let frame =
+            Frame::decode(&msg).with_context(|| format!("decoding sync message from '{peer}'"))?;
+        let mut state = self.peers.get(peer).cloned().unwrap_or_else(PeerSync::new);
+        if let Some(version) = &frame.version {
+            let sv = StateVector::decode_v1(version)
+                .with_context(|| format!("decoding the state vector from '{peer}'"))?;
+            let mut known = state.known.take().unwrap_or_default();
+            known.merge(sv);
+            state.known = Some(known);
+            // The peer may not have this adapter's deletes. Send them again.
+            state.sent_ds = None;
+        }
+        if frame.asks_version {
+            state.version_due = true;
+        }
+        if let Some(bytes) = &frame.update {
+            let update = Update::decode_v1(bytes)
+                .with_context(|| format!("decoding sync message from '{peer}'"))?;
+            // The peer has what it sent, so do not send it back.
+            let sent = update.state_vector();
+            let mut txn = self.doc.transact_mut();
+            txn.apply_update(update)
+                .with_context(|| format!("applying update from '{peer}'"))?;
+            if let Some(known) = &mut state.known {
+                known.merge(sent);
+            }
+        }
+        self.peers.insert(peer.to_owned(), state);
         Ok(())
     }
 
+    fn sync_pending(&mut self, peer: &str) -> bool {
+        self.next_message(peer).is_some()
+    }
+
     fn sync_reset(&mut self, peer: &str) {
-        // Removing the entry is the full reset. With no entry, the next
-        // `sync_generate` diffs from an empty state vector, and its delete-set
-        // check fails. So it sends the full document.
-        self.peer_sent.remove(peer);
+        // Removing the entry is the full reset. The next `sync_generate` sends
+        // the state vector again, and waits for the peer's.
+        self.peers.remove(peer);
     }
 
     fn reset(&mut self) {
@@ -360,7 +416,7 @@ impl CrdtAdapter for YrsAdapter {
     fn set_instance_id(&mut self, id: u128) -> anyhow::Result<()> {
         let low = (id as u64) & ((1 << INSTANCE_ID_BITS) - 1);
         self.doc = Doc::with_client_id(low | (1 << INSTANCE_ID_BITS));
-        self.peer_sent.clear();
+        self.peers.clear();
         Ok(())
     }
 
@@ -462,6 +518,9 @@ mod tests {
         each_op_variant_mutates_the_doc,
         reads_are_stable_without_writes,
         sync_is_idempotent_once_converged,
+        sync_pending_matches_generate,
+        a_heal_after_a_quiet_partition_sends_little,
+        first_sync_of_a_shared_document_sends_little,
         three_replicas_converge_through_a_hub,
         doc_size_grows_with_every_op,
         reset_returns_adapter_to_a_fresh_state,

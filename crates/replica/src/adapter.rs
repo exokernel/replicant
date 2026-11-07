@@ -8,6 +8,7 @@
 
 /// The adapter for Automerge.
 mod automerge;
+mod frame;
 /// The adapter for Loro.
 mod loro;
 /// The adapter for Yrs.

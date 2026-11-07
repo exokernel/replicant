@@ -76,6 +76,14 @@ pub trait CrdtAdapter: Send + 'static {
     /// Processes an inbound sync message from `peer`.
     fn sync_receive(&mut self, peer: &str, msg: Vec<u8>) -> anyhow::Result<()>;
 
+    /// Returns true if [`Self::sync_generate`] for `peer` would return a message
+    /// now. Changes no state.
+    ///
+    /// The orchestrator uses this to see that sync between two replicas is
+    /// complete: no replica has a message to send, and every sent message has
+    /// arrived.
+    fn sync_pending(&mut self, peer: &str) -> bool;
+
     /// Discards the per-peer sync state for `peer`. Does not change the
     /// document.
     ///
@@ -84,12 +92,14 @@ pub trait CrdtAdapter: Send + 'static {
     /// new handshake. For an adapter that caches the peer's state vector, this
     /// is a diff from the empty state.
     ///
-    /// The orchestrator calls this when it heals a simulated partition. While
-    /// a link is blocked, the replica can generate a message that is then
-    /// dropped. The per-peer state then records data that the peer never
-    /// received, and sync can stop. Discarding the state is always safe. The
-    /// worst result is that the adapter sends again some data that the peer
-    /// already has.
+    /// The replica calls this when a new sync stream to `peer` opens. The old
+    /// state can record messages that the old stream did not deliver.
+    /// Discarding the state is always safe. The worst result is that the
+    /// adapter sends again some data that the peer already has.
+    ///
+    /// A blocked link keeps its stream, so a partition does not call this. The
+    /// state that the replicas had before the partition stays, and the heal
+    /// sends only what changed.
     ///
     /// Must do nothing if there is no state for `peer`.
     fn sync_reset(&mut self, peer: &str);
