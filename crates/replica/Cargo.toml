@@ -6,8 +6,8 @@ edition = "2024"
 [dependencies]
 common               = { path = "../common" }
 automerge            = "0.12"
-yrs                  = "0.28"
-loro                 = "1.16"
+yrs                  = "0.28.1"
+loro                 = "1.17"
 anyhow               = { workspace = true }
 clap                 = { workspace = true }
 tokio                = { workspace = true }
