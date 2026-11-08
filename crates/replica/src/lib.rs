@@ -6,9 +6,11 @@
 //! - [`server`]: the tonic services and the shared replica state.
 //! - [`adapter`]: one [`common::CrdtAdapter`] per CRDT library, and the
 //!   [`adapter::Crdt`] selector that both binaries take as `--crdt`.
+//! - [`logging`]: the log filter that both binaries use.
 //!
 //! The private `metrics` module holds the OTel instruments.
 
 pub mod adapter;
+pub mod logging;
 mod metrics;
 pub mod server;

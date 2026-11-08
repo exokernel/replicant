@@ -176,8 +176,9 @@ fn parse_replica_endpoint(s: &str) -> Result<ReplicaEndpoint, String> {
 #[tokio::main]
 async fn main() -> Result<()> {
     // Logs go to stderr, so the structured records on stdout stay clean.
+    // Not a level: the CRDT libraries must stay at WARN. See `replica::logging`.
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
+        .with_env_filter(replica::logging::filter())
         .with_writer(std::io::stderr)
         .init();
 
