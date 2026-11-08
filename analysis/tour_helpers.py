@@ -94,11 +94,20 @@ def docker_available() -> bool:
         return False
 
 
+# The trace files that the tour's examples read. The folders are not enough:
+# the generator makes them before it writes the files.
+TOUR_TRACES = (
+    "crdt-benchmarks/b1.4.trace.json",
+    "crdt-benchmarks/b2.1c.trace.json",
+    "editing-traces/automerge-paper.json.gz",
+    "editing-traces/friendsforever.json.gz",
+)
+
+
 def traces_available(*paths: str) -> bool:
-    """True if each path exists under `traces/`. With no paths, true if the
-    crdt-benchmarks and editing-traces folders exist."""
-    paths = paths or ("crdt-benchmarks", "editing-traces")
-    return all((TRACES / p).exists() for p in paths)
+    """True if each file exists under `traces/`. With no paths, true if every
+    file in `TOUR_TRACES` exists."""
+    return all((TRACES / p).is_file() for p in paths or TOUR_TRACES)
 
 
 def kind_installed() -> bool:

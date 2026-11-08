@@ -1699,10 +1699,12 @@ def _(binary, crdt, s81_go, s81_lanes):
                 """
                 The merge of one op is the same in each lane, but the heal
                 reads differently. When a dot sits on its tick, the trial
-                converged at the first poll: it measured the floor of the
-                lane, not the merge. `first_poll_share` is the share of such
-                trials. A result near the floor says "faster than the poll",
-                and nothing more precise.
+                converged at the first poll, and the poll cannot separate the
+                merge from the floor of the lane. `first_poll_share` is the
+                share of such trials. As section 5 says, the first poll also
+                waits while a merge holds the adapter's lock, so the tick can
+                include merge cost. A result at the floor says "done within
+                one poll round", and nothing more precise.
                 """
             ),
         ]
@@ -1748,7 +1750,12 @@ def _(binary, s82_go):
         "paper-one-op", [[0], [1]], 1, workload="text_splice", locality="random_position", baseline=th.PAPER
     )
     _rows = []
-    for _label, _env in (("libraries at WARN (default)", None), ("RUST_LOG=info,automerge=info", {"RUST_LOG": "info,automerge=info"})):
+    # Pin both filters. The notebook's own RUST_LOG must not leak into the
+    # first run, or both runs could enable the same spans.
+    for _label, _env in (
+        ("RUST_LOG=info: libraries at WARN (the default)", {"RUST_LOG": "info"}),
+        ("RUST_LOG=info,automerge=info", {"RUST_LOG": "info,automerge=info"}),
+    ):
         with mo.status.spinner(title=f"Running with {_label}…"):
             _r = th.run(_cell, "automerge", binary, trials=3, lane="in-process", env=_env)
         _rows += [{"log filter": _label, "trial": _t.trial, "convergence_ms": _t.convergence_ms} for _t in _r.trials.itertuples()]
@@ -1978,8 +1985,10 @@ def _():
       host, not a property of the library.
     - **Look for groups.** A cell with fast and slow trials can be an id effect
       (8.3). Report the groups.
-    - **Know the floor.** A trial that converged at the first poll measured
-      the poll, not the merge (8.1).
+    - **Know the floor.** A trial that converged at the first poll gives only
+      an upper bound: the merge and the poll together took this long. The
+      first poll waits for a merge that holds the adapter's lock, so the time
+      can be mostly merge or mostly poll (5, 8.1).
     - **Check the deferred counter.** Each sync link has a buffer of 64
       messages. Any deferral means that the timings include those stalls.
     - **Keep the libraries' logs at WARN.** An enabled span can cost more than
