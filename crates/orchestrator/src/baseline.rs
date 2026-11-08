@@ -218,34 +218,123 @@ async fn verify_same_document(clients: &mut [Client], length: usize) -> Result<(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::path::{Path, PathBuf};
+
     use sha2::{Digest, Sha256};
 
+    use super::BaselineStore;
+    use crate::scenario::Baseline;
+
+    /// Returns an empty directory for one test.
+    fn scratch(test: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("baseline-{}-{test}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Writes `json` as a trace file in `dir`, and returns a baseline that
+    /// names it with its true hash.
+    fn baseline(dir: &Path, name: &str, json: &str) -> Baseline {
+        std::fs::write(dir.join(name), json).unwrap();
+        Baseline {
+            trace: name.into(),
+            sha256: replay::trace::hex(&Sha256::digest(json)),
+            length: 1,
+        }
+    }
+
+    /// Returns the error of `check`, as text.
+    fn refusal(dir: &Path, baseline: &Baseline) -> String {
+        format!("{:#}", BaselineStore::new(dir).check(baseline).unwrap_err())
+    }
+
+    #[test]
+    fn a_single_chain_of_ascii_text_is_accepted() {
+        let dir = scratch("ok");
+        let b = baseline(
+            &dir,
+            "ok.json",
+            r#"{"endContent":"ab","txns":[{"patches":[[0,0,"ab"]]}]}"#,
+        );
+        BaselineStore::new(&dir).check(&b).unwrap();
+    }
+
+    #[test]
+    fn a_baseline_with_the_wrong_hash_is_refused() {
+        let dir = scratch("hash");
+        let mut b = baseline(
+            &dir,
+            "t.json",
+            r#"{"endContent":"a","txns":[{"patches":[[0,0,"a"]]}]}"#,
+        );
+        b.sha256 = "0".repeat(64);
+        let err = refusal(&dir, &b);
+        assert!(
+            err.contains("SHA-256") && err.contains("gen-traces"),
+            "{err}"
+        );
+    }
+
+    /// The divergence cells start every replica from one document, so a
+    /// baseline must be one chain of text edits. A fork has no single text.
+    #[test]
+    fn a_baseline_that_forks_is_refused() {
+        let dir = scratch("fork");
+        let b = baseline(
+            &dir,
+            "fork.json",
+            r#"{"kind":"concurrent","numAgents":2,"oracle":{"kind":"tree_invariants"},"txns":[
+                {"agent":0,"parents":[],"patches":[[0,0,"a"]]},
+                {"agent":0,"parents":[0],"patches":[[0,0,"b"]]},
+                {"agent":1,"parents":[0],"patches":[[0,0,"c"]]}]}"#,
+        );
+        assert!(refusal(&dir, &b).contains("one chain"));
+    }
+
+    #[test]
+    fn a_list_baseline_is_refused() {
+        let dir = scratch("list");
+        let b = baseline(
+            &dir,
+            "list.json",
+            r#"{"oracle":{"kind":"exact_list","values":["a"]},"txns":[{"listOps":[[0,0,["a"]]]}]}"#,
+        );
+        assert!(refusal(&dir, &b).contains("must be text"));
+    }
+
+    /// The Yrs adapter indexes text by bytes, so the positions of a text that
+    /// is not ASCII would differ between libraries.
+    #[test]
+    fn a_baseline_that_is_not_ascii_is_refused() {
+        let dir = scratch("ascii");
+        let b = baseline(
+            &dir,
+            "e.json",
+            r#"{"endContent":"é","txns":[{"patches":[[0,0,"é"]]}]}"#,
+        );
+        assert!(refusal(&dir, &b).contains("must be ASCII"));
+    }
+
     /// A second scenario that gives a checked trace another hash is refused,
-    /// and the same hash again is accepted.
+    /// and the same hash again, in any case, is accepted.
     #[test]
     fn a_checked_trace_with_another_hash_is_refused() {
-        let dir = std::env::temp_dir().join(format!("baseline-hash-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let json = br#"{"endContent":"ab","txns":[{"patches":[[0,0,"ab"]]}]}"#;
-        std::fs::write(dir.join("t.json"), json).unwrap();
-        let baseline = |sha256: String| Baseline {
-            trace: PathBuf::from("t.json"),
-            sha256,
-            length: 2,
-        };
-        let right = replay::trace::hex(&Sha256::digest(json));
+        let dir = scratch("reuse");
+        let json = r#"{"endContent":"ab","txns":[{"patches":[[0,0,"ab"]]}]}"#;
         let mut store = BaselineStore::new(&dir);
+        let mut b = baseline(&dir, "t.json", json);
         // An uppercase pin works when it is checked first, and after a
         // lowercase one.
-        BaselineStore::new(&dir)
-            .check(&baseline(right.to_uppercase()))
-            .unwrap();
-        store.check(&baseline(right.clone())).unwrap();
-        store.check(&baseline(right.to_uppercase())).unwrap();
-        let err = store.check(&baseline("0".repeat(64))).unwrap_err();
-        assert!(err.to_string().contains("in another"), "{err}");
-        std::fs::remove_dir_all(&dir).unwrap();
+        let mut upper = baseline(&dir, "t.json", json);
+        upper.sha256 = upper.sha256.to_uppercase();
+        BaselineStore::new(&dir).check(&upper).unwrap();
+        store.check(&b).unwrap();
+        b.sha256 = b.sha256.to_uppercase();
+        store.check(&b).unwrap();
+        b.sha256 = "0".repeat(64);
+        let err = format!("{:#}", store.check(&b).unwrap_err());
+        assert!(err.contains("in another"), "{err}");
     }
 
     /// A trace whose patches do not make its `endContent` is refused when the

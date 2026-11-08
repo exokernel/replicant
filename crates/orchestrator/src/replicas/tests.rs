@@ -334,3 +334,134 @@ async fn a_seeded_id_survives_a_load() {
         "no head has the seeded client id {client_id:#x}"
     );
 }
+
+// ── Convergence, stats, and the checks ─────────────────────────────────
+
+/// Returns the events of `log` as JSON values.
+fn events(log: &EventLog) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    log.write_to(&mut out, "s", 1).unwrap();
+    String::from_utf8(out)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+/// Two empty replicas have equal fingerprints, but an empty fingerprint is not
+/// convergence. So the poll waits, and fails at its timeout.
+#[tokio::test]
+async fn empty_replicas_never_count_as_converged() {
+    let mut tasks = JoinSet::new();
+    let (_, mut clients) = two_nodes(&mut tasks).await;
+    let mut log = EventLog::new(true);
+    let err = wait_for_nodes(
+        &mut clients,
+        &[0, 1],
+        Instant::now(),
+        Duration::from_millis(50),
+        &mut log,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("did not converge"), "{err}");
+    let events = events(&log);
+    assert!(events.len() > 1, "the poll gave up after one round");
+    assert!(events.iter().all(|e| e["event"] == "poll"));
+    assert_eq!(events[0]["classes"], serde_json::json!([null, null]));
+}
+
+/// Replicas with no link and different writes stay apart, so the poll fails
+/// at its timeout.
+#[tokio::test]
+async fn unlinked_replicas_with_different_writes_time_out() {
+    let mut tasks = JoinSet::new();
+    let (_, mut clients) = two_nodes(&mut tasks).await;
+    map_put(&mut clients[0], "a", "1").await.unwrap();
+    map_put(&mut clients[1], "b", "2").await.unwrap();
+    let err = wait_for_nodes(
+        &mut clients,
+        &[0, 1],
+        Instant::now(),
+        Duration::from_millis(50),
+        &mut EventLog::off(),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("did not converge"), "{err}");
+}
+
+/// The stats of a trial name each peer by its index, and count the messages
+/// that each replica sent and received on the link.
+#[tokio::test]
+async fn record_stats_logs_the_counts_of_each_link() {
+    let mut tasks = JoinSet::new();
+    let (endpoints, mut clients) = two_nodes(&mut tasks).await;
+    connect_edges(&clients, &endpoints, &[(0, 1)])
+        .await
+        .unwrap();
+    map_put(&mut clients[0], "k", "v").await.unwrap();
+    wait_for_pair(&mut clients).await;
+    wait_for_sync_idle(&mut clients, &[(0, 1)], Duration::from_secs(5))
+        .await
+        .unwrap();
+
+    let mut log = EventLog::new(true);
+    record_stats(&mut clients, &mut log).await.unwrap();
+    let stats = events(&log);
+    assert_eq!(stats.len(), 2);
+    for (node, e) in stats.iter().enumerate() {
+        assert_eq!(e["event"], "stats");
+        assert_eq!(e["node"], node);
+        assert!(e["doc_size_bytes"].as_u64().unwrap() > 0);
+        let peers = e["peers"].as_array().unwrap();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0]["peer"], 1 - node);
+        assert!(peers[0]["tx"].as_u64().unwrap() > 0);
+        assert_eq!(peers[0]["deferred"], 0);
+    }
+    // Sync was idle, so each message that one side sent has arrived.
+    assert_eq!(stats[0]["peers"][0]["tx"], stats[1]["peers"][0]["rx"]);
+    assert_eq!(stats[1]["peers"][0]["tx"], stats[0]["peers"][0]["rx"]);
+
+    // With the log off, the call still reads the stats but records nothing.
+    let mut off = EventLog::off();
+    record_stats(&mut clients, &mut off).await.unwrap();
+    assert!(events(&off).is_empty());
+}
+
+/// A link with no handshake is not idle, even though no replica has a
+/// message to send. Once the link exists, the handshake makes it idle.
+#[tokio::test]
+async fn sync_is_idle_only_after_a_handshake_on_every_link() {
+    let mut tasks = JoinSet::new();
+    let (endpoints, mut clients) = two_nodes(&mut tasks).await;
+    let err = wait_for_sync_idle(&mut clients, &[(0, 1)], Duration::from_millis(50))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("was not idle"), "{err}");
+
+    connect_edges(&clients, &endpoints, &[(0, 1)])
+        .await
+        .unwrap();
+    wait_for_sync_idle(&mut clients, &[(0, 1)], Duration::from_secs(5))
+        .await
+        .unwrap();
+}
+
+/// The text-length check names the replica that lost inserts.
+#[tokio::test]
+async fn the_text_length_check_names_the_short_replica() {
+    let mut tasks = JoinSet::new();
+    let (_, mut clients) = two_nodes(&mut tasks).await;
+    ensure_text_all(&mut clients, 0..2).await.unwrap();
+    text_splice(&mut clients[0], TEXT_OBJ, 0, "ab")
+        .await
+        .unwrap();
+    verify_text_length(&mut clients, &[0], 2).await.unwrap();
+    let err = verify_text_length(&mut clients, &[0, 1], 2)
+        .await
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("node 1") && msg.contains("found 0"), "{msg}");
+}
