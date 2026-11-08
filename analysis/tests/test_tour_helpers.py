@@ -162,6 +162,17 @@ def test_check_archive_finds_a_label_that_disagrees(tmp_path):
     assert table.loc["grid/pilot.csv", "name says"] == "-"
 
 
+def test_trace_folders_alone_do_not_count_as_traces(tmp_path, monkeypatch):
+    monkeypatch.setattr(th, "TRACES", tmp_path)
+    for path in th.TOUR_TRACES:
+        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+    assert not th.traces_available()
+    for path in th.TOUR_TRACES:
+        (tmp_path / path).write_text("{}")
+    assert th.traces_available()
+    assert not th.traces_available("crdt-benchmarks/absent.trace.json")
+
+
 def test_check_archive_shows_lost_provenance(tmp_path):
     (tmp_path / "yrs-timeout.csv").write_text("")
     (tmp_path / "yrs-timeout.meta.json").write_text(
