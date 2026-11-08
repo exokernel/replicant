@@ -122,7 +122,10 @@ async fn open_stream(
         .connect()
         .await
         .with_context(|| format!("cannot connect to peer {peer_id} at {addr}"))?;
-    let mut client = SyncClient::new(channel);
+    // See the limit on the server side, in `router`.
+    let mut client = SyncClient::new(channel)
+        .max_decoding_message_size(common::MAX_RPC_BYTES)
+        .max_encoding_message_size(common::MAX_RPC_BYTES);
 
     let (raw_tx, grpc_rx) = outbound_channel(std::convert::identity);
     let mut request = Request::new(ReceiverStream::new(grpc_rx));

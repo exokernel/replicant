@@ -450,6 +450,32 @@ mod tests {
         assert!(err.to_string().contains("partition leaked"), "{err}");
     }
 
+    /// A sync message larger than gRPC's default 4 MiB limit still arrives. An
+    /// Automerge heal of 10^5 ops per side on the B4 paper sends about 13 MB.
+    #[tokio::test]
+    async fn a_sync_message_above_4_mib_arrives() {
+        let mut tasks = JoinSet::new();
+        let (endpoints, mut clients) = spawn_nodes(2, Crdt::Automerge, &mut tasks).await.unwrap();
+        connect_edges(&clients, &endpoints, &[(0, 1)])
+            .await
+            .unwrap();
+        // Text that does not compress, so the sync message stays above 4 MiB.
+        let mut rng = common::SplitMix64::new(7);
+        let big: String = (0..8 << 20)
+            .map(|_| char::from(b'!' + (rng.next_u64() % 94) as u8))
+            .collect();
+        map_put(&mut clients[0], "big", &big).await.unwrap();
+        wait_for_nodes(
+            &mut clients,
+            &[0, 1],
+            Instant::now(),
+            Duration::from_secs(30),
+            &mut EventLog::off(),
+        )
+        .await
+        .unwrap();
+    }
+
     /// The leak gate passes when the groups really do differ.
     #[tokio::test]
     async fn diverged_gate_accepts_genuinely_divergent_groups() {

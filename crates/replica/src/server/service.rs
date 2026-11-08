@@ -32,7 +32,13 @@ pub fn router(state: Arc<ReplicaState>) -> Router {
                 .max_decoding_message_size(MAX_RPC_BYTES)
                 .max_encoding_message_size(MAX_RPC_BYTES),
         )
-        .add_service(SyncServer::new(service))
+        // A sync message can be large: an Automerge heal of 10^5 ops per side
+        // on the B4 paper sends about 13 MB. The default limit is 4 MiB.
+        .add_service(
+            SyncServer::new(service)
+                .max_decoding_message_size(MAX_RPC_BYTES)
+                .max_encoding_message_size(MAX_RPC_BYTES),
+        )
 }
 
 /// Implements both gRPC services for one replica. This module implements
