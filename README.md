@@ -155,3 +155,8 @@ any other untrusted input:
 
 The author reviews every line with the goal of being able to defend it, and is
 responsible for the code, the methodology, and all claims made from the data.
+
+## License
+
+The code is under the [MIT License](LICENSE). The trace data is separate, and has its
+own licenses.
