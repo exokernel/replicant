@@ -635,7 +635,8 @@ def replay(
     `data_dir` holds the trace files that the spec names.
 
     A trial that fails its check is a row in `failed`, not an error. The
-    function raises only if the binary wrote no result rows.
+    function raises if the binary wrote no result rows, or if it exited with an
+    error and wrote no `failed` row, such as when it cannot reach a replica.
     """
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "replay.jsonl"
@@ -659,7 +660,9 @@ def replay(
             if out.exists()
             else []
         )
-    if not rows:
+    if not rows or (
+        proc.returncode != 0 and not any(r["row_type"] == "failed" for r in rows)
+    ):
         raise RuntimeError(f"replay failed:\n{proc.stderr[-3000:]}")
 
     def table(kind: str) -> pd.DataFrame:
@@ -732,8 +735,9 @@ def check_archive(data: Path = REPO / "data") -> pd.DataFrame:
     """Compares each archived result CSV with its provenance file.
 
     A file name that starts with a library name must match `run.crdt` in the
-    provenance. A CSV with no rows is a run that failed. One row per CSV that
-    has a provenance file.
+    provenance. A CSV with no rows is a run that failed. A provenance file that
+    says `provenance_unavailable` belongs to a run whose provenance is lost; its
+    verdict is "no provenance". One row per CSV that has a provenance file.
     """
     rows = []
     for csv in sorted(data.rglob("*.csv")):
@@ -747,14 +751,15 @@ def check_archive(data: Path = REPO / "data") -> pd.DataFrame:
         named = csv.name.split("-")[0]
         named = named if named in CRDTS else ""
         empty = csv.stat().st_size == 0
+        lost = "provenance_unavailable" in meta
         agrees = not named or libraries == [named]
         rows.append(
             {
                 "file": str(csv.relative_to(data)),
                 "name says": named or "-",
-                "provenance says": ", ".join(libraries) or "-",
+                "provenance says": "unavailable" if lost else ", ".join(libraries) or "-",
                 "csv rows": "none" if empty else "yes",
-                "verdict": "ok" if agrees else "WRONG LABEL",
+                "verdict": "no provenance" if lost else "ok" if agrees else "WRONG LABEL",
             }
         )
     return pd.DataFrame(rows)

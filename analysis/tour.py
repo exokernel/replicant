@@ -980,6 +980,10 @@ def _():
 @app.cell
 def _(crdt, go, s4_heal, s4_locality, s4_size, s4_start, s4_sweep, s4_workload):
     mo.stop(not s4_sweep.value)
+    mo.stop(
+        s4_start.value == "B4 paper" and s4_workload.value != "text_splice",
+        mo.callout(mo.md("A starting document needs the `text_splice` workload."), kind="warn"),
+    )
     _g = int(s4_size.value)
     _rows = []
     with mo.status.progress_bar(total=3, title="Running") as _bar:
@@ -1571,13 +1575,16 @@ def _(s7_local, s7_workload):
 
 
 @app.cell
-def _(s7_remote, s7_workload, stack):
+def _(crdt, s7_remote, s7_workload, stack):
     mo.stop(not s7_remote.value)
     mo.stop(stack is None, mo.callout(mo.md("This needs the docker or the k8s lane."), kind="warn"))
     with mo.status.spinner(title=f"Replaying {s7_workload.value} on the {stack.LANE} stack…"):
+        # A lane comparison in part 8 can stop this stack. Start it again with
+        # the selected library before the replay calls it.
+        stack.ensure(crdt.value)
         _r = th.replay(
             "--only", s7_workload.value,
-            crdts=[stack.crdt],
+            crdts=[crdt.value],
             trials=2,
             replicas=",".join(f"localhost:{stack.PORT_BASE + _i}" for _i in range(stack.size)),
         )
@@ -1887,10 +1894,15 @@ def _():
             mo.ui.table(_bad if not _bad.empty else _check, selection=None, show_column_summaries=False),
             mo.md(
                 f"""
-                {len(_check)} CSV files have a provenance file. **{len(_bad)}**
-                have the wrong label. Each one is an empty CSV: a failed run,
-                with the provenance of another library's run. These files are
-                in the pushed pilot archive, and they are not fixed yet.
+                {len(_check)} CSV files have a provenance file.
+                **{(_check["verdict"] == "WRONG LABEL").sum()}** have the wrong
+                label, and **{(_check["verdict"] == "no provenance").sum()}**
+                have no provenance. The 2026-11-07 pilot archive had three
+                files with the wrong label. Each one was an empty CSV: a run
+                that timed out, with the provenance of another library's run.
+                The real provenance of those runs is lost, so their files now
+                say `provenance_unavailable`, and the check shows them as
+                "no provenance".
 
                 The lesson: read the CSV and its provenance together, and check
                 that they describe the same run.
