@@ -131,3 +131,24 @@ impl std::str::FromStr for Crdt {
 
 #[cfg(test)]
 pub(crate) mod conformance;
+
+#[cfg(test)]
+mod tests {
+    use super::Crdt;
+
+    #[test]
+    fn each_name_parses_back_to_its_library() {
+        for crdt in Crdt::ALL {
+            assert_eq!(crdt.to_string().parse::<Crdt>(), Ok(crdt));
+        }
+    }
+
+    #[test]
+    fn an_unknown_name_lists_the_accepted_names() {
+        let err = "Loro".parse::<Crdt>().unwrap_err();
+        assert_eq!(
+            err,
+            "unknown CRDT 'Loro' (expected one of: automerge, yrs, loro)"
+        );
+    }
+}
