@@ -15,6 +15,9 @@ out="${1:-results/findings/$(date +%F)}"
 trace="${2:-traces/editing-traces/automerge-paper.json.gz}"
 [ -f "$trace" ] || { echo "error: trace not found: $trace (see docs/replay.md)" >&2; exit 1; }
 mkdir -p "$out"
+# Remove the files of an earlier run first. If a probe fails, set -e stops the
+# script, and old provenance or old CSVs must not describe the new, partial run.
+rm -f "${out:?}/meta.json" "${out:?}"/{automerge-sync-state,automerge-apply-cost,yrs-random-insert,loro-peer-probe}.csv
 
 # Build first, so that no compile runs while a probe measures time.
 cargo build --release --quiet --manifest-path tools/findings/Cargo.toml

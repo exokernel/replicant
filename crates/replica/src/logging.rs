@@ -25,19 +25,32 @@ pub fn filter() -> EnvFilter {
 
 /// Returns the filter directives for the value `env` of `RUST_LOG`.
 ///
-/// A crate that `env` names keeps the level that `env` gives it. So
+/// A crate that `env` names as a whole keeps the level that `env` gives it. So
 /// `RUST_LOG=info,automerge=debug` shows Automerge's spans, and then pays their
-/// cost.
+/// cost. A directive for a module or a span only, such as
+/// `automerge::sync=debug` or `yrs[sync]=trace`, does not remove the WARN
+/// default of its crate. The filter applies the more exact directive where it
+/// matches, and WARN to the rest of the crate.
 fn spec(env: &str) -> String {
     let base = if env.is_empty() { "info" } else { env };
+    let named: Vec<&str> = base.split(',').filter_map(whole_target).collect();
     let libraries = LIBRARY_CRATES
         .iter()
-        .filter(|krate| !base.contains(*krate))
+        .filter(|krate| !named.contains(krate))
         .map(|krate| format!("{krate}=warn"));
     std::iter::once(base.to_owned())
         .chain(libraries)
         .collect::<Vec<_>>()
         .join(",")
+}
+
+/// Returns the target of one `RUST_LOG` directive, the text before `=`, if the
+/// directive applies to the whole target. A directive with a span filter, such
+/// as `yrs[sync]=trace`, gives `None`. A directive with only a level, such as
+/// `debug`, gives the level, which names no crate.
+fn whole_target(directive: &str) -> Option<&str> {
+    let target = directive.split('=').next().unwrap_or_default().trim();
+    (!target.contains('[')).then_some(target)
 }
 
 #[cfg(test)]
@@ -65,6 +78,25 @@ mod tests {
         assert_eq!(
             spec("info,automerge=debug"),
             "info,automerge=debug,loro=warn,loro_internal=warn,yrs=warn"
+        );
+    }
+
+    /// A module directive does not remove the WARN default of its crate.
+    #[test]
+    fn a_module_directive_keeps_its_crate_at_warn() {
+        assert_eq!(
+            spec("info,automerge::sync=debug"),
+            "info,automerge::sync=debug,automerge=warn,loro=warn,loro_internal=warn,yrs=warn"
+        );
+    }
+
+    /// `loro_internal` is not `loro`, and a span filter does not name its whole
+    /// crate.
+    #[test]
+    fn crate_names_match_exactly() {
+        assert_eq!(
+            spec("loro_internal=debug,yrs[sync]=trace"),
+            "loro_internal=debug,yrs[sync]=trace,automerge=warn,loro=warn,yrs=warn"
         );
     }
 }

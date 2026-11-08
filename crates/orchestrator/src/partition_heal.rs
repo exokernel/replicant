@@ -93,7 +93,7 @@ pub async fn run_partition_heal(
     set_instance_ids(&clients, &ids).await?;
 
     if let Some(baseline) = &config.baseline {
-        baselines.install(baseline, &mut clients).await?;
+        baselines.install(baseline, &mut clients, &ids).await?;
     }
 
     // Create the shared text object on every replica while no links exist, and,
