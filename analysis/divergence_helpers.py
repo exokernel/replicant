@@ -177,27 +177,37 @@ def medians(grid: pd.DataFrame) -> pd.DataFrame:
 
 
 #: Measurement faults that the study found and fixed. Each row is one fault: the
-#: cell or probe that showed it, the value before and after the fix, and the
-#: commit of the fix. The values are from the dated records in
-#: `docs/divergence-sweep.md` and the archived data.
+#: cell or probe that showed it, the value before and after the fix, and where
+#: the fix is. `fixed_in` gives the pull request and the title of the commit.
+#: The stack merges each pull request as one squashed commit, so a commit hash
+#: from a branch is not in the history of main, but the pull request number is.
+#: The values are from the dated records in `docs/divergence-sweep.md` and the
+#: archived data.
 FIXES = pd.DataFrame(
     [
         ("A heal measured history, not the merge", "Automerge, 1 op/side, paper", 688, 254,
-         "c6b51578", "Links sync before the partition; the heal is a reconnect."),
+         "#5: feat(orchestrator): sync every link before the partition",
+         "Links sync before the partition; the heal is a reconnect."),
         ("Sync state kept the peer's last request", "Automerge probe, 1 op/side", 190, 54,
-         "rrxqnwxx", "An unblock keeps only the state that the library persists."),
+         "#6: feat(replica): model an unblock as a reconnect",
+         "An unblock keeps only the state that the library persists."),
         ("gRPC's 4 MiB message limit", "Automerge, random_position 10^5", 600_000, 3_200,
-         "76cbfd16", "Raise the size limit on sync streams. Was a timeout."),
+         "#5: fix(replica): raise the size limit on sync streams",
+         "Raise the size limit on sync streams. Was a timeout."),
         ("A fingerprint poll encoded the whole document", "Yrs, 1 op/side, paper", 8.6, 1.5,
-         "koynnnlx", "Fingerprint = state vector + delete set."),
+         "#6: perf(replica): fingerprint Yrs by its state vector and delete set",
+         "Fingerprint = state vector + delete set."),
         ("The log subscriber formatted Automerge's change graph", "Automerge, 1 op/side, docker", 260, 44,
-         "ppqyntyn", "Keep the CRDT libraries at WARN in the log filter."),
+         "#6: fix(replica): keep the CRDT libraries at WARN in the log filter",
+         "Keep the CRDT libraries at WARN in the log filter."),
         ("Every trial drew random library ids", "Loro, same_region 10^4: spread of one cell", 11_600, None,
-         "wqpwonur", "Seed the ids for each repetition."),
+         "#6: feat(orchestrator): seed the library ids of each divergence trial",
+         "Seed the ids for each repetition."),
         ("A failed run kept the old provenance file", "3 files of the pilot archive", None, None,
-         "pppsnmtm", "Remove the old meta.json when a run starts."),
+         "#6: fix(scripts): remove the old provenance file when a bench run starts",
+         "Remove the old meta.json when a run starts."),
     ],
-    columns=["fault", "shown_by", "before_ms", "after_ms", "fix_commit", "fix"],
+    columns=["fault", "shown_by", "before_ms", "after_ms", "fixed_in", "fix"],
 )
 
 

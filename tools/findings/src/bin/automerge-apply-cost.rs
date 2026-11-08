@@ -1,5 +1,7 @@
 //! Finding: the time for Automerge to apply one small change grows with the
-//! history of the document, and with the position of the change in the text.
+//! history of the document. The probe also checks whether the position of the
+//! change in the text matters. On the B4 paper it did not: the five positions
+//! took 15.3-16.2 ms each, with no trend. See `tools/findings/README.md`.
 //!
 //! A source and a target document start equal. The source inserts one
 //! character and commits. The target then applies that one change with

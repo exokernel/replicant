@@ -91,9 +91,13 @@ def _(contention):
         describes the workload only.
 
         Look at `random_position`: its contested share rises from 0.3% to 34% only
-        because the op count rises. **In this grid, more conflict always comes
-        with more ops.** To measure conflict alone, a later grid needs cells with
-        a fixed op count and a varied contested share.
+        because the op count rises. **Within one locality, more conflict comes
+        with more ops.** The localities do vary the share at one op count: at
+        10⁵ ops per side, `append`, `random_position`, and `same_region` have
+        about 0.001%, 34%, and 100% contested ops. But a comparison across
+        localities also changes where the ops go, not only how many conflict.
+        To measure conflict alone, a later grid needs cells with a fixed op
+        count, one kind of position, and a varied contested share.
         """),
         _chart,
     ])
@@ -304,8 +308,10 @@ def _(contention, seeded):
 
         Each point is one cell on one library. A cell with a fast and a slow
         group of trials has a point for each; the slow one is paler. The x axis
-        is the share of ops that the contention model counts as contested. Remember the limit of
-        section 1: in this grid, a cell with more contested ops also has more ops.
+        is the share of ops that the contention model counts as contested.
+        Remember the limit of section 1: within one locality, a cell with more
+        contested ops also has more ops, and two localities differ in where the
+        ops go as well as in their conflict.
         """),
         _chart,
     ])
