@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
 use common::proto;
+use replay::oracle::{CheckPlan, Content};
 use replay::trace::{ContentKind, Trace, read_verified};
 use tonic::Request;
 
@@ -136,7 +137,12 @@ impl BaselineStore {
     }
 }
 
-/// Replays `trace` on replica 0 and returns the encoded document.
+/// Replays `trace` on replica 0, checks the text against the trace's oracle,
+/// and returns the encoded document.
+///
+/// The check runs before the store caches the bytes. Every trial loads them, and
+/// equal fingerprints after the load show only that every replica has the same
+/// document, not that it is the trace's text.
 async fn build(trace: &Trace, clients: &mut [Client]) -> Result<Vec<u8>> {
     ensure_text_all(clients, 0..1).await?;
     let builder = &mut clients[0];
@@ -152,6 +158,17 @@ async fn build(trace: &Trace, clients: &mut [Client]) -> Result<Vec<u8>> {
             .await
             .with_context(|| format!("applying baseline txn {i}"))?;
     }
+    let text = builder
+        .read_text(Request::new(proto::ObjRef {
+            obj: common::TEXT_OBJ.to_owned(),
+        }))
+        .await
+        .context("reading the baseline text")?
+        .into_inner()
+        .text;
+    CheckPlan::new(trace, 1)?
+        .check(&Content::Text(text))
+        .context("the baseline document is not the trace's final text")?;
     let reply = builder
         .encode(Request::new(proto::Empty {}))
         .await
@@ -205,6 +222,35 @@ mod tests {
         store.check(&baseline(right.to_uppercase())).unwrap();
         let err = store.check(&baseline("0".repeat(64))).unwrap_err();
         assert!(err.to_string().contains("in another"), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A trace whose patches do not make its `endContent` is refused when the
+    /// store builds the document, before any trial can load it.
+    #[tokio::test]
+    async fn a_baseline_that_does_not_make_its_end_content_is_refused() {
+        let dir = std::env::temp_dir().join(format!("baseline-oracle-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let json = br#"{"endContent":"ba","txns":[{"patches":[[0,0,"ab"]]}]}"#;
+        std::fs::write(dir.join("t.json"), json).unwrap();
+        let baseline = Baseline {
+            trace: PathBuf::from("t.json"),
+            sha256: replay::trace::hex(&Sha256::digest(json)),
+            length: 2,
+        };
+        let mut tasks = tokio::task::JoinSet::new();
+        let (_, mut clients) =
+            crate::replicas::spawn_nodes(2, replica::adapter::Crdt::Yrs, &mut tasks)
+                .await
+                .unwrap();
+        let err = BaselineStore::new(&dir)
+            .install(&baseline, &mut clients)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not the trace's final text"),
+            "{err:#}"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
