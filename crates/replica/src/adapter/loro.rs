@@ -345,10 +345,11 @@ impl CrdtAdapter for LoroAdapter {
         Ok(self.doc.get_text(obj).len_unicode())
     }
 
-    /// Sets the peer id. The high bit keeps the width of a random `u64` id.
-    fn set_instance_id(&mut self, id: u32) -> anyhow::Result<()> {
+    /// Sets the peer id to the low 64 bits of `id`. The high bit keeps the width
+    /// of a random `u64` id.
+    fn set_instance_id(&mut self, id: u128) -> anyhow::Result<()> {
         self.doc
-            .set_peer_id(u64::from(id) | (1 << 63))
+            .set_peer_id((id as u64) | (1 << 63))
             .context("setting the Loro peer id")
     }
 
@@ -451,6 +452,7 @@ mod tests {
         encode_and_load_round_trip,
         partitioned_list_inserts_merge_after_ensure_list,
         set_instance_id_gives_distinct_replicas,
+        wide_ids_stay_distinct,
         fixed_ids_make_a_merge_repeatable,
         identical_ops_yield_equal_fingerprints,
         disjoint_edits_converge_after_sync,

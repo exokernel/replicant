@@ -36,9 +36,19 @@ ONE_INPUT = {"b1.2", "b1.6", "b1.9"}
 B2_DOCS = 2
 N = 6000
 FIXED_ID_NOTE = (
-    "B3 is not comparable for Yrs time and Loro size. The replay uses fixed, "
-    "ascending ids, and the JS libraries use random ids. See docs/replay.md. "
-    "The tables show these cells, and the totals leave them out."
+    "B3 is not comparable for Yrs time and Loro size. This run used fixed ids, "
+    "and the JS libraries use random ids. See docs/replay.md. The tables show "
+    "these cells, and the totals leave them out."
+)
+MIXED_ID_NOTE = (
+    "This run used seeded ids, except on {fixed}, which used fixed ids. On B3 with "
+    "fixed ids, Yrs time and Loro size are not comparable, because the JS libraries "
+    "use random ids. See docs/replay.md. The tables show these cells, and the totals "
+    "leave them out."
+)
+SEEDED_ID_NOTE = (
+    "This run used seeded ids that look random, as the JS ids do. One seed is one "
+    "sample of the id order. See docs/replay.md."
 )
 # The (metric, library) pairs that the fixed ids make not comparable on B3.
 FIXED_ID_SKEW = {("time", "yrs"), ("docSize", "loro")}
@@ -55,9 +65,12 @@ def reference(bench: str, lib: str) -> str:
     return REFERENCE[lib]
 
 
-def skewed(bench: str, metric: str, lib: str) -> bool:
-    """Return True if the fixed ids make `metric` of `lib` not comparable on `bench`."""
-    return bench.startswith("b3.") and (metric, lib) in FIXED_ID_SKEW
+def skewed(bench: str, metric: str, lib: str, fixed: set[str]) -> bool:
+    """Return True if fixed ids make `metric` of `lib` not comparable on `bench`.
+
+    `fixed` holds the benchmarks that used fixed ids.
+    """
+    return bench in fixed and bench.startswith("b3.") and (metric, lib) in FIXED_ID_SKEW
 
 
 def load_js(directory: Path) -> JsValues:
@@ -75,16 +88,20 @@ def load_js(directory: Path) -> JsValues:
     return values
 
 
-def load_replay(path: Path) -> tuple[Row, Trials, list[Row]]:
-    """Return the run row, {(workload, library): [trial rows]}, and problem rows."""
+def load_replay(path: Path) -> tuple[Row, Trials, list[Row], dict[str, str]]:
+    """Return the run row, {(workload, library): [trial rows]}, the problem rows,
+    and {workload: id order} from the workload rows that record it."""
     run: Row = {}
     trials: Trials = {}
     problems: list[Row] = []
+    orders: dict[str, str] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         row = json.loads(line)
         match row["row_type"]:
             case "run":
                 run = row
+            case "workload" if row.get("id_order"):
+                orders[row["workload"]] = row["id_order"]
             case "trial":
                 if row.get("lane", "in_process") != "in_process":
                     raise SystemExit(
@@ -95,7 +112,7 @@ def load_replay(path: Path) -> tuple[Row, Trials, list[Row]]:
                 trials.setdefault((row["workload"], row["crdt"]), []).append(row)
             case "skipped" | "failed":
                 problems.append(row)
-    return run, trials, problems
+    return run, trials, problems, orders
 
 
 def replay_median(rows: Sequence[Row], field: str) -> float:
@@ -153,6 +170,30 @@ def print_table(header: Iterable[str], rows: Iterable[Iterable[str]]) -> None:
     print()
 
 
+def fixed_ids(run: Row, orders: dict[str, str], benches: Sequence[str]) -> set[str]:
+    """Return the benchmarks that used fixed ids, not seeded ones.
+
+    A workload row gives the id order that the workload used, which can be the
+    workload's own setting. An older file has no such field, so the run's
+    `--id-order` argument applies to all of its benchmarks.
+    """
+    default = run.get("args", {}).get("id_order")
+    return {
+        bench
+        for bench in benches
+        if orders.get(bench, default) in ("ascending", "descending")
+    }
+
+
+def id_note(fixed: set[str], benches: Sequence[str]) -> str:
+    """Return the note that says how the run's ids affect the comparison."""
+    if not fixed:
+        return SEEDED_ID_NOTE
+    if fixed >= set(benches):
+        return FIXED_ID_NOTE
+    return MIXED_ID_NOTE.format(fixed=", ".join(sorted(fixed, key=bench_order)))
+
+
 def report_run(run: Row) -> None:
     """Print where the replay ran."""
     print("## Run\n")
@@ -164,10 +205,12 @@ def report_run(run: Row) -> None:
     )
 
 
-def report_sizes(js: JsValues, trials: Trials, benches: Sequence[str]) -> None:
+def report_sizes(
+    js: JsValues, trials: Trials, benches: Sequence[str], fixed: set[str]
+) -> None:
     """Print the document size ratios, and how many are within the tolerance."""
     print("## Document size: replay / JS\n")
-    print(FIXED_ID_NOTE + "\n")
+    print(id_note(fixed, benches) + "\n")
     ratios: dict[str, list[float]] = {lib: [] for lib in LIBS}
     rows = []
     for bench in benches:
@@ -179,7 +222,7 @@ def report_sizes(js: JsValues, trials: Trials, benches: Sequence[str]) -> None:
                 cells.append("-")
                 continue
             ratio = replay_median(ours, "doc_size") / theirs
-            if not skewed(bench, "docSize", lib):
+            if not skewed(bench, "docSize", lib, fixed):
                 ratios[lib].append(ratio)
             cells.append(f"{ratio:.3f}")
         rows.append(cells)
@@ -194,12 +237,14 @@ def report_sizes(js: JsValues, trials: Trials, benches: Sequence[str]) -> None:
     print()
 
 
-def report_times(js: JsValues, trials: Trials, benches: Sequence[str]) -> None:
+def report_times(
+    js: JsValues, trials: Trials, benches: Sequence[str], fixed: set[str]
+) -> None:
     """Print the times, the rankings on each side, and the ratio shifts."""
     print("## Time in ms\n")
     print(
         "Automerge ranks and ratios use am-js on B2, and am-wasm on all others. "
-        + FIXED_ID_NOTE
+        + id_note(fixed, benches)
         + "\n"
     )
     print(
@@ -227,7 +272,7 @@ def report_times(js: JsValues, trials: Trials, benches: Sequence[str]) -> None:
         if (
             len(ours) == len(theirs) == len(LIBS)
             and min(*ours.values(), *theirs.values()) >= MIN_MS
-            and not any(skewed(bench, "time", lib) for lib in LIBS)
+            and not any(skewed(bench, "time", lib, fixed) for lib in LIBS)
         ):
             if tied(theirs, JS_RESOLUTION_MS) or tied(ours, 0.0):
                 rank_ours = rank_js = agree = "tie"
@@ -340,13 +385,14 @@ def main() -> None:
     args = parser.parse_args()
 
     js = load_js(args.js_dir)
-    run, trials, problems = load_replay(args.replay)
+    run, trials, problems, orders = load_replay(args.replay)
     in_js = {bench for bench, _, _ in js}
     benches = sorted({workload for workload, _ in trials} & in_js, key=bench_order)
 
     report_run(run)
-    report_sizes(js, trials, benches)
-    report_times(js, trials, benches)
+    fixed = fixed_ids(run, orders, benches)
+    report_sizes(js, trials, benches, fixed)
+    report_times(js, trials, benches, fixed)
     report_updates(js, trials, benches)
     report_problems(problems)
 

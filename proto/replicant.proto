@@ -186,7 +186,11 @@ message PeerStats {
 
 // ── Replay messages ────────────────────────────────────────────────────────
 
-message InstanceId { uint32 id = 1; }
+// A 128-bit library id. See CrdtAdapter::set_instance_id.
+message InstanceId {
+  fixed64 high = 1;
+  fixed64 low = 2;
+}
 
 message TimedResponse { uint64 adapter_ns = 1; }
 

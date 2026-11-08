@@ -224,9 +224,10 @@ writeFileSync(join(repoDir, 'workloads/crdt-benchmarks.toml'), toml(
   workloads))
 
 const concurrent = [
-  ['et.friendsforever', 'Two users typing with 1 s of latency', 'concurrent_traces/friendsforever.json.gz'],
+  // Yjs and Yrs reach the end content of this trace only with ascending ids.
+  ['et.friendsforever', 'Two users typing with 1 s of latency', 'concurrent_traces/friendsforever.json.gz', { id_order: 'ascending' }],
   ['et.clownschool', 'Users typing with 0.5 s of latency', 'concurrent_traces/clownschool.json.gz']
-].map(([name, description, file]) => ({ name, description, ...copyTrace(file) }))
+].map(([name, description, file, settings]) => ({ name, description, ...copyTrace(file), ...settings }))
 writeFileSync(join(repoDir, 'workloads/editing-traces.toml'), toml(
   generated + '# The concurrent traces of josephg/editing-traces.\n\n', concurrent))
 

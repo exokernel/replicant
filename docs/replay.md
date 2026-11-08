@@ -5,6 +5,9 @@ and checks the final content. It runs the crdt-benchmarks suite (B1 to B4) and
 editing traces through every adapter. The same format can hold real traces and
 parameterized conflict sweeps.
 
+This file is the reference. For an explanation of the replay and its results, read
+[the guide](crdt-benchmarks-guide.md) first.
+
 ## Quick start
 
 ```sh
@@ -141,17 +144,27 @@ case. On the real traces, a different merge order almost always changes the
 final text. See [Fixed library ids](#fixed-library-ids). A cell with more than one round of divergence and merge needs a new
 decision before it can use this format.
 
-## Fixed library ids
+## Library ids
 
 A library breaks ties between concurrent ops with its replica ids. These ids are
-random by default. A replay sets a fixed id for each replica, so each run is the
-same, and document sizes do not change with the width of a random id. `--id-order`
-reverses the order.
+random by default. A replay sets the id of each replica with `--id-order`:
 
-This setting can change a result. The upstream rules say that no trace has
-concurrent inserts at one position, but `friendsforever` depends on the id order
-under YATA. With `--id-order descending`, Yrs gives the wrong text from char 3798.
-Real Yjs does the same. Automerge and Loro reach `endContent` in both orders.
+| Order | Ids | Use |
+|---|---|---|
+| `seeded` (default) | They look random. They come from `--id-seed`, so each run with one seed is the same. | Comparison with crdt-benchmarks, whose libraries use random ids. |
+| `ascending` | Agent 0 has the lowest id. | A trace that needs this order, and tests of the effect of the order. |
+| `descending` | Agent 0 has the highest id. | Tests of the effect of the order. |
+
+Each adapter keeps as many bits as its library can hold, and keeps the encoded width
+of a random id. The `id_order` field of a `workload` row records the order that the
+workload used, and the `run` row records the seed.
+
+A workload can name the order that it needs with `id_order` in the spec. `--id-order`
+overrides this field. The upstream rules say that no trace has concurrent inserts at
+one position, but `friendsforever` depends on the id order under YATA. With
+descending ids, and with two of three seeds, Yrs gives the wrong text from char 3798.
+Real Yjs does the same with descending ids. So this workload names `ascending`. Automerge and Loro reach
+`endContent` in both fixed orders and with three seeds.
 
 ## Lanes
 
@@ -178,7 +191,7 @@ commit, the host, the build profile, and the library versions.
 
 | `row_type` | Fields |
 |---|---|
-| `workload` | `agents`, `txns`, `roots`, `merges`, and `forks` of the causal graph. One row per workload. |
+| `workload` | `agents`, `id_order`, `txns`, `roots`, `merges`, and `forks` of the causal graph. One row per workload. |
 | `trial` | `time_ms` (includes `read_ms`), `read_ms`, `encode_ms`, `doc_size`, `parse_ms`, `update_bytes`, `update_count`, `adapter_ms` |
 | `memory` | `peak_bytes`, the highest live bytes during the replay above the live bytes of the trial before its first transaction, and `retained_bytes` that the loaded document holds. One extra trial, in process only. Its times are not used. |
 | `skipped` | `reason` |
@@ -203,26 +216,67 @@ These differences make the two sides not directly comparable:
 | One JS sample | Their harness times once per process and rounds to whole ms. Values below about 5 ms have no rank. |
 | B2 update size | The Automerge and Loro factories repeat the first batch in the second update. The replay does not. Also, the harness reports total bytes divided by 2. `compare.py` removes this division. |
 | B2 on `automerge-wasm` | Its factory ignores `transact` and makes one update for each op. It does 12000 update round trips, and the replay does 2. It takes minutes, and it is a different workload. `compare.py` compares B2 with the `automerge` factory, which uses transactions. |
-| Fixed ids | The replay uses fixed, ascending ids. The JS libraries use random ids. See below. |
+| Seeded ids | The replay uses one seed by default, so one run is one sample of the id order. The JS libraries draw new random ids in each process. See below. |
 | `memUsed` | It measures the JS heap, so it cannot see WASM memory. Do not compare it with `retained_bytes`. |
 | Document format | Automerge's JS factory creates three objects first. The replay creates one. |
 | B3.2 | Not run, because the op model has no object value. In the JS factories, Automerge makes a nested CRDT object, and Yjs and Loro store a plain value. |
 
-### Effect of the fixed ids
+### Effect of the ids
 
-On B3, the ids change the result. These values are from one test on one host.
+On B3, the ids change the result. These values are from one host, with 6 trials for
+each setting. The seeded column gives the range of the medians across seeds 1 to 5.
 
-| Measurement | Ascending (default) | Descending | Random |
+| Measurement | Ascending | Descending | Seeded |
 |---|---|---|---|
-| Yrs merge time, B3.4 | 44 ms | 0.7 ms | 22 ms |
-| Yrs merge time, B3.1 | 45 ms | 4.8 ms | 25 ms |
-| Loro snapshot size, B3.4 | 53729 bytes | not measured | 102083 bytes |
+| Yrs merge time, B3.1 | 45 ms | 4.8 ms | 24-25 ms |
+| Yrs merge time, B3.4 | 44 ms | 0.7 ms | 21-22 ms |
+| Yrs document size, B3.3 | 50837 bytes | 46217 bytes | 47757-50837 bytes |
+| Loro snapshot size, B3.4 | 53158 bytes | not measured | 103041-103251 bytes |
+| Automerge merge time, B3.4 | 109 ms | not measured | 145-149 ms |
+| Automerge merge time, B3.5 | 391 ms | not measured | 492-503 ms |
 
-- Yrs: ascending ids are the slowest order that was measured. All B3 clients edit one position. The likely cause is that each merge scans the items that conflict, and the id order sets how many it must pass. This cause was not profiled.
-- Loro: the fixed peer ids share their high bits, and the snapshot is smaller. With random 64-bit ids, the size is within 4% of JS.
-- Automerge: the size difference is about 3% at most. With random actor ids, it is about 0.1% at most. Random ids were also 20% to 40% slower in that one test.
+- Yrs: ascending ids are the slowest order that was measured. All B3 clients edit one position. The likely cause is that each merge scans the items that conflict, and the id order sets how many it must pass. This cause was not profiled. The seed has almost no effect on the time.
+- Loro: the fixed peer ids share their high bits, and the snapshot is smaller. With seeded ids, the B3 size is within 4% of JS.
+- Automerge: the seeded size is within 0.1% of JS. The time depends on how the actors sort. See below.
 
-So do not compare Yrs B3 time or Loro B3 size with crdt-benchmarks. The ids had almost no effect on the two B1 workloads in the same test, B1.10 and B1.11. Other workloads were not tested.
+### Automerge actor order
+
+Automerge keeps its actors in a sorted table. If a new actor does not go at the end of
+the table, `insert_actor` renumbers the actor references of the existing ops
+(`op_set.rs` in automerge 0.12). B3 adds 1540 actors in one merge, so this cost can show.
+The adapter also adds one actor: the `replicant-bootstrap` actor that makes the shared
+object. Its first byte is `0x72`.
+
+A test changed only the actor bytes, on B3 with 5 usable trials for each setting. Times
+are medians, in ms. The same control run at the start and the end gave 108.2 and 107.7 ms
+on B3.4.
+
+| Actors | Each new actor goes | B3.1 | B3.4 | B3.5 |
+|---|---|---|---|---|
+| Ascending, above the bootstrap actor (`0x73`, `0x80`, `0xa5`, `0xf0`) | At the end | 85-86 | 108 | 387-392 |
+| Ascending, below it (`0x00`, `0x10`, `0x71`) | Just before it | 85-89 | 134-138 | 481-487 |
+| Ascending `0x00`, bootstrap actor moved to the lowest position | At the end | 86 | 108 | 392 |
+| Ascending `0xa5`, bootstrap actor moved to the highest position | Just before it | 86 | 135 | 485 |
+| Descending (`0xa5` or `0x00`) | Near the start | 106-107 | 142 | 501-503 |
+| Seeded, with the bootstrap actor at any of three positions | At random positions | 109-110 | 147-149 | 499-504 |
+
+What this shows:
+
+- **The seeded times are not an effect of the bootstrap actor.** They stay the same when that actor moves. The JS libraries also have random actors, so seeded ids are the setting to compare with JS.
+- **The fixed ascending times are the low limit.** No renumbering happens in them, so they understate the cost that random actors have. Seeded ids cost 37% more on B3.4 and 28% more on B3.5.
+- **The effect is per actor.** On B3.4 it is about 26 µs for each actor (40 ms over 1540 actors), and on B3.5 about 71 µs. A document adds each actor once, so a run with few replicas has few of these events. The effect on orchestrator runs was not measured.
+
+B3.1 does not change when only the bootstrap actor is renumbered, but B3.4 and B3.5 do. The
+likely reason is that each list or text op refers to the object that the bootstrap actor
+made, and a map op at the root does not. This reason was inferred from the results, and
+it was not measured directly.
+
+Results with seeded ids at commit `45f699cc`:
+
+- **Document size:** Automerge is within 2% of JS on all 20 workloads. Yrs and Loro are within 2% on 17 and 15. Yrs is 7.8% larger on B3.1, 3.5% larger on B3.3, and 4.8% smaller on B3.4. Loro is 2.0% to 3.9% larger on B3, and 7.4% and 5.8% larger on B1.10 and B1.11. These differences are not explained.
+- **Rank:** 9 of 16 rankings agree with JS. B3.4 and B3.5 now agree. B3.1 and B3.3 do not agree, because Loro is about 4 to 5 times slower in JS than in Rust.
+
+`friendsforever` runs with ascending ids, so do not compare its Yrs time with a seeded workload.
 
 ## Generating the crdt-benchmarks traces
 

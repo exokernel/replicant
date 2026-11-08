@@ -23,7 +23,7 @@ pub trait Target {
     /// Empties the document.
     fn reset(&mut self) -> Result<()>;
     /// Sets the library's id for this replica. Call this on an empty document.
-    fn set_instance_id(&mut self, id: u32) -> Result<()>;
+    fn set_instance_id(&mut self, id: u128) -> Result<()>;
     /// Creates the object that a trace of this `kind` edits.
     fn ensure(&mut self, kind: ContentKind) -> Result<()>;
     /// Applies `ops` in one transaction and returns the update.
@@ -50,7 +50,7 @@ impl Target for Local {
         Ok(())
     }
 
-    fn set_instance_id(&mut self, id: u32) -> Result<()> {
+    fn set_instance_id(&mut self, id: u128) -> Result<()> {
         self.0.set_instance_id(id)
     }
 
@@ -136,8 +136,9 @@ impl Target for Remote {
         Ok(())
     }
 
-    fn set_instance_id(&mut self, id: u32) -> Result<()> {
-        rpc!(self.set_instance_id(proto::InstanceId { id }));
+    fn set_instance_id(&mut self, id: u128) -> Result<()> {
+        let (high, low) = ((id >> 64) as u64, id as u64);
+        rpc!(self.set_instance_id(proto::InstanceId { high, low }));
         Ok(())
     }
 

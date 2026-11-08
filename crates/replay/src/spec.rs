@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Selects the part of a replay that the timer covers.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -20,6 +20,25 @@ pub enum Timing {
     /// updates, as a reference. The timer covers only the merge on the other
     /// checked replicas, and the final reads.
     MergeOnly,
+}
+
+/// The order of the library ids across agents.
+///
+/// A library breaks ties between concurrent ops with these ids. So this order
+/// can change the final text of a trace that has concurrent inserts at one
+/// position, and the time of a merge. Under Yjs and Yrs, the upstream
+/// `friendsforever` trace reaches its `endContent` only with ascending ids.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum IdOrder {
+    /// Ids that look random, as the libraries make by default. They come from a
+    /// seed, so each run with that seed is the same.
+    #[default]
+    Seeded,
+    /// Agent 0 has the lowest id.
+    Ascending,
+    /// Agent 0 has the highest id.
+    Descending,
 }
 
 /// One workload in a spec file.
@@ -57,6 +76,9 @@ pub struct Workload {
     /// Runs only with `--include-heavy`, because it can take many minutes.
     #[serde(default)]
     pub heavy: bool,
+    /// The id order that this trace needs to reach its expected text. Omit this
+    /// to use the default. `--id-order` overrides it.
+    pub id_order: Option<IdOrder>,
 }
 
 /// The default of [`Workload::repeat`].
@@ -143,7 +165,7 @@ mod tests {
     /// bad fixture or a stale hash fails before CI builds an image.
     #[test]
     fn the_smoke_workloads_pass_on_every_library() {
-        use crate::driver::{IdOrder, Plan, run_trial};
+        use crate::driver::{Ids, Plan, run_trial};
         use crate::target::Lane;
         use crate::trace::{Trace, read_verified};
         use replica::adapter::Crdt;
@@ -153,10 +175,24 @@ mod tests {
             let bytes = read_verified(&path, Some(&w.sha256)).unwrap();
             for crdt in Crdt::ALL {
                 let plan = Plan::new(w.clone(), Trace::parse(&bytes).unwrap()).unwrap();
-                run_trial(&plan, &Lane::InProcess(crdt), IdOrder::Ascending)
+                run_trial(&plan, &Lane::InProcess(crdt), Ids::SEEDED)
                     .unwrap_or_else(|e| panic!("{} {crdt}: {e:#}", w.name));
             }
         }
+    }
+
+    /// Yjs and Yrs reach the expected text of this trace only with ascending ids.
+    #[test]
+    fn friendsforever_pins_its_id_order() {
+        let workloads = load(&repo_path("workloads/editing-traces.toml")).unwrap();
+        let pinned = |name: &str| {
+            workloads
+                .iter()
+                .find(|w| w.name == name)
+                .unwrap_or_else(|| panic!("no workload {name}"))
+                .id_order
+        };
+        assert_eq!(pinned("et.friendsforever"), Some(IdOrder::Ascending));
     }
 
     #[test]

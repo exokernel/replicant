@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Context, bail};
-use common::{CrdtAdapter, Op, ScalarVal};
+use common::{CrdtAdapter, INSTANCE_ID_BITS, Op, ScalarVal};
 use yrs::{
     Any, Array, ArrayRef, Doc, GetString, In, Map, MapRef, Number, ReadTxn, Root, RootRef,
     StateVector, Text, TextRef, Transact, TransactionMut, Update,
@@ -354,10 +354,12 @@ impl CrdtAdapter for YrsAdapter {
         Ok(text.get_string(&txn).chars().count())
     }
 
-    /// Replaces the document with an empty one that has this client id. Bit 52
-    /// keeps the varint width of a random id, which has 53 bits.
-    fn set_instance_id(&mut self, id: u32) -> anyhow::Result<()> {
-        self.doc = Doc::with_client_id(u64::from(id) | (1 << 52));
+    /// Replaces the document with an empty one that has this client id. It keeps
+    /// the low 52 bits of `id`. Bit 52 keeps the varint width of a random id,
+    /// which has 53 bits.
+    fn set_instance_id(&mut self, id: u128) -> anyhow::Result<()> {
+        let low = (id as u64) & ((1 << INSTANCE_ID_BITS) - 1);
+        self.doc = Doc::with_client_id(low | (1 << INSTANCE_ID_BITS));
         self.peer_sent.clear();
         Ok(())
     }
@@ -450,6 +452,7 @@ mod tests {
         encode_and_load_round_trip,
         partitioned_list_inserts_merge_after_ensure_list,
         set_instance_id_gives_distinct_replicas,
+        wide_ids_stay_distinct,
         fixed_ids_make_a_merge_repeatable,
         identical_ops_yield_equal_fingerprints,
         disjoint_edits_converge_after_sync,

@@ -4,6 +4,7 @@
 //! Every random choice comes from a seeded [`SplitMix64`], so the same inputs
 //! replay the same stream against any CRDT library.
 
+use common::SplitMix64;
 use serde::{Deserialize, Serialize};
 
 use crate::scenario::{PartitionConfig, WritePattern};
@@ -60,31 +61,6 @@ impl Locality {
             Locality::SameRegion => 0,
             Locality::RandomPosition => (rng.next_u64() % (len as u64 + 1)) as usize,
         }
-    }
-}
-
-/// Minimal deterministic PRNG (SplitMix64) — hand-rolled so the workload is
-/// bit-reproducible without pinning an external RNG crate's algorithm across
-/// versions. Seeds are recorded in results metadata; the same seed replays the
-/// identical op stream against any adapter (Automerge, Yrs, …).
-pub struct SplitMix64 {
-    /// The counter that each draw advances.
-    state: u64,
-}
-
-impl SplitMix64 {
-    /// Seed the generator. Distinct seeds give independent streams.
-    pub fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
-
-    /// Next 64-bit output (advances the state).
-    pub fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
     }
 }
 
@@ -177,16 +153,6 @@ mod tests {
             locality,
             ..PartitionConfig::for_test(2, &[&[0], &[1]])
         }
-    }
-
-    #[test]
-    fn splitmix64_deterministic_and_seed_sensitive() {
-        let seq = |seed| {
-            let mut r = SplitMix64::new(seed);
-            [r.next_u64(), r.next_u64(), r.next_u64()]
-        };
-        assert_eq!(seq(42), seq(42), "same seed reproduces the stream");
-        assert_ne!(seq(42), seq(43), "different seed diverges");
     }
 
     #[test]
