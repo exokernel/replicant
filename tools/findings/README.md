@@ -96,14 +96,17 @@ slow. The rule is not known. It is not which id is lower.
 Effect on Replicant: `same_region` cells on Loro give two or three clusters of times.
 With seeded ids, the same repetitions are slow in every contested cell, so the slow
 path belongs to the id pair. One repetition was slow only in the cells that start
-empty, so the document matters too. See `data/divergence-grid-2026-11-07/`.
+empty. In the paper cells, that repetition also had a writer that continued the
+baseline author's history (a fault fixed later), so the archive cannot tell whether
+the document or the author matters. See `data/divergence-grid-2026-11-07/`.
 
 ## Findings with no probe yet, seen in the grid
 
-- **Yrs: the ids can change a merge by about 2.5 times.** `random_position-1e5` took
-  about 2,200 ms with the ids of repetition 1, and about 870 ms with the ids of
-  repetitions 2 and 3, in two runs. A probe needs the cell's 10⁵ seeded positions and
-  the two Yrs client ids.
+- **Yrs: repetition 1 of one cell is about 2.5 times slower.** `random_position-1e5`
+  took about 2,200 ms in repetition 1, and about 870 ms in repetitions 2 and 3, in two
+  runs. Repetition 1 has other ids, other positions, and the baseline author effect,
+  so the ids are one candidate of three. A probe needs the cell's 10⁵ seeded positions
+  and the two Yrs client ids, and must vary one of the three at a time.
 - **Automerge and Loro: an enabled `tracing` span formats its arguments.**
   Automerge's `load_changes` records the whole change graph with `Debug`. With a log
   subscriber at INFO, one received change on the paper took about 125 ms instead of

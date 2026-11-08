@@ -26,6 +26,26 @@ In both grids, a heal is a reconnect: each replica keeps only the sync state tha
 library keeps across a disconnect. The Yrs fingerprint is the state vector and the
 delete set.
 
+## Limits of this archive
+
+These runs are older than two later changes, so some differences between trials have
+more than one possible cause:
+
+- **The baseline author.** At `f2e3ec0b`, replica 0 of the first trial built the paper
+  under its own trial id, and a replica that loads a document keeps its id. So in trial
+  1 of every paper cell, one writer continued the author of the paper's history, and in
+  trials 2-10 no writer did. A later commit builds the paper under `BASELINE_AUTHOR`, an
+  id that no trial uses.
+- **The positions.** The seed of a trial picks its ids and, for `random_position`, its
+  insert positions. So two trials of a `random_position` cell differ in both.
+
+So a difference between trial 1 and the other trials of a paper cell can come from the
+ids or from the author, and a difference between trials of a `random_position` cell can
+come from the ids or from the positions. The least affected result is Loro
+`same_region` in trials 2-10: its positions do not depend on the seed, and those trials
+have no author effect. A rerun with the fix, and with the same positions for each id
+pair, can separate the causes.
+
 ## Results: `seeded/`
 
 Median `convergence_ms`, with the lowest and highest trial. A value with `s` is in
@@ -70,8 +90,11 @@ A slow trial is more than 10 times the fastest trial of its cell.
 
 - **Seeded ids make the Loro slow path repeatable.** Trial *r* has the same ids in
   every cell. Trials 2, 3, 5, 6, 8, and 9 are slow in every contested Loro cell, and
-  trials 4, 7, and 10 are fast. Trial 1 is slow only in the cells that start empty.
-  So the slow path depends on the id pair and on the document. The rule is not known.
+  trials 4, 7, and 10 are fast. So the slow path depends on the id pair. Trial 1 is
+  slow only in the cells that start empty. In the paper cells, trial 1 also has the
+  baseline author effect (see [Limits](#limits-of-this-archive)), so this archive cannot
+  tell whether the document or the author makes trial 1 fast there. The rule is not
+  known.
   At 10⁵ the spread of one cell is about 4,400 times: 269 ms against about 20 minutes.
 - **Yrs `same_region` grows with the square of the ops.** 44 ms at 10³, 3.8 s at 10⁴,
   and 353 s at 10⁵: about 86 and 93 times for each 10 times the ops. It is the same
@@ -92,16 +115,23 @@ A slow trial is more than 10 times the fastest trial of its cell.
   apply one change on a long history (about 16 ms for each apply, two applies). See
   `automerge-apply-cost` in [`tools/findings/`](../../tools/findings/README.md).
 - **Yrs and Loro have a floor of about 1.3-1.9 ms.**
-- **The two grids agree on Yrs** within about 2% at every cell up to 10⁴. The log
-  filter does not change Yrs, so this is a check of the noise between runs.
+- **The two grids mostly agree on Yrs.** The log filter does not change Yrs, so this
+  is a check of the noise between runs. Of the 15 cells up to 10⁴, the medians agree
+  within 2% in 10 and within 4% in 13. Two cells differ more: `random_position-empty-1e4`
+  (17.1 ms seeded, 15.7 ms random ids, 8%) and `same_region-1e2` (1.87 ms and 1.74 ms,
+  7%). The second is near the floor, where 0.1 ms is a large share. The first also
+  changes its positions with its seeds.
 - **Yrs also has a merge cost that depends on the ids**, at `random_position-1e5`.
   Trial 1 took 2,207 ms, and 2,249 ms in `seeded-rerun/`. Trials 2 and 3 took
-  865-880 ms in both runs. The ids of trial 1 make this cell about 2.5 times slower.
+  865-880 ms in both runs. Trial 1 has other ids, other positions, and the baseline
+  author effect (see [Limits](#limits-of-this-archive)), so any of the three can make
+  it about 2.5 times slower.
   No other Yrs cell shows it.
 
 ## Not explained
 
-- **Why the ids of trial 1 slow Yrs `random_position-1e5`**, and no other Yrs cell.
+- **Why trial 1 is slow on Yrs `random_position-1e5`**, and no other Yrs cell: its
+  ids, its positions, or the baseline author.
 - **Loro `random_position-1e5`: 639-664 ms**, against 460-471 ms in `random-ids/`.
   Possibly an effect of the ids of trials 1-3. Not tested.
 - **The heal timeout does not stop a long import.** The timeout is 600 s, but two Loro

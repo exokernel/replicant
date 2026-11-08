@@ -132,12 +132,48 @@ def _load_loro_peers(path: Path) -> pd.DataFrame:
     return df
 
 
+#: Two trials of one cell this many times apart, with no trial between them,
+#: split the cell into a fast and a slow group. The Loro peer-id effect makes
+#: such cells: on `same_region` at 10^4, 25 ms against 11,000 ms.
+BIMODAL_RATIO = 10.0
+
+
+def split_groups(values: pd.Series) -> list[tuple[str, pd.Series]]:
+    """Splits the trial times of one cell at their largest gap, if the next
+    value is at least `BIMODAL_RATIO` times the one before it. Returns
+    `[("all", values)]` or `[("fast", ...), ("slow", ...)]`."""
+    ordered = values.sort_values()
+    if len(ordered) < 2:
+        return [("all", ordered)]
+    ratios = ordered.to_numpy()[1:] / ordered.to_numpy()[:-1]
+    cut = int(ratios.argmax())
+    if ratios[cut] < BIMODAL_RATIO:
+        return [("all", ordered)]
+    return [("fast", ordered.iloc[: cut + 1]), ("slow", ordered.iloc[cut + 1 :])]
+
+
 def medians(grid: pd.DataFrame) -> pd.DataFrame:
-    """Returns the median, minimum, and maximum of each cell and library."""
-    return (
-        grid.groupby(["library", "locality", "start", "ops"], as_index=False)["convergence_ms"]
-        .agg(median="median", low="min", high="max", trials="count")
-    )
+    """Returns the median, minimum, and maximum of each cell and library.
+
+    A cell whose trials fall into two groups (see `split_groups`) gives two
+    rows, `group = "fast"` and `"slow"`. One median of both groups would
+    describe no trial. Other cells give one row with `group = "all"`.
+    """
+    keys = ["library", "locality", "start", "ops"]
+    rows = []
+    for key, cell in grid.groupby(keys):
+        for group, values in split_groups(cell["convergence_ms"]):
+            rows.append(
+                {
+                    **dict(zip(keys, key)),
+                    "group": group,
+                    "median": values.median(),
+                    "low": values.min(),
+                    "high": values.max(),
+                    "trials": len(values),
+                }
+            )
+    return pd.DataFrame(rows, columns=[*keys, "group", "median", "low", "high", "trials"])
 
 
 #: Measurement faults that the study found and fixed. Each row is one fault: the
@@ -166,8 +202,10 @@ FIXES = pd.DataFrame(
 
 
 def heal_chart(med: pd.DataFrame, trials: pd.DataFrame) -> alt.Chart:
-    """Heal time against ops per side, on log axes: a line of medians and a
-    point for each trial, one color for each library."""
+    """Heal time against ops per side, on log axes: a point for each trial, one
+    color for each library, and a marker for each median. The line joins the
+    medians of cells with one group. A cell with a fast and a slow group (see
+    `medians`) shows both medians, with their own shapes, and no line."""
     x = alt.X("ops:Q", scale=alt.Scale(type="log"), title="ops per side")
     y = alt.Y("convergence_ms:Q", scale=alt.Scale(type="log"), title="heal time (ms)")
     color = alt.Color("library:N", scale=LIBRARY_COLORS)
@@ -176,9 +214,22 @@ def heal_chart(med: pd.DataFrame, trials: pd.DataFrame) -> alt.Chart:
         .mark_circle(size=30, opacity=0.45)
         .encode(x=x, y=y, color=color, tooltip=["library", "scenario", "trial", "convergence_ms"])
     )
+    data = med.rename(columns={"median": "convergence_ms"})
+    tooltip = ["library", "ops", "group", "convergence_ms", "low", "high", "trials"]
     lines = (
-        alt.Chart(med.rename(columns={"median": "convergence_ms"}))
-        .mark_line(point=True)
-        .encode(x=x, y=y, color=color, tooltip=["library", "ops", "convergence_ms", "low", "high", "trials"])
+        alt.Chart(data[data["group"] == "all"])
+        .mark_line()
+        .encode(x=x, y=y, color=color)
     )
-    return (points + lines).properties(width=560, height=340)
+    marks = (
+        alt.Chart(data)
+        .mark_point(filled=True, size=70)
+        .encode(
+            x=x,
+            y=y,
+            color=color,
+            shape=alt.Shape("group:N", sort=["all", "fast", "slow"], title="median of"),
+            tooltip=tooltip,
+        )
+    )
+    return (points + lines + marks).properties(width=560, height=340)

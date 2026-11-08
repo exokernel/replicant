@@ -379,8 +379,11 @@ bimodal Loro results. With a starting document, `random_position` did not show i
 
 **2026-11-07 — with seeded ids, the Loro slow path is a property of the id pair.** In
 the seeded grid, the same repetitions (2, 3, 5, 6, 8, and 9) were slow in every
-contested Loro cell, and repetitions 4, 7, and 10 were fast. Repetition 1 was slow only
-in the cells that start empty. So the slow path depends on the ids and on the document.
+contested Loro cell, and repetitions 4, 7, and 10 were fast. So the slow path depends
+on the ids. Repetition 1 was slow only in the cells that start empty. In the paper
+cells, repetition 1 was also the only one whose writer continued the baseline author's
+history (fixed later with `BASELINE_AUTHOR`), so the grid cannot tell whether the
+document or the author made the difference.
 At `same_region-1e5`, one cell had 269 ms on a fast pair and about 1,180 s on a slow
 pair. The median of such a cell only counts the slow pairs, so report the fast and slow
 groups. See [`data/divergence-grid-2026-11-07/`](../data/divergence-grid-2026-11-07/).
@@ -393,7 +396,9 @@ every size, and the number of concurrent siblings on that anchor grows with the 
 **2026-11-07 — the ids can also change a Yrs merge.** In the seeded grid, Yrs
 `random_position-1e5` took 2,207 ms in repetition 1 and 876-880 ms in repetitions 2
 and 3. A rerun gave 2,249, 879, and 865 ms. No other Yrs cell showed it. The cause is
-not known.
+not known. Repetition 1 differs in three ways: its ids, its insert positions (the seed
+picks both), and the baseline author effect. A rerun with the author fix and fixed
+positions can separate them.
 
 **2026-11-07 — the heal timeout does not stop a long import.** The heal timeout is
 600 s, but two Loro trials converged after about 1,180 s and passed. The orchestrator

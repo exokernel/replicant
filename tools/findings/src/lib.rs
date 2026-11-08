@@ -49,7 +49,13 @@ impl Trace {
         let trace: Self = serde_json::from_reader(BufReader::new(GzDecoder::new(file)))
             .with_context(|| format!("parsing {}", path.display()))?;
         ensure!(trace.start_content.is_empty(), "the trace must start empty");
-        ensure!(trace.end_content.is_ascii(), "the trace must be ASCII");
+        // Check every insert, not only the final text: a trace can insert text
+        // that is not ASCII and delete it later.
+        let inserts = trace.txns.iter().flat_map(|t| &t.patches).map(|p| &p.2);
+        ensure!(
+            trace.end_content.is_ascii() && inserts.clone().all(|text| text.is_ascii()),
+            "the trace must be ASCII"
+        );
         Ok(trace)
     }
 
@@ -131,5 +137,40 @@ impl Lcg {
             .wrapping_add(1_442_695_040_888_963_407);
         let n = u64::try_from(n).expect("usize fits in u64");
         usize::try_from((self.0 >> 33) % n).expect("the result is below n")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use flate2::{Compression, write::GzEncoder};
+
+    use super::Trace;
+
+    /// Writes `json` gzipped to a temporary file and loads it.
+    fn load(name: &str, json: &str) -> anyhow::Result<Trace> {
+        let path =
+            std::env::temp_dir().join(format!("findings-{}-{name}.json.gz", std::process::id()));
+        let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+        gz.write_all(json.as_bytes()).unwrap();
+        std::fs::write(&path, gz.finish().unwrap()).unwrap();
+        let trace = Trace::load(&path);
+        std::fs::remove_file(&path).unwrap();
+        trace
+    }
+
+    /// A trace whose final text is ASCII, but that inserted text that is not,
+    /// is refused.
+    #[test]
+    fn a_deleted_non_ascii_insert_is_refused() {
+        let json = r#"{"startContent":"","endContent":"a","txns":[
+            {"patches":[[0,0,"é"]]},{"patches":[[0,1,"a"]]}]}"#;
+        let err = load("deleted", json)
+            .err()
+            .expect("the trace must be refused");
+        assert!(err.to_string().contains("ASCII"), "{err}");
+        let ok = r#"{"startContent":"","endContent":"a","txns":[{"patches":[[0,0,"a"]]}]}"#;
+        load("ok", ok).unwrap();
     }
 }

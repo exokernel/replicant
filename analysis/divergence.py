@@ -257,8 +257,11 @@ def _(libraries, locality, seeded, start):
     _med = dh.medians(_trials)
     mo.vstack([
         mo.md(rf"""
-        Each point is one trial, and the line joins the medians. Both axes are
-        logarithmic, so a straight line is a power law: a slope of 1 means the
+        Each small point is one trial, and each large marker is a median. The
+        line joins the medians of cells with one group. A Loro cell whose trials
+        fall into two groups, at least ten times apart, shows a fast and a slow
+        median instead, because one median of both would describe no trial.
+        Both axes are logarithmic, so a straight line is a power law: a slope of 1 means the
         time grows in proportion to the ops, and a slope of 2 means it grows with
         their square.
 
@@ -290,7 +293,8 @@ def _(contention, seeded):
             y=alt.Y("median:Q", scale=alt.Scale(type="log"), title="median heal (ms)"),
             color=alt.Color("library:N", scale=dh.LIBRARY_COLORS),
             shape=alt.Shape("locality:N", sort=list(dh.LOCALITIES)),
-            tooltip=["library", "scenario", alt.Tooltip("contested_share:Q", format=".2%"), "median", "trials"],
+            opacity=alt.condition(alt.datum.group == "slow", alt.value(0.5), alt.value(1.0)),
+            tooltip=["library", "locality", "start", "ops", "group", alt.Tooltip("contested_share:Q", format=".2%"), "median", "trials"],
         )
         .properties(width=520, height=320)
     )
@@ -298,8 +302,9 @@ def _(contention, seeded):
         mo.md(r"""
         ### Heal time against the contested share
 
-        Each point is one cell on one library. The x axis is the share of ops
-        that the contention model counts as contested. Remember the limit of
+        Each point is one cell on one library. A cell with a fast and a slow
+        group of trials has a point for each; the slow one is paler. The x axis
+        is the share of ops that the contention model counts as contested. Remember the limit of
         section 1: in this grid, a cell with more contested ops also has more ops.
         """),
         _chart,
@@ -361,6 +366,11 @@ def _():
     - **Upstream reports.** Automerge's `load_changes` span formats the whole
       change graph when a subscriber enables it.
     - **More replicas.** All of this is two replicas on one host.
+    - **A rerun with the baseline-author fix.** The archive is older than the
+      fix, so its first repetition differs from the others in more than its
+      ids, and the seed also picks the `random_position` positions. See
+      "Limits of this archive" in the
+      [grid README](../data/divergence-grid-2026-11-07/README.md).
 
     The dated records of each result are in
     [`docs/divergence-sweep.md`](../docs/divergence-sweep.md) under "Recorded
