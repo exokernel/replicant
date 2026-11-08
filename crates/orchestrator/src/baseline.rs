@@ -76,7 +76,10 @@ impl BaselineStore {
             return Ok(());
         }
         let path = self.data_dir.join(&baseline.trace);
-        let bytes = read_verified(&path, Some(&baseline.sha256)).with_context(|| {
+        // A hash is hex, so compare it in one case. The cached branch above
+        // ignores case too, so the order of the scenarios does not matter.
+        let sha256 = baseline.sha256.to_ascii_lowercase();
+        let bytes = read_verified(&path, Some(&sha256)).with_context(|| {
             format!(
                 "reading baseline {}. Make the traces with `just gen-traces`",
                 path.display()
@@ -193,6 +196,11 @@ mod tests {
         };
         let right = replay::trace::hex(&Sha256::digest(json));
         let mut store = BaselineStore::new(&dir);
+        // An uppercase pin works when it is checked first, and after a
+        // lowercase one.
+        BaselineStore::new(&dir)
+            .check(&baseline(right.to_uppercase()))
+            .unwrap();
         store.check(&baseline(right.clone())).unwrap();
         store.check(&baseline(right.to_uppercase())).unwrap();
         let err = store.check(&baseline("0".repeat(64))).unwrap_err();

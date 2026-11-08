@@ -441,6 +441,7 @@ mod tests {
         first_local_write_reuses_synced_in_object,
         sync_reset_forgets_quiescence,
         sync_reset_recovers_from_a_lost_message,
+        sync_reset_recovers_from_a_lost_data_update,
         sync_reset_unknown_peer_is_noop,
         text_length_errors_on_missing_or_wrong_type,
         save_bytes_not_canonical_across_converged_replicas,

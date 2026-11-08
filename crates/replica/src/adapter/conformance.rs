@@ -1014,6 +1014,33 @@ pub(crate) fn sync_reset_recovers_from_a_lost_message<A: CrdtAdapter + Default>(
     assert!(!b.get_heads().is_empty(), "b must have received the change");
 }
 
+/// After the replicas have synced once, a lost data update is recovered by a
+/// reset of both peers. The reset must not keep the sender's record of what it
+/// sent, or the second write would never arrive.
+pub(crate) fn sync_reset_recovers_from_a_lost_data_update<A: CrdtAdapter + Default>() {
+    let mut a = A::default();
+    let mut b = A::default();
+    a.apply_op(&map_put("doc", "k", "v")).unwrap();
+    sync_until_quiescent(&mut a, "a", &mut b, "b");
+    assert_eq!(a.state_fingerprint(), b.state_fingerprint());
+
+    // A second write. Its data message is made but never delivered.
+    a.apply_op(&map_put("doc", "k2", "v2")).unwrap();
+    let lost = a.sync_generate("b");
+    assert!(lost.is_some(), "there was a change to send");
+    drop(lost);
+
+    a.sync_reset("b");
+    b.sync_reset("a");
+    sync_until_quiescent(&mut a, "a", &mut b, "b");
+
+    assert_eq!(a.state_fingerprint(), b.state_fingerprint());
+    assert!(
+        b.read_map("doc").unwrap().contains_key("k2"),
+        "b must have received the second write"
+    );
+}
+
 /// `sync_reset` for a peer with no state does nothing and does not panic.
 ///
 /// Unblocking calls it for peers that never sent a message.
