@@ -144,6 +144,13 @@ an Automerge replica can compute for hundreds of milliseconds between two messag
 of one handshake. The heal then measures a reconnect, not a first contact. See
 [`metrics.md`](metrics.md).
 
+**The reconnect.** At the unblock, each replica keeps only the sync state that its
+library keeps across a disconnect. Automerge keeps the heads that both sides have,
+as its documented persistence of sync state does. Yrs and Loro keep none, and
+exchange versions again. Keeping all state was wrong for Automerge: the peer's last
+request survived the partition, and the first message of the heal tested the whole
+history against it.
+
 **The sync protocols.** Automerge has its own sync protocol. Yrs and Loro have none,
 so their adapters add one that follows the Yjs sync protocol: each side sends its
 state vector or version vector, and the other side answers with what that version
@@ -299,6 +306,13 @@ took about 690 ms, and the Yrs sync layer could not heal 10⁵ ops per side with
 600 s. After the change to a reconnect heal and the new Yrs and Loro sync protocol,
 these are about 254 ms and 0.9 s. Automerge still could not heal 10⁵ within 600 s.
 See [`data/divergence-paper-pilot-2026-11-07/`](../data/divergence-paper-pilot-2026-11-07/).
+
+**2026-11-07 — most of the Automerge floor was stale sync state.** In an in-process
+probe with the replica's adapter on the B4 paper, a heal of one op per side took
+188-195 ms of adapter time with all sync state kept, and 54-56 ms after
+`sync_reconnect`. Of the 54 ms, about 43 ms is the two receives that apply one
+change each. Automerge's apply of one change walks the document, so this cost grows
+with the history.
 
 **2026-11-07 — Loro's peer ids can change a merge by about 400 times.** Two Loro
 documents each inserted 10⁴ characters at position 0 and imported the other's update,

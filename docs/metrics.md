@@ -151,10 +151,16 @@ notes.
 A blocked link is enforced on both endpoints: outbound flushes skip the peer
 (never consuming sync protocol state toward it) and inbound messages are dropped
 unprocessed. Each link syncs before it is blocked, and it is blocked only when
-that sync is idle, so no message is in flight. Unblocking keeps the per-peer sync
-protocol state, so the heal sends only what changed during the partition, as for
-peers that were in contact before they went offline. Before 2026-11-07, an unblock
-discarded that state, so each heal started as a first contact. With an empty start
+that sync is idle, so no message is in flight. An unblock is a reconnect: each
+adapter keeps only the per-peer sync state that its library keeps across a
+disconnect (`CrdtAdapter::sync_reconnect`). Automerge keeps the heads that both
+peers have (`sync::State::decode(&state.encode())`), so the heal sends only what
+changed during the partition. Yrs and Loro keep no sync state, and exchange
+versions again, as the Yjs sync protocol does. Before 2026-11-07, an unblock
+discarded all sync state, so each heal started as a first contact. For a short
+time on 2026-11-07, an unblock kept all of it. Automerge then kept the peer's last
+request, and the first message of the heal tested the whole history against it:
+about 140 ms of a 190 ms heal on the B4 paper. With an empty start
 the difference is small. With a starting document it is large: on the B4 paper,
 an Automerge heal of one op per side took about 700 ms. The runner asserts the partition actually held — no two groups may
 share a fingerprint at the end of the divergence phase — for the same reason the

@@ -14,13 +14,15 @@
 //!    replica. For text workloads, create the shared text object on every
 //!    replica. Wire the *complete* post-heal graph with every link open, wait
 //!    until the sync on every link is idle, then block every cross-group link. A
-//!    blocked link stays open but carries no data, and it keeps its sync state.
+//!    blocked link stays open but carries no data.
 //! 2. **Divergence.** Each group applies `ops_per_group` operations. The blocks
 //!    keep the groups invisible to each other.
-//! 3. **Heal.** Clear the blocks and kick the sync. Each side still has the sync
-//!    state from before the partition, so it sends only what changed. The clock
-//!    runs from the first unblock until every replica reports the same
-//!    fingerprint.
+//! 3. **Heal.** Clear the blocks and kick the sync. An unblock is a reconnect:
+//!    each replica keeps only the sync state that its library keeps across a
+//!    disconnect (`CrdtAdapter::sync_reconnect`). Automerge keeps the heads that
+//!    both sides have, so it sends only what changed. Yrs and Loro exchange
+//!    versions again. The clock runs from the first unblock until every replica
+//!    reports the same fingerprint.
 //!
 //! # Why the graph is wired before the clock starts
 //!
@@ -110,9 +112,9 @@ pub async fn run_partition_heal(
     connect_edges(&clients, &endpoints, &all_edges).await?;
     wait_for_sync_idle(&mut clients, &all_edges, SYNC_IDLE_TIMEOUT).await?;
 
-    // Block the cross-group links only now that their sync is idle. A message in
-    // flight would be dropped by the block, and its sender's sync state would
-    // then be wrong. The links stay open, and their sync state stays.
+    // Block the cross-group links only now that their sync is idle. Then every
+    // side knows what the other has, and the state that a reconnect keeps is
+    // the same in every cell. The links stay open.
     set_links_blocked(&clients, &plan.heal, true).await?;
     check_tasks(&mut tasks)?;
     log.record(Event::Wired {

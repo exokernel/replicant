@@ -97,12 +97,33 @@ pub trait CrdtAdapter: Send + 'static {
     /// Discarding the state is always safe. The worst result is that the
     /// adapter sends again some data that the peer already has.
     ///
-    /// A blocked link keeps its stream, so a partition does not call this. The
-    /// state that the replicas had before the partition stays, and the heal
-    /// sends only what changed.
+    /// A blocked link keeps its stream, so a heal does not call this. A heal
+    /// calls [`Self::sync_reconnect`].
     ///
     /// Must do nothing if there is no state for `peer`.
     fn sync_reset(&mut self, peer: &str);
+
+    /// Prepares the sync state for `peer` for a new connection to the same
+    /// peer. Does not change the document.
+    ///
+    /// Keep only the per-peer state that the library keeps across a
+    /// disconnect, and discard the state of the old connection. Messages of
+    /// the old connection can be lost, and an old request can make the first
+    /// reply of the new connection slow.
+    ///
+    /// - If the library persists sync state, keep what it persists. Automerge
+    ///   keeps only the heads that both peers have
+    ///   (`sync::State::decode(&state.encode())`).
+    /// - If the library persists no sync state, do the same as
+    ///   [`Self::sync_reset`]. The next [`Self::sync_generate`] starts a new
+    ///   version exchange.
+    ///
+    /// The replica calls this when it unblocks the link to `peer`. Use
+    /// [`Self::sync_reset`] instead if the peer can be a different replica,
+    /// or if its document can be older than the kept state.
+    ///
+    /// Must do nothing if there is no state for `peer`.
+    fn sync_reconnect(&mut self, peer: &str);
 
     /// Discards all document state and all per-peer sync state. The adapter
     /// is then equal to a new, empty adapter.

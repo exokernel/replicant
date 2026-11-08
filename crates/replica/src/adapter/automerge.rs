@@ -284,6 +284,18 @@ impl CrdtAdapter for AutomergeAdapter {
         self.sync_states.remove(peer);
     }
 
+    fn sync_reconnect(&mut self, peer: &str) {
+        // This is Automerge's documented persistence of sync state. The
+        // encoding keeps only `shared_heads`. It drops the last `have` of the
+        // peer and the record of sent changes. A kept `have` with an empty
+        // `last_sync` makes the next generate test the whole history against
+        // the peer's bloom filter.
+        if let Some(state) = self.sync_states.get_mut(peer) {
+            *state = sync::State::decode(&state.encode())
+                .expect("a sync state decodes its own encoding");
+        }
+    }
+
     fn reset(&mut self) {
         *self = Self::new();
     }
@@ -443,6 +455,8 @@ mod tests {
         sync_reset_recovers_from_a_lost_message,
         sync_reset_recovers_from_a_lost_data_update,
         sync_reset_unknown_peer_is_noop,
+        sync_reconnect_recovers_from_a_lost_message,
+        sync_reconnect_unknown_peer_is_noop,
         text_length_errors_on_missing_or_wrong_type,
         save_bytes_not_canonical_across_converged_replicas,
     );
