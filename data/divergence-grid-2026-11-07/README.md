@@ -119,8 +119,11 @@ A slow trial is more than 10 times the fastest trial of its cell.
   is a check of the noise between runs. Of the 15 cells up to 10⁴, the medians agree
   within 2% in 10 and within 4% in 13. Two cells differ more: `random_position-empty-1e4`
   (17.1 ms seeded, 15.7 ms random ids, 8%) and `same_region-1e2` (1.87 ms and 1.74 ms,
-  7%). The second is near the floor, where 0.1 ms is a large share. The first also
-  changes its positions with its seeds.
+  7%). The second is near the floor, where 0.1 ms is a large share. The first is not
+  explained. The two grids give each repetition the same positions (the provenance
+  records the same op seeds), but different ids, seeded against random. So the
+  difference can come from the ids or from noise between runs, and this archive
+  cannot tell which.
 - **Yrs also has a merge cost that depends on the ids**, at `random_position-1e5`.
   Trial 1 took 2,207 ms, and 2,249 ms in `seeded-rerun/`. Trials 2 and 3 took
   865-880 ms in both runs. Trial 1 has other ids, other positions, and the baseline
