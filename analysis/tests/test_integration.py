@@ -65,6 +65,19 @@ def test_a_failed_check_is_a_row_not_an_exception():
     assert "final content is wrong" in result.failed["error"].iloc[0]
 
 
+def test_a_replica_that_cannot_be_reached_raises():
+    # The binary writes its run and workload rows, then exits with an error and
+    # no failed row. An empty table would hide the error.
+    with pytest.raises(RuntimeError, match="Connection refused"):
+        th.replay(
+            "--spec", "workloads/smoke.toml",
+            data_dir=th.REPO / "workloads" / "fixtures",
+            crdts=["yrs"],
+            trials=1,
+            replicas="localhost:1",
+        )
+
+
 def test_the_smoke_spec_replays_from_the_fixtures():
     result = th.replay(
         "--spec", "workloads/smoke.toml", data_dir=th.REPO / "workloads" / "fixtures", crdts=["automerge"], trials=1

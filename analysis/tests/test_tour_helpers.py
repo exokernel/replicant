@@ -162,6 +162,16 @@ def test_check_archive_finds_a_label_that_disagrees(tmp_path):
     assert table.loc["grid/pilot.csv", "name says"] == "-"
 
 
+def test_check_archive_shows_lost_provenance(tmp_path):
+    (tmp_path / "yrs-timeout.csv").write_text("")
+    (tmp_path / "yrs-timeout.meta.json").write_text(
+        json.dumps({"provenance_unavailable": "the run timed out", "invocations": []})
+    )
+    row = th.check_archive(tmp_path).iloc[0]
+    assert row["verdict"] == "no provenance"
+    assert row["provenance says"] == "unavailable"
+
+
 def test_library_versions_and_workloads_read_the_repository(tmp_path, monkeypatch):
     (tmp_path / "Cargo.lock").write_text(
         '[[package]]\nname = "yrs"\nversion = "1.2.3"\n\n[[package]]\nname = "tokio"\nversion = "1.0.0"\n'

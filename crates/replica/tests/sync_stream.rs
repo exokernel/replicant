@@ -151,7 +151,7 @@ async fn a_blocked_peer_cannot_change_the_document() {
     };
     client.set_peer_links(block(true)).await.unwrap();
     let (tx, result) = open(&addr, Some(PEER)).await;
-    let _inbound = result.unwrap();
+    let mut inbound = result.unwrap();
     let messages = yrs_messages_with_a_write();
     let fingerprint = |c: &mut ReplicaClient<Channel>| {
         let mut c = c.clone();
@@ -167,12 +167,21 @@ async fn a_blocked_peer_cannot_change_the_document() {
     for payload in messages.clone() {
         tx.send(SyncMessage { payload }).await.unwrap();
     }
-    // Give the replica time to read the messages, then check nothing changed.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Close our side of the stream, and wait until the replica ends its side.
+    // It has then read every message of the batch, so a check after this point
+    // cannot run before the messages arrive.
+    drop(tx);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(Ok(_)) = inbound.next().await {}
+    })
+    .await
+    .expect("the replica did not end the stream");
     assert!(fingerprint(&mut client).await.is_empty());
     assert_eq!(received(&mut client).await, 0);
 
     client.set_peer_links(block(false)).await.unwrap();
+    let (tx, result) = open(&addr, Some(PEER)).await;
+    let _inbound = result.unwrap();
     for payload in messages {
         tx.send(SyncMessage { payload }).await.unwrap();
     }
