@@ -249,8 +249,8 @@ impl CrdtAdapter for AutomergeAdapter {
 
     fn doc_size_bytes(&mut self) -> usize {
         // `save()` produces the full binary encoding. Automerge has no cheaper
-        // size query. The cost is acceptable because this runs once per op,
-        // for the size gauge.
+        // size query. The cost is acceptable because only `GetStats` calls
+        // this, after the timed window.
         self.doc.save().len()
     }
 

@@ -13,6 +13,23 @@ use yrs::{
 use super::frame::Frame;
 use super::{map_name, require_name};
 
+/// Returns the delete set of the document that `txn` reads, as encoded bytes.
+///
+/// `sv` must be the state vector of the same document. A diff against the
+/// document's own state vector has no blocks, and a Yrs update always carries
+/// the full delete set. So the result is the delete set and a few bytes of
+/// framing. Yrs has no delete-set version or counter, so this is the cheapest
+/// way to read it. On the B4 paper it takes about 0.02 ms, against about 0.4 ms
+/// for a full encode.
+///
+/// The encoding is canonical. Yrs keeps clients in a `BTreeMap`, and each
+/// client's ranges are sorted and merged. So two documents with the same
+/// deletes give the same bytes, even if their blocks are split differently.
+/// `yrs_fingerprint_ignores_history` checks this.
+fn delete_set_bytes<T: ReadTxn>(txn: &T, sv: &StateVector) -> Vec<u8> {
+    txn.encode_diff_v1(sv)
+}
+
 /// Returns the actual type of a root shared type if it is not `S`.
 ///
 /// `Root::<S>::get_or_create` returns the existing branch when the name is
@@ -153,11 +170,8 @@ impl YrsAdapter {
         let state = self.peers.get(peer).cloned().unwrap_or_else(PeerSync::new);
         let txn = self.doc.transact();
         let my_sv = txn.state_vector();
-        // A diff against my own state vector contains no blocks. A Yrs update
-        // always carries the full delete set, so this is the delete set plus
-        // a few bytes of framing. Yrs has no delete-set version or counter,
-        // so this is the cheapest way to see whether a delete occurred.
-        let my_ds = txn.encode_diff_v1(&my_sv);
+        // Compare delete sets to see whether a delete occurred.
+        let my_ds = delete_set_bytes(&txn, &my_sv);
         // Send data only to a peer whose state vector is known. Send nothing
         // only if both conditions are true:
         // 1. The peer already has every clock in my state vector.
@@ -190,13 +204,6 @@ impl YrsAdapter {
             next.sent_ds = Some(my_ds);
         }
         Some((frame, next))
-    }
-
-    /// Encodes the full document in the v1 format: every block and the delete
-    /// set. `state_fingerprint` uses this encoding.
-    fn full_update_bytes(&self) -> Vec<u8> {
-        let txn = self.doc.transact();
-        txn.encode_state_as_update_v1(&StateVector::default())
     }
 
     /// Applies `op` in `txn`.
@@ -304,8 +311,8 @@ impl CrdtAdapter for YrsAdapter {
         //
         // CAUTION: the heads are not a convergence fingerprint. A delete does
         // not change the state vector (see `PeerSync`). Two documents can
-        // have the same heads and different content. `state_fingerprint`
-        // therefore does not use this method.
+        // have the same heads and different content. So `state_fingerprint`
+        // adds the delete set to the heads.
         let txn = self.doc.transact();
         let sv = txn.state_vector();
         let mut heads: Vec<Vec<u8>> = sv
@@ -322,11 +329,37 @@ impl CrdtAdapter for YrsAdapter {
     }
 
     fn state_fingerprint(&mut self) -> Vec<u8> {
-        // Do not use `get_heads()` here, as AutomergeAdapter does. The heads
-        // do not change on a delete (see `get_heads`). The full encoding
-        // includes the delete set, so it changes on every op.
-        // `each_op_variant_mutates_the_doc` checks this.
-        self.full_update_bytes()
+        // The fingerprint is the heads (the sorted state vector), then the
+        // delete set. The heads alone are not enough, because a delete does
+        // not change them (see `get_heads`).
+        //
+        // Two documents with the same state vector have the same blocks, and
+        // two documents with the same delete set have the same deletes. So the
+        // two parts together identify the content. `each_op_variant_mutates_
+        // the_doc` checks that each op changes the fingerprint, and
+        // `yrs_fingerprint_ignores_history` checks that converged replicas
+        // with different histories have the same fingerprint.
+        //
+        // Do not use the full encoding. It gives the same answer, but on the
+        // B4 paper it is 377 KB and takes about 0.4 ms. The orchestrator calls
+        // this method on each poll, and the call holds the adapter lock.
+        //
+        // Format: the number of heads (4 bytes, big-endian), the heads (12
+        // bytes each), and the encoded delete set. A document with no ops
+        // gives an empty fingerprint, as the other adapters do.
+        let heads = self.get_heads();
+        if heads.is_empty() {
+            return Vec::new();
+        }
+        let head_count =
+            u32::try_from(heads.len()).expect("a state vector has fewer than 2^32 clients");
+        let txn = self.doc.transact();
+        let ds = delete_set_bytes(&txn, &txn.state_vector());
+        let mut fp = Vec::with_capacity(4 + 12 * heads.len() + ds.len());
+        fp.extend_from_slice(&head_count.to_be_bytes());
+        fp.extend(heads.into_iter().flatten());
+        fp.extend_from_slice(&ds);
+        fp
     }
 
     fn doc_size_bytes(&mut self) -> usize {
@@ -591,6 +624,135 @@ mod tests {
              If this starts failing, without_bootstrap_partitioned_text_loses_a_side-style \
              analysis is needed to find what changed in yrs's encoder.",
         );
+    }
+
+    /// Returns a splice on the text object `text`.
+    fn splice(pos: usize, del_count: usize, insert: &str) -> Op {
+        Op::TextSplice {
+            obj: "text".into(),
+            pos,
+            del_count,
+            insert: insert.into(),
+        }
+    }
+
+    /// Converged replicas with different histories have the same fingerprint.
+    ///
+    /// The fingerprint is the state vector and the delete set, not the full
+    /// encoding. This is correct only if the delete-set bytes do not depend on
+    /// the order in which a replica received the changes, or on how its blocks
+    /// are split. The test makes these differ:
+    ///
+    /// - `a` and `b` edit the shared text at the same time. Their deletes
+    ///   overlap, so each replica merges two ranges into one.
+    /// - `c` receives the changes from `b` first, and then from `a`.
+    /// - `d` loads a snapshot of `a`, and receives no sync messages.
+    #[test]
+    fn yrs_fingerprint_ignores_history() {
+        let mut a = YrsAdapter::default();
+        let mut b = YrsAdapter::default();
+        let mut c = YrsAdapter::default();
+        for r in [&mut a, &mut b, &mut c] {
+            r.ensure_text("text").unwrap();
+        }
+        a.apply_op(&splice(0, 0, "the quick brown fox")).unwrap();
+        sync_until_quiescent(&mut a, "a", &mut b, "b");
+
+        // "quick " is deleted on `a`, and "k brow" on `b`. The ranges overlap.
+        a.apply_op(&splice(4, 6, "slow ")).unwrap();
+        a.apply_op(&splice(0, 0, "A: ")).unwrap();
+        b.apply_op(&splice(8, 6, "")).unwrap();
+        b.apply_op(&splice(13, 0, " jumps")).unwrap();
+
+        sync_until_quiescent(&mut c, "c", &mut b, "b");
+        sync_until_quiescent(&mut c, "c", &mut a, "a");
+        sync_until_quiescent(&mut a, "a", &mut b, "b");
+        let mut d = YrsAdapter::default();
+        d.load(&a.encode()).unwrap();
+
+        let text = a.read_text("text").unwrap();
+        let fp = a.state_fingerprint();
+        for (name, r) in [("b", &mut b), ("c", &mut c), ("d", &mut d)] {
+            assert_eq!(
+                r.read_text("text").unwrap(),
+                text,
+                "{name} did not converge"
+            );
+            assert_eq!(r.state_fingerprint(), fp, "{name} has another fingerprint");
+        }
+    }
+
+    /// The same check as `yrs_fingerprint_ignores_history`, on random edits.
+    ///
+    /// For each seed, three replicas share a short text, make random inserts
+    /// and deletes at the same time, and then sync in a random order of pairs.
+    /// Each replica must then have the same text and the same fingerprint.
+    #[test]
+    fn yrs_fingerprint_ignores_history_on_random_edits() {
+        /// A small linear congruential generator, so the test needs no crate.
+        struct Lcg(u64);
+        impl Lcg {
+            fn below(&mut self, n: usize) -> usize {
+                self.0 = self
+                    .0
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                ((self.0 >> 33) % n as u64) as usize
+            }
+        }
+        const NAMES: [&str; 3] = ["r0", "r1", "r2"];
+        for seed in 0..100u64 {
+            let mut rng = Lcg(seed);
+            let mut rs: Vec<YrsAdapter> = (0..3).map(|_| YrsAdapter::default()).collect();
+            rs[0].ensure_text("text").unwrap();
+            rs[0]
+                .apply_op(&splice(0, 0, "abcdefghijklmnopqrstuvwxyz"))
+                .unwrap();
+            let base = rs[0].encode();
+            for r in &mut rs[1..] {
+                r.load(&base).unwrap();
+                r.ensure_text("text").unwrap();
+            }
+            for r in &mut rs {
+                for _ in 0..12 {
+                    let len = r.text_length("text").unwrap();
+                    let pos = rng.below(len + 1);
+                    let del = rng.below(len - pos + 1).min(4);
+                    let insert = ["", "x", "yz"][rng.below(3)];
+                    r.apply_op(&splice(pos, del, insert)).unwrap();
+                }
+            }
+            for _ in 0..6 {
+                let i = rng.below(3);
+                let j = (i + 1 + rng.below(2)) % 3;
+                let (lo, hi) = (i.min(j), i.max(j));
+                let (left, right) = rs.split_at_mut(hi);
+                sync_until_quiescent(&mut left[lo], NAMES[lo], &mut right[0], NAMES[hi]);
+            }
+            // Make sure that all three have every change: 0-1, 1-2, then 0-1.
+            for (lo, hi) in [(0, 1), (1, 2), (0, 1)] {
+                let (left, right) = rs.split_at_mut(hi);
+                sync_until_quiescent(&mut left[lo], NAMES[lo], &mut right[0], NAMES[hi]);
+            }
+            let text = rs[0].read_text("text").unwrap();
+            let fp = rs[0].state_fingerprint();
+            for (i, r) in rs.iter_mut().enumerate().skip(1) {
+                assert_eq!(r.read_text("text").unwrap(), text, "seed {seed}: r{i} text");
+                assert_eq!(r.state_fingerprint(), fp, "seed {seed}: r{i} fingerprint");
+            }
+        }
+    }
+
+    /// A document with no ops has an empty fingerprint. The orchestrator reads
+    /// an empty fingerprint as "no ops yet". `ensure_text` authors no op.
+    #[test]
+    fn yrs_fingerprint_of_an_empty_document_is_empty() {
+        let mut a = YrsAdapter::default();
+        assert!(a.state_fingerprint().is_empty());
+        a.ensure_text("text").unwrap();
+        assert!(a.state_fingerprint().is_empty());
+        a.apply_op(&splice(0, 0, "x")).unwrap();
+        assert!(!a.state_fingerprint().is_empty());
     }
 
     /// Yrs-only. Yrs indexes lists and text with `u32`. An index that does

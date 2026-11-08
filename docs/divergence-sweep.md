@@ -314,6 +314,22 @@ probe with the replica's adapter on the B4 paper, a heal of one op per side took
 change each. Automerge's apply of one change walks the document, so this cost grows
 with the history.
 
+**2026-11-07 — the Yrs floor was the fingerprint poll.** A Yrs heal of one op per
+side on the B4 paper takes under 1 ms of adapter time in process. On the docker lane
+it took 8.4-8.8 ms on the pilot code, and the trace showed two polls. With the
+reconnect heal it took 3.6-3.8 ms and one poll. Each poll encoded the full document
+(377 KB) on each replica. The Yrs fingerprint is now the state vector and the delete
+set, which is about 15 times cheaper. The delete-set encode in the Yrs sync layer
+costs about 0.02 ms, so it was not a cause.
+
+**2026-11-07 — a Yrs insert at a random position gets slower as inserts add up.**
+In process, on the B4 paper, an insert at a random position cost about 0.03 ms after
+2,000 inserts and about 0.10 ms after 10,000. Automerge (0.011 ms) and Loro (0.001 ms)
+did not change. This is outside the heal window, but it makes the divergence phase of
+a Yrs `random_position` cell at 10⁵ take about 6 minutes on the docker lane. The
+cause is probably that each insert splits a block, and Yrs walks the blocks to find
+an index. That is not confirmed.
+
 **2026-11-07 — Loro's peer ids can change a merge by about 400 times.** Two Loro
 documents each inserted 10⁴ characters at position 0 and imported the other's update,
 with no Replicant code. For a given pair of peer ids, an import took either about 10

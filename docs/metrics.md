@@ -130,6 +130,24 @@ See `wait_for_nodes` in
 for the measurement protocol — fingerprint-poll loop after the workload
 burst until all replicas report identical `GetStateFingerprint`.
 
+**The resolution of `convergence_ms` is one poll round.** The orchestrator
+asks each replica for its fingerprint in turn, and then waits 1 ms. So the
+result can only change in steps of one round. A round is short only if the
+fingerprint is cheap, and the call holds the adapter lock, so a slow fingerprint
+also delays sync. Each adapter must therefore compute its fingerprint from its
+version, not from a full encode:
+
+| Adapter | Fingerprint | Cost on the B4 paper |
+|---|---|---|
+| Automerge | sorted heads | small |
+| Loro | sorted frontier | small |
+| Yrs | sorted state vector, then the encoded delete set | about 0.02 ms, about 10 KB |
+
+Before 2026-11-07, the Yrs fingerprint was the full encoding: 377 KB and about
+0.4 ms on the paper. On the docker lane, one poll round then took about 3 ms,
+and a heal of one op per side took one round (about 3.7 ms) or two (about
+8.6 ms), but never a value between them.
+
 ### `wiring_ms`: the residual setup inside the window
 
 Partition-heal runs simulate the partition at the application layer rather than
