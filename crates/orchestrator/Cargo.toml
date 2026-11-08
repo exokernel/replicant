@@ -23,6 +23,7 @@ opentelemetry_sdk    = { workspace = true }
 opentelemetry-otlp   = { workspace = true }
 
 [dev-dependencies]
+automerge    = "0.12"
 sha2         = "0.11"
 
 [lints]

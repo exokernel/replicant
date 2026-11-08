@@ -366,4 +366,65 @@ mod tests {
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    /// The store builds the paper under `BASELINE_AUTHOR`. After the install,
+    /// on a cache miss and on a cache hit, replica 0 writes under its own trial
+    /// id, and every change of the baseline has the baseline author.
+    #[tokio::test]
+    async fn the_baseline_has_its_own_author_and_replica_0_keeps_its_trial_id() {
+        use automerge::{ActorId, AutoCommit};
+        use common::proto::Empty;
+        use tonic::Request;
+
+        use crate::replicas::{map_put, reset_all, set_instance_ids, spawn_nodes};
+
+        let dir = scratch("author");
+        let mut b = baseline(
+            &dir,
+            "t.json",
+            r#"{"endContent":"ab","txns":[{"patches":[[0,0,"a"]]},{"patches":[[1,0,"b"]]}]}"#,
+        );
+        b.length = 2;
+        let mut tasks = tokio::task::JoinSet::new();
+        let (_, mut clients) = spawn_nodes(2, replica::adapter::Crdt::Automerge, &mut tasks)
+            .await
+            .unwrap();
+        let ids = common::seeded_instance_ids(7, 2);
+        let actor = |id: u128| ActorId::from(id.to_be_bytes().as_slice());
+        let mut store = BaselineStore::new(&dir);
+        for pass in ["cache miss", "cache hit"] {
+            // Each trial resets the replicas and sets their ids first.
+            reset_all(&clients).await.unwrap();
+            set_instance_ids(&clients, &ids).await.unwrap();
+            store.install(&b, &mut clients, &ids).await.unwrap();
+            map_put(&mut clients[0], "k", "v").await.unwrap();
+            let state = clients[0]
+                .encode(Request::new(Empty {}))
+                .await
+                .unwrap()
+                .into_inner()
+                .state;
+            let mut doc = AutoCommit::load(&state).unwrap();
+            let authors: Vec<ActorId> = doc
+                .get_changes(&[])
+                .iter()
+                .map(|change| change.actor_id().clone())
+                .collect();
+            // The first change creates the text object under the fixed actor of
+            // EnsureText (`replicant-bootstrap` in the Automerge adapter), so
+            // that every replica has the same object.
+            let bootstrap = ActorId::from(b"replicant-bootstrap".as_slice());
+            let (write, history) = authors.split_last().unwrap();
+            assert_eq!(*write, actor(ids[0]), "{pass}: the write has the trial id");
+            assert_eq!(history.first(), Some(&bootstrap), "{pass}: the text object");
+            assert!(history.len() > 1, "{pass}: the baseline has edits");
+            assert!(
+                history[1..]
+                    .iter()
+                    .all(|a| *a == actor(super::BASELINE_AUTHOR)),
+                "{pass}: every baseline edit has the baseline author"
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
