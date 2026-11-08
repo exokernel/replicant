@@ -1,0 +1,11 @@
+finding,document,inserts_before_block,mean_insert_ms
+yrs-random-insert,paper,0,0.0292
+yrs-random-insert,paper,2000,0.0480
+yrs-random-insert,paper,4000,0.0646
+yrs-random-insert,paper,6000,0.0807
+yrs-random-insert,paper,8000,0.0995
+yrs-random-insert,one-insert,0,0.0046
+yrs-random-insert,one-insert,2000,0.0140
+yrs-random-insert,one-insert,4000,0.0291
+yrs-random-insert,one-insert,6000,0.0457
+yrs-random-insert,one-insert,8000,0.0634

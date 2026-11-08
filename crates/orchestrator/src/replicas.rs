@@ -23,7 +23,7 @@ pub use convergence::{
 pub use nodes::{NodeSource, ReplicaEndpoint, acquire_nodes, check_tasks};
 #[cfg(test)]
 pub use nodes::{node_index, node_name, spawn_nodes};
-pub use wiring::{connect_edges, kick_sync_edges, reset_all, set_links_blocked};
+pub use wiring::{connect_edges, kick_sync_edges, reset_all, set_instance_ids, set_links_blocked};
 #[cfg(test)]
 pub use writes::map_put;
 pub use writes::{TEXT_OBJ, apply_write, ensure_text_all, text_splice};

@@ -1,0 +1,18 @@
+{
+  "date": "2026-11-08T06:00:56Z",
+  "host": "Artemis",
+  "os": "Darwin arm64",
+  "git": {
+    "commit": "f2e3ec0b7c53bf46a6a9306aae29a42698b396ec",
+    "dirty": false
+  },
+  "versions": {
+    "automerge": "0.12.0",
+    "yrs": "0.28.1",
+    "loro": "1.17.1"
+  },
+  "trace": {
+    "path": "traces/editing-traces/automerge-paper.json.gz",
+    "sha256": "42c0ff1720c0cad77077e190e36135c9cab9f7bbc266351c0a7fe4981c6a1546"
+  }
+}

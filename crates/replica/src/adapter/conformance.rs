@@ -471,8 +471,9 @@ pub(crate) fn sync_pending_matches_generate<A: CrdtAdapter + Default>() {
 }
 
 /// Two replicas that synced, then each wrote with no contact, send little when they
-/// meet again. The sync state from before the partition stays, so the heal sends
-/// only what changed. The orchestrator's heal depends on this.
+/// meet again. Each side calls `sync_reconnect` at the heal, as the replica does at
+/// an unblock. The kept sync state lets the heal send only what changed. The
+/// orchestrator's heal depends on this.
 pub(crate) fn a_heal_after_a_quiet_partition_sends_little<A: CrdtAdapter + Default>() {
     let (mut a, mut b) = (A::default(), A::default());
     for i in 0..2000u64 {
@@ -483,6 +484,8 @@ pub(crate) fn a_heal_after_a_quiet_partition_sends_little<A: CrdtAdapter + Defau
 
     a.apply_op(&map_put("doc", "x", 1u64)).unwrap();
     b.apply_op(&map_put("doc", "y", 2u64)).unwrap();
+    a.sync_reconnect("b");
+    b.sync_reconnect("a");
     let bytes = sync_bytes_until_quiescent(&mut a, "a", &mut b, "b");
     assert!(
         bytes * 10 < size,
@@ -1050,6 +1053,39 @@ pub(crate) fn sync_reset_unknown_peer_is_noop<A: CrdtAdapter + Default>() {
     assert!(a.get_heads().is_empty());
 }
 
+// ── sync_reconnect (heal support) ──────────────────────────────────────
+
+/// Two replicas converge after a lost message if both call `sync_reconnect`.
+///
+/// A reconnect keeps only state that the peer confirmed. So a message that was
+/// generated and then lost does not stop the heal, as it would with all of the
+/// old state kept.
+pub(crate) fn sync_reconnect_recovers_from_a_lost_message<A: CrdtAdapter + Default>() {
+    let mut a = A::default();
+    let mut b = A::default();
+    a.apply_op(&map_put("doc", "k", "v")).unwrap();
+    sync_until_quiescent(&mut a, "a", &mut b, "b");
+
+    a.apply_op(&map_put("doc", "k2", "v2")).unwrap();
+    let lost = a.sync_generate("b");
+    assert!(lost.is_some(), "there was a change to send");
+    drop(lost);
+
+    a.sync_reconnect("b");
+    b.sync_reconnect("a");
+    sync_until_quiescent(&mut a, "a", &mut b, "b");
+
+    assert_eq!(a.state_fingerprint(), b.state_fingerprint());
+    assert_eq!(a.get_heads(), b.get_heads());
+}
+
+/// `sync_reconnect` for a peer with no state does nothing and does not panic.
+pub(crate) fn sync_reconnect_unknown_peer_is_noop<A: CrdtAdapter + Default>() {
+    let mut a = A::default();
+    a.sync_reconnect("never-seen");
+    assert!(a.get_heads().is_empty());
+}
+
 /// `text_length` fails for a name that was never written and for a name
 /// that holds a list.
 ///
@@ -1337,6 +1373,39 @@ pub(crate) fn fixed_ids_make_a_merge_repeatable<A: CrdtAdapter + Default>() {
         b.ensure_text("text").unwrap();
         let ua = a.apply_txn(&[splice(0, 0, "aaa")]).unwrap();
         let ub = b.apply_txn(&[splice(0, 0, "bbb")]).unwrap();
+        a.apply_updates(&[ub.as_slice()]).unwrap();
+        b.apply_updates(&[ua.as_slice()]).unwrap();
+        a.read_text("text").unwrap()
+    };
+    let first = run();
+    for _ in 0..8 {
+        assert_eq!(run(), first);
+    }
+}
+
+/// `load` keeps an id that `set_instance_id` set before it.
+///
+/// The orchestrator sets each replica's id after a reset, and then loads the
+/// starting document. If the load took a random id, the merge order of
+/// concurrent inserts would change from run to run. The check is the same as in
+/// `fixed_ids_make_a_merge_repeatable`, with a load before the edits.
+pub(crate) fn load_keeps_the_instance_id<A: CrdtAdapter + Default>() {
+    let base = {
+        let mut b = A::default();
+        b.ensure_text("text").unwrap();
+        b.apply_op(&splice(0, 0, "base")).unwrap();
+        b.encode()
+    };
+    let run = || {
+        let (mut a, mut b) = (A::default(), A::default());
+        a.set_instance_id(1).unwrap();
+        b.set_instance_id(2).unwrap();
+        for r in [&mut a, &mut b] {
+            r.load(&base).unwrap();
+            r.ensure_text("text").unwrap();
+        }
+        let ua = a.apply_txn(&[splice(2, 0, "aaa")]).unwrap();
+        let ub = b.apply_txn(&[splice(2, 0, "bbb")]).unwrap();
         a.apply_updates(&[ub.as_slice()]).unwrap();
         b.apply_updates(&[ua.as_slice()]).unwrap();
         a.read_text("text").unwrap()

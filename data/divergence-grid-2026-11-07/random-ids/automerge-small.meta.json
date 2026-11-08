@@ -1,0 +1,2784 @@
+{
+  "invocations": [
+    {
+      "build": {
+        "arch": "aarch64",
+        "orchestrator_version": "0.1.0",
+        "os": "macos",
+        "profile": "release"
+      },
+      "generated_at_unix_ms": 1794101621711,
+      "git": {
+        "commit": "99968d1dcb66d1744be8abf8bf333ea2ae69c28e",
+        "dirty": false
+      },
+      "host": {
+        "cpus": 18,
+        "hostname": "Artemis"
+      },
+      "run": {
+        "crdt": "automerge",
+        "node_source": "external",
+        "replicas": [
+          {
+            "client_addr": "localhost:50051",
+            "peer_addr": "replica-0:50051"
+          },
+          {
+            "client_addr": "localhost:50052",
+            "peer_addr": "replica-1:50051"
+          }
+        ],
+        "trials": 10
+      },
+      "scenarios": [
+        {
+          "achieved_contention": {
+            "contested_anchors": {
+              "max": 1,
+              "mean": 1.0,
+              "min": 1
+            },
+            "contested_ops": {
+              "max": 2,
+              "mean": 2.0,
+              "min": 2
+            },
+            "head_children_repetition_1": [
+              0,
+              0
+            ],
+            "max_concurrent_siblings": {
+              "max": 2,
+              "mean": 2.0,
+              "min": 2
+            },
+            "model": "rga_anchor_simulation"
+          },
+          "kind": "partition_heal",
+          "name": "divergence-n2-append-1e2",
+          "node_count": 2,
+          "op_count": 200,
+          "params": {
+            "baseline": {
+              "length": 104852,
+              "sha256": "42c0ff1720c0cad77077e190e36135c9cab9f7bbc266351c0a7fe4981c6a1546",
+              "trace": "editing-traces/automerge-paper.json.gz"
+            },
+            "groups": [
+              [
+                0
+              ],
+              [
+                1
+              ]
+            ],
+            "heal_topology": "full_mesh",
+            "locality": "append",
+            "ops_per_group": 100,
+            "workload": "text_splice",
+            "write_pattern": "concentrated"
+          },
+          "path": "scenarios/divergence-n2-append-1e2.toml",
+          "seeds": {
+            "base": "0x5eedd1f50ff5e7a1",
+            "per_repetition": [
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x035429dd93c34567"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xc6a5461ba4792550"
+                  }
+                ],
+                "repetition": 1
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x472976567a9adea6"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x3aab37a5f8383ef5"
+                  }
+                ],
+                "repetition": 2
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xd763c5e68cd2e1f3"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xbc8f30d3e07ac1ab"
+                  }
+                ],
+                "repetition": 3
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x966874770bba6fff"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xee72dab18eee63c4"
+                  }
+                ],
+                "repetition": 4
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x6e22a9f34727b700"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x125024196124bbfa"
+                  }
+                ],
+                "repetition": 5
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xf30e7f3ff0d6c47c"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x46c1a3d3e0d62dd4"
+                  }
+                ],
+                "repetition": 6
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xa747d2eaa359d8f3"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x6d2a6b27d59c52f6"
+                  }
+                ],
+                "repetition": 7
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xa49cb829db19b118"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x640259adeeed12c1"
+                  }
+                ],
+                "repetition": 8
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x24457b0b563da189"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xf7791c9cb8e5b63f"
+                  }
+                ],
+                "repetition": 9
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xd7c65e47b3b77f9c"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x6514ef7ba5e5bd08"
+                  }
+                ],
+                "repetition": 10
+              }
+            ]
+          }
+        },
+        {
+          "achieved_contention": {
+            "contested_anchors": {
+              "max": 1,
+              "mean": 1.0,
+              "min": 1
+            },
+            "contested_ops": {
+              "max": 2,
+              "mean": 2.0,
+              "min": 2
+            },
+            "head_children_repetition_1": [
+              0,
+              0
+            ],
+            "max_concurrent_siblings": {
+              "max": 2,
+              "mean": 2.0,
+              "min": 2
+            },
+            "model": "rga_anchor_simulation"
+          },
+          "kind": "partition_heal",
+          "name": "divergence-n2-append-1e3",
+          "node_count": 2,
+          "op_count": 2000,
+          "params": {
+            "baseline": {
+              "length": 104852,
+              "sha256": "42c0ff1720c0cad77077e190e36135c9cab9f7bbc266351c0a7fe4981c6a1546",
+              "trace": "editing-traces/automerge-paper.json.gz"
+            },
+            "groups": [
+              [
+                0
+              ],
+              [
+                1
+              ]
+            ],
+            "heal_topology": "full_mesh",
+            "locality": "append",
+            "ops_per_group": 1000,
+            "workload": "text_splice",
+            "write_pattern": "concentrated"
+          },
+          "path": "scenarios/divergence-n2-append-1e3.toml",
+          "seeds": {
+            "base": "0x5eedd1f50ff5e7a1",
+            "per_repetition": [
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x635097f418cda2a0"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x82e557364542cc05"
+                  }
+                ],
+                "repetition": 1
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xf145ace2d95c8243"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x5faf7393b72d0e78"
+                  }
+                ],
+                "repetition": 2
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x11559155f18b42e3"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xb45ade70afdeebfb"
+                  }
+                ],
+                "repetition": 3
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x70a58e88049d28d7"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xddc98203c908cacc"
+                  }
+                ],
+                "repetition": 4
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x01a099f3c1631f4f"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x5e1d04ac9643f26c"
+                  }
+                ],
+                "repetition": 5
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x565e10c124d07866"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x4a4862c5da2dddd9"
+                  }
+                ],
+                "repetition": 6
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xbbc3eef10e0d5754"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x7bcac4d43115bb1f"
+                  }
+                ],
+                "repetition": 7
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xc071f12fbd98e072"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xe68376ccf52cfc6e"
+                  }
+                ],
+                "repetition": 8
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x1387bbb5a92ed9ce"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xc89b3932dfde583a"
+                  }
+                ],
+                "repetition": 9
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xe4e6b6b9fa8dc644"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x5d73ac2d99257d14"
+                  }
+                ],
+                "repetition": 10
+              }
+            ]
+          }
+        },
+        {
+          "achieved_contention": {
+            "contested_anchors": {
+              "max": 1,
+              "mean": 1.0,
+              "min": 1
+            },
+            "contested_ops": {
+              "max": 2,
+              "mean": 2.0,
+              "min": 2
+            },
+            "head_children_repetition_1": [
+              0,
+              0
+            ],
+            "max_concurrent_siblings": {
+              "max": 2,
+              "mean": 2.0,
+              "min": 2
+            },
+            "model": "rga_anchor_simulation"
+          },
+          "kind": "partition_heal",
+          "name": "divergence-n2-append-1e4",
+          "node_count": 2,
+          "op_count": 20000,
+          "params": {
+            "baseline": {
+              "length": 104852,
+              "sha256": "42c0ff1720c0cad77077e190e36135c9cab9f7bbc266351c0a7fe4981c6a1546",
+              "trace": "editing-traces/automerge-paper.json.gz"
+            },
+            "groups": [
+              [
+                0
+              ],
+              [
+                1
+              ]
+            ],
+            "heal_topology": "full_mesh",
+            "locality": "append",
+            "ops_per_group": 10000,
+            "workload": "text_splice",
+            "write_pattern": "concentrated"
+          },
+          "path": "scenarios/divergence-n2-append-1e4.toml",
+          "seeds": {
+            "base": "0x5eedd1f50ff5e7a1",
+            "per_repetition": [
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x910228bde9f74684"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xa0b2a0f3a5ce1201"
+                  }
+                ],
+                "repetition": 1
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xc7de01c2bd3c0af2"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x053c9a3dd0cf28e2"
+                  }
+                ],
+                "repetition": 2
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x2c4d683739c35eba"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xd1025edb4819bc3e"
+                  }
+                ],
+                "repetition": 3
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xc68b643d873eb067"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x83f07cd9806cc7a8"
+                  }
+                ],
+                "repetition": 4
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x3006dbf7c761776c"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x72294d418f0e6df8"
+                  }
+                ],
+                "repetition": 5
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x2a94e6ac8029dd10"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x50015b3b3fc35a98"
+                  }
+                ],
+                "repetition": 6
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x44e33551808556ba"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x065c4f294d725db8"
+                  }
+                ],
+                "repetition": 7
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x09efca91f6ea5252"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x41c5b00c9e35172f"
+                  }
+                ],
+                "repetition": 8
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x5ead003038bfd6e9"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x9ebd579daf54ed3b"
+                  }
+                ],
+                "repetition": 9
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xd6f0ac78bb8e3e9a"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x7db6f8175c1da095"
+                  }
+                ],
+                "repetition": 10
+              }
+            ]
+          }
+        },
+        {
+          "achieved_contention": {
+            "contested_anchors": {
+              "max": 1,
+              "mean": 1.0,
+              "min": 1
+            },
+            "contested_ops": {
+              "max": 2,
+              "mean": 2.0,
+              "min": 2
+            },
+            "head_children_repetition_1": [
+              1,
+              1
+            ],
+            "max_concurrent_siblings": {
+              "max": 2,
+              "mean": 2.0,
+              "min": 2
+            },
+            "model": "rga_anchor_simulation"
+          },
+          "kind": "partition_heal",
+          "name": "divergence-n2-append-empty-1e3",
+          "node_count": 2,
+          "op_count": 2000,
+          "params": {
+            "baseline": null,
+            "groups": [
+              [
+                0
+              ],
+              [
+                1
+              ]
+            ],
+            "heal_topology": "full_mesh",
+            "locality": "append",
+            "ops_per_group": 1000,
+            "workload": "text_splice",
+            "write_pattern": "concentrated"
+          },
+          "path": "scenarios/divergence-n2-append-empty-1e3.toml",
+          "seeds": {
+            "base": "0x5eedd1f50ff5e7a1",
+            "per_repetition": [
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x635097f418cda2a0"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x82e557364542cc05"
+                  }
+                ],
+                "repetition": 1
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xf145ace2d95c8243"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x5faf7393b72d0e78"
+                  }
+                ],
+                "repetition": 2
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x11559155f18b42e3"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xb45ade70afdeebfb"
+                  }
+                ],
+                "repetition": 3
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x70a58e88049d28d7"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xddc98203c908cacc"
+                  }
+                ],
+                "repetition": 4
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x01a099f3c1631f4f"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x5e1d04ac9643f26c"
+                  }
+                ],
+                "repetition": 5
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x565e10c124d07866"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x4a4862c5da2dddd9"
+                  }
+                ],
+                "repetition": 6
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xbbc3eef10e0d5754"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x7bcac4d43115bb1f"
+                  }
+                ],
+                "repetition": 7
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xc071f12fbd98e072"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xe68376ccf52cfc6e"
+                  }
+                ],
+                "repetition": 8
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x1387bbb5a92ed9ce"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xc89b3932dfde583a"
+                  }
+                ],
+                "repetition": 9
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xe4e6b6b9fa8dc644"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x5d73ac2d99257d14"
+                  }
+                ],
+                "repetition": 10
+              }
+            ]
+          }
+        },
+        {
+          "achieved_contention": {
+            "contested_anchors": {
+              "max": 1,
+              "mean": 1.0,
+              "min": 1
+            },
+            "contested_ops": {
+              "max": 2,
+              "mean": 2.0,
+              "min": 2
+            },
+            "head_children_repetition_1": [
+              1,
+              1
+            ],
+            "max_concurrent_siblings": {
+              "max": 2,
+              "mean": 2.0,
+              "min": 2
+            },
+            "model": "rga_anchor_simulation"
+          },
+          "kind": "partition_heal",
+          "name": "divergence-n2-append-empty-1e4",
+          "node_count": 2,
+          "op_count": 20000,
+          "params": {
+            "baseline": null,
+            "groups": [
+              [
+                0
+              ],
+              [
+                1
+              ]
+            ],
+            "heal_topology": "full_mesh",
+            "locality": "append",
+            "ops_per_group": 10000,
+            "workload": "text_splice",
+            "write_pattern": "concentrated"
+          },
+          "path": "scenarios/divergence-n2-append-empty-1e4.toml",
+          "seeds": {
+            "base": "0x5eedd1f50ff5e7a1",
+            "per_repetition": [
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x910228bde9f74684"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xa0b2a0f3a5ce1201"
+                  }
+                ],
+                "repetition": 1
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xc7de01c2bd3c0af2"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x053c9a3dd0cf28e2"
+                  }
+                ],
+                "repetition": 2
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x2c4d683739c35eba"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xd1025edb4819bc3e"
+                  }
+                ],
+                "repetition": 3
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xc68b643d873eb067"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x83f07cd9806cc7a8"
+                  }
+                ],
+                "repetition": 4
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x3006dbf7c761776c"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x72294d418f0e6df8"
+                  }
+                ],
+                "repetition": 5
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x2a94e6ac8029dd10"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x50015b3b3fc35a98"
+                  }
+                ],
+                "repetition": 6
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x44e33551808556ba"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x065c4f294d725db8"
+                  }
+                ],
+                "repetition": 7
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x09efca91f6ea5252"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x41c5b00c9e35172f"
+                  }
+                ],
+                "repetition": 8
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x5ead003038bfd6e9"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x9ebd579daf54ed3b"
+                  }
+                ],
+                "repetition": 9
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xd6f0ac78bb8e3e9a"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x7db6f8175c1da095"
+                  }
+                ],
+                "repetition": 10
+              }
+            ]
+          }
+        },
+        {
+          "achieved_contention": {
+            "contested_anchors": {
+              "max": 1,
+              "mean": 0.2,
+              "min": 0
+            },
+            "contested_ops": {
+              "max": 2,
+              "mean": 0.4,
+              "min": 0
+            },
+            "head_children_repetition_1": [
+              0,
+              0
+            ],
+            "max_concurrent_siblings": {
+              "max": 2,
+              "mean": 0.4,
+              "min": 0
+            },
+            "model": "rga_anchor_simulation"
+          },
+          "kind": "partition_heal",
+          "name": "divergence-n2-random_position-1e2",
+          "node_count": 2,
+          "op_count": 200,
+          "params": {
+            "baseline": {
+              "length": 104852,
+              "sha256": "42c0ff1720c0cad77077e190e36135c9cab9f7bbc266351c0a7fe4981c6a1546",
+              "trace": "editing-traces/automerge-paper.json.gz"
+            },
+            "groups": [
+              [
+                0
+              ],
+              [
+                1
+              ]
+            ],
+            "heal_topology": "full_mesh",
+            "locality": "random_position",
+            "ops_per_group": 100,
+            "workload": "text_splice",
+            "write_pattern": "concentrated"
+          },
+          "path": "scenarios/divergence-n2-random_position-1e2.toml",
+          "seeds": {
+            "base": "0x5eedd1f50ff5e7a1",
+            "per_repetition": [
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x31c5647238307577"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xec34c032b3f4c927"
+                  }
+                ],
+                "repetition": 1
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x01bdc5af528edac5"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xafd70739af9f8538"
+                  }
+                ],
+                "repetition": 2
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x0d8e5e913e81fc16"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x9ca6655059e02675"
+                  }
+                ],
+                "repetition": 3
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x41d0785466a1c5a3"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x2df47171414cd301"
+                  }
+                ],
+                "repetition": 4
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x6332fbb4d81da7a5"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x7e196a463f089249"
+                  }
+                ],
+                "repetition": 5
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xd4739db1061686a0"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x780f3118aeb660b3"
+                  }
+                ],
+                "repetition": 6
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x388065e1e56fae09"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x37db11ba00466a01"
+                  }
+                ],
+                "repetition": 7
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x429576ba7befe773"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x3276d8a4445fe840"
+                  }
+                ],
+                "repetition": 8
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xd4d9ab6f827f9e4f"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xc7dabfc1ca1e2a38"
+                  }
+                ],
+                "repetition": 9
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xa77c11302763098f"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x28070fdd89259820"
+                  }
+                ],
+                "repetition": 10
+              }
+            ]
+          }
+        },
+        {
+          "achieved_contention": {
+            "contested_anchors": {
+              "max": 17,
+              "mean": 9.2,
+              "min": 6
+            },
+            "contested_ops": {
+              "max": 34,
+              "mean": 18.4,
+              "min": 12
+            },
+            "head_children_repetition_1": [
+              0,
+              0
+            ],
+            "max_concurrent_siblings": {
+              "max": 2,
+              "mean": 2.0,
+              "min": 2
+            },
+            "model": "rga_anchor_simulation"
+          },
+          "kind": "partition_heal",
+          "name": "divergence-n2-random_position-1e3",
+          "node_count": 2,
+          "op_count": 2000,
+          "params": {
+            "baseline": {
+              "length": 104852,
+              "sha256": "42c0ff1720c0cad77077e190e36135c9cab9f7bbc266351c0a7fe4981c6a1546",
+              "trace": "editing-traces/automerge-paper.json.gz"
+            },
+            "groups": [
+              [
+                0
+              ],
+              [
+                1
+              ]
+            ],
+            "heal_topology": "full_mesh",
+            "locality": "random_position",
+            "ops_per_group": 1000,
+            "workload": "text_splice",
+            "write_pattern": "concentrated"
+          },
+          "path": "scenarios/divergence-n2-random_position-1e3.toml",
+          "seeds": {
+            "base": "0x5eedd1f50ff5e7a1",
+            "per_repetition": [
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x74313c1713291981"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x00e269ccb8cb0187"
+                  }
+                ],
+                "repetition": 1
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x45b6574b5ff0c763"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x52a900e2e70ffb8a"
+                  }
+                ],
+                "repetition": 2
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xba51b88ec056b762"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x9014fee8ad825674"
+                  }
+                ],
+                "repetition": 3
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x6023431499997473"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x88ffc5c9e90b6f73"
+                  }
+                ],
+                "repetition": 4
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x18b6f189ac43a08e"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x5768ca804a3e9d12"
+                  }
+                ],
+                "repetition": 5
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xe5dd6fe42a1422d3"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xe0bba3a10b9f0487"
+                  }
+                ],
+                "repetition": 6
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x96890d75a534ff54"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x98f5ebfdef7c36a4"
+                  }
+                ],
+                "repetition": 7
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x75a028a7be60d449"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x53e563f470d25c04"
+                  }
+                ],
+                "repetition": 8
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x9568aad76dc72e14"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x07a9f1c408b65d35"
+                  }
+                ],
+                "repetition": 9
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xc43cad243c6e5c84"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xb2a18c776b8d1004"
+                  }
+                ],
+                "repetition": 10
+              }
+            ]
+          }
+        },
+        {
+          "achieved_contention": {
+            "contested_anchors": {
+              "max": 833,
+              "mean": 790.8,
+              "min": 730
+            },
+            "contested_ops": {
+              "max": 1741,
+              "mean": 1655.3,
+              "min": 1522
+            },
+            "head_children_repetition_1": [
+              0,
+              0
+            ],
+            "max_concurrent_siblings": {
+              "max": 5,
+              "mean": 4.2,
+              "min": 4
+            },
+            "model": "rga_anchor_simulation"
+          },
+          "kind": "partition_heal",
+          "name": "divergence-n2-random_position-1e4",
+          "node_count": 2,
+          "op_count": 20000,
+          "params": {
+            "baseline": {
+              "length": 104852,
+              "sha256": "42c0ff1720c0cad77077e190e36135c9cab9f7bbc266351c0a7fe4981c6a1546",
+              "trace": "editing-traces/automerge-paper.json.gz"
+            },
+            "groups": [
+              [
+                0
+              ],
+              [
+                1
+              ]
+            ],
+            "heal_topology": "full_mesh",
+            "locality": "random_position",
+            "ops_per_group": 10000,
+            "workload": "text_splice",
+            "write_pattern": "concentrated"
+          },
+          "path": "scenarios/divergence-n2-random_position-1e4.toml",
+          "seeds": {
+            "base": "0x5eedd1f50ff5e7a1",
+            "per_repetition": [
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x516e14c541085884"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x99d58ad69850e03f"
+                  }
+                ],
+                "repetition": 1
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x962393606c392479"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xa3d2fdd7e840ade1"
+                  }
+                ],
+                "repetition": 2
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x404a68e0079c800e"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x52797f976bd353d3"
+                  }
+                ],
+                "repetition": 3
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xa13d490cf71d9e84"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xaa284a903bca6f8c"
+                  }
+                ],
+                "repetition": 4
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x9f5f2902b8a3b731"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x1ee72a03a3e63290"
+                  }
+                ],
+                "repetition": 5
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xa90f56c5e341ef3a"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x35793c44e2632d38"
+                  }
+                ],
+                "repetition": 6
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x780a5b927e26ced2"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x868a34fa9cfc19c4"
+                  }
+                ],
+                "repetition": 7
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xbfcb5aa8b8a61f6b"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xbc9a615da230ef7f"
+                  }
+                ],
+                "repetition": 8
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x1323e92efacd4b2f"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x3626d2cfb561fdfa"
+                  }
+                ],
+                "repetition": 9
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x81711936f890e654"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x86fa08257e63e184"
+                  }
+                ],
+                "repetition": 10
+              }
+            ]
+          }
+        },
+        {
+          "achieved_contention": {
+            "contested_anchors": {
+              "max": 1,
+              "mean": 1.0,
+              "min": 1
+            },
+            "contested_ops": {
+              "max": 20,
+              "mean": 15.2,
+              "min": 10
+            },
+            "head_children_repetition_1": [
+              6,
+              10
+            ],
+            "max_concurrent_siblings": {
+              "max": 20,
+              "mean": 15.2,
+              "min": 10
+            },
+            "model": "rga_anchor_simulation"
+          },
+          "kind": "partition_heal",
+          "name": "divergence-n2-random_position-empty-1e3",
+          "node_count": 2,
+          "op_count": 2000,
+          "params": {
+            "baseline": null,
+            "groups": [
+              [
+                0
+              ],
+              [
+                1
+              ]
+            ],
+            "heal_topology": "full_mesh",
+            "locality": "random_position",
+            "ops_per_group": 1000,
+            "workload": "text_splice",
+            "write_pattern": "concentrated"
+          },
+          "path": "scenarios/divergence-n2-random_position-empty-1e3.toml",
+          "seeds": {
+            "base": "0x5eedd1f50ff5e7a1",
+            "per_repetition": [
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x74313c1713291981"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x00e269ccb8cb0187"
+                  }
+                ],
+                "repetition": 1
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x45b6574b5ff0c763"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x52a900e2e70ffb8a"
+                  }
+                ],
+                "repetition": 2
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xba51b88ec056b762"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x9014fee8ad825674"
+                  }
+                ],
+                "repetition": 3
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x6023431499997473"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x88ffc5c9e90b6f73"
+                  }
+                ],
+                "repetition": 4
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x18b6f189ac43a08e"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x5768ca804a3e9d12"
+                  }
+                ],
+                "repetition": 5
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xe5dd6fe42a1422d3"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xe0bba3a10b9f0487"
+                  }
+                ],
+                "repetition": 6
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x96890d75a534ff54"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x98f5ebfdef7c36a4"
+                  }
+                ],
+                "repetition": 7
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x75a028a7be60d449"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x53e563f470d25c04"
+                  }
+                ],
+                "repetition": 8
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x9568aad76dc72e14"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x07a9f1c408b65d35"
+                  }
+                ],
+                "repetition": 9
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xc43cad243c6e5c84"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xb2a18c776b8d1004"
+                  }
+                ],
+                "repetition": 10
+              }
+            ]
+          }
+        },
+        {
+          "achieved_contention": {
+            "contested_anchors": {
+              "max": 1,
+              "mean": 1.0,
+              "min": 1
+            },
+            "contested_ops": {
+              "max": 26,
+              "mean": 18.6,
+              "min": 11
+            },
+            "head_children_repetition_1": [
+              7,
+              8
+            ],
+            "max_concurrent_siblings": {
+              "max": 26,
+              "mean": 18.6,
+              "min": 11
+            },
+            "model": "rga_anchor_simulation"
+          },
+          "kind": "partition_heal",
+          "name": "divergence-n2-random_position-empty-1e4",
+          "node_count": 2,
+          "op_count": 20000,
+          "params": {
+            "baseline": null,
+            "groups": [
+              [
+                0
+              ],
+              [
+                1
+              ]
+            ],
+            "heal_topology": "full_mesh",
+            "locality": "random_position",
+            "ops_per_group": 10000,
+            "workload": "text_splice",
+            "write_pattern": "concentrated"
+          },
+          "path": "scenarios/divergence-n2-random_position-empty-1e4.toml",
+          "seeds": {
+            "base": "0x5eedd1f50ff5e7a1",
+            "per_repetition": [
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x516e14c541085884"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x99d58ad69850e03f"
+                  }
+                ],
+                "repetition": 1
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x962393606c392479"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xa3d2fdd7e840ade1"
+                  }
+                ],
+                "repetition": 2
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x404a68e0079c800e"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x52797f976bd353d3"
+                  }
+                ],
+                "repetition": 3
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xa13d490cf71d9e84"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xaa284a903bca6f8c"
+                  }
+                ],
+                "repetition": 4
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x9f5f2902b8a3b731"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x1ee72a03a3e63290"
+                  }
+                ],
+                "repetition": 5
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xa90f56c5e341ef3a"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x35793c44e2632d38"
+                  }
+                ],
+                "repetition": 6
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x780a5b927e26ced2"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x868a34fa9cfc19c4"
+                  }
+                ],
+                "repetition": 7
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xbfcb5aa8b8a61f6b"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xbc9a615da230ef7f"
+                  }
+                ],
+                "repetition": 8
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x1323e92efacd4b2f"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x3626d2cfb561fdfa"
+                  }
+                ],
+                "repetition": 9
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x81711936f890e654"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x86fa08257e63e184"
+                  }
+                ],
+                "repetition": 10
+              }
+            ]
+          }
+        },
+        {
+          "achieved_contention": {
+            "contested_anchors": {
+              "max": 1,
+              "mean": 1.0,
+              "min": 1
+            },
+            "contested_ops": {
+              "max": 200,
+              "mean": 200.0,
+              "min": 200
+            },
+            "head_children_repetition_1": [
+              100,
+              100
+            ],
+            "max_concurrent_siblings": {
+              "max": 200,
+              "mean": 200.0,
+              "min": 200
+            },
+            "model": "rga_anchor_simulation"
+          },
+          "kind": "partition_heal",
+          "name": "divergence-n2-same_region-1e2",
+          "node_count": 2,
+          "op_count": 200,
+          "params": {
+            "baseline": {
+              "length": 104852,
+              "sha256": "42c0ff1720c0cad77077e190e36135c9cab9f7bbc266351c0a7fe4981c6a1546",
+              "trace": "editing-traces/automerge-paper.json.gz"
+            },
+            "groups": [
+              [
+                0
+              ],
+              [
+                1
+              ]
+            ],
+            "heal_topology": "full_mesh",
+            "locality": "same_region",
+            "ops_per_group": 100,
+            "workload": "text_splice",
+            "write_pattern": "concentrated"
+          },
+          "path": "scenarios/divergence-n2-same_region-1e2.toml",
+          "seeds": {
+            "base": "0x5eedd1f50ff5e7a1",
+            "per_repetition": [
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x93ed98dd3c135c3d"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xefa83e0c6ee786c9"
+                  }
+                ],
+                "repetition": 1
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x94071709a214048c"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x3a9a6f15edb3542b"
+                  }
+                ],
+                "repetition": 2
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xe9a82d6b54b0f280"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x5d56b1711e8696f5"
+                  }
+                ],
+                "repetition": 3
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xfcc6af2a4b068df2"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x0b87c2f554699d54"
+                  }
+                ],
+                "repetition": 4
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x38c534d720f5803a"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x6403fd9db3e63b58"
+                  }
+                ],
+                "repetition": 5
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x6263c6806f61f04b"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xf9bdfc0ee142649a"
+                  }
+                ],
+                "repetition": 6
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xfab000ac790c2859"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x7cddee5df60653c0"
+                  }
+                ],
+                "repetition": 7
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x7d83cb6b45042378"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x5340a6bb66813e7e"
+                  }
+                ],
+                "repetition": 8
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xff7ec7521e84ccd4"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xaaf92b9a2abed100"
+                  }
+                ],
+                "repetition": 9
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x0191f806ccd9afe8"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x657d15b3d78ea155"
+                  }
+                ],
+                "repetition": 10
+              }
+            ]
+          }
+        },
+        {
+          "achieved_contention": {
+            "contested_anchors": {
+              "max": 1,
+              "mean": 1.0,
+              "min": 1
+            },
+            "contested_ops": {
+              "max": 2000,
+              "mean": 2000.0,
+              "min": 2000
+            },
+            "head_children_repetition_1": [
+              1000,
+              1000
+            ],
+            "max_concurrent_siblings": {
+              "max": 2000,
+              "mean": 2000.0,
+              "min": 2000
+            },
+            "model": "rga_anchor_simulation"
+          },
+          "kind": "partition_heal",
+          "name": "divergence-n2-same_region-1e3",
+          "node_count": 2,
+          "op_count": 2000,
+          "params": {
+            "baseline": {
+              "length": 104852,
+              "sha256": "42c0ff1720c0cad77077e190e36135c9cab9f7bbc266351c0a7fe4981c6a1546",
+              "trace": "editing-traces/automerge-paper.json.gz"
+            },
+            "groups": [
+              [
+                0
+              ],
+              [
+                1
+              ]
+            ],
+            "heal_topology": "full_mesh",
+            "locality": "same_region",
+            "ops_per_group": 1000,
+            "workload": "text_splice",
+            "write_pattern": "concentrated"
+          },
+          "path": "scenarios/divergence-n2-same_region-1e3.toml",
+          "seeds": {
+            "base": "0x5eedd1f50ff5e7a1",
+            "per_repetition": [
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xe9968847230b8b06"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x72217af0451e0d34"
+                  }
+                ],
+                "repetition": 1
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xd1e2630f0efa8674"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xe1f93da3a8a9bfff"
+                  }
+                ],
+                "repetition": 2
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x0d72ddbc25b49a74"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x779a8d07da8fcbcf"
+                  }
+                ],
+                "repetition": 3
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x99ad29614ca69d4c"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x6be53af473c9b1af"
+                  }
+                ],
+                "repetition": 4
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x66c245e0223b0db4"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x679d4b5dbd4436c8"
+                  }
+                ],
+                "repetition": 5
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xb2946a20df202a81"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x40c4004945f91c02"
+                  }
+                ],
+                "repetition": 6
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x8097350bdcbbfcc3"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x6708c21707e8f418"
+                  }
+                ],
+                "repetition": 7
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x600db34d6e809b3d"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x1968f15a568427f8"
+                  }
+                ],
+                "repetition": 8
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x08894cab8ac60573"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x5be69b7fe954d799"
+                  }
+                ],
+                "repetition": 9
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x65d0b67dfc54d9c8"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x818c9c7e0783e4a9"
+                  }
+                ],
+                "repetition": 10
+              }
+            ]
+          }
+        },
+        {
+          "achieved_contention": {
+            "contested_anchors": {
+              "max": 1,
+              "mean": 1.0,
+              "min": 1
+            },
+            "contested_ops": {
+              "max": 20000,
+              "mean": 20000.0,
+              "min": 20000
+            },
+            "head_children_repetition_1": [
+              10000,
+              10000
+            ],
+            "max_concurrent_siblings": {
+              "max": 20000,
+              "mean": 20000.0,
+              "min": 20000
+            },
+            "model": "rga_anchor_simulation"
+          },
+          "kind": "partition_heal",
+          "name": "divergence-n2-same_region-1e4",
+          "node_count": 2,
+          "op_count": 20000,
+          "params": {
+            "baseline": {
+              "length": 104852,
+              "sha256": "42c0ff1720c0cad77077e190e36135c9cab9f7bbc266351c0a7fe4981c6a1546",
+              "trace": "editing-traces/automerge-paper.json.gz"
+            },
+            "groups": [
+              [
+                0
+              ],
+              [
+                1
+              ]
+            ],
+            "heal_topology": "full_mesh",
+            "locality": "same_region",
+            "ops_per_group": 10000,
+            "workload": "text_splice",
+            "write_pattern": "concentrated"
+          },
+          "path": "scenarios/divergence-n2-same_region-1e4.toml",
+          "seeds": {
+            "base": "0x5eedd1f50ff5e7a1",
+            "per_repetition": [
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x3d9c389e6b73f9be"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xd69989e5247a0cfc"
+                  }
+                ],
+                "repetition": 1
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x1ab505ec2dc6a596"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x0f50485996f26e88"
+                  }
+                ],
+                "repetition": 2
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x5373c475788c37cc"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x595ec3dab11ec92d"
+                  }
+                ],
+                "repetition": 3
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xe219f880e3d6b6bc"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x1d8592144a3d4a2d"
+                  }
+                ],
+                "repetition": 4
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x437241335f8e8b46"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x94fd56dfb35fecb2"
+                  }
+                ],
+                "repetition": 5
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x789de3e410406e12"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x6072747acaad5b6a"
+                  }
+                ],
+                "repetition": 6
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xfbc380077dec026c"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x983d8fef077fc63a"
+                  }
+                ],
+                "repetition": 7
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xfe0ec917514e69ca"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x276b29d9b786e793"
+                  }
+                ],
+                "repetition": 8
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x2283a7622ef2c13e"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x6e0b07fab2b430e0"
+                  }
+                ],
+                "repetition": 9
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xbcc3910439d3758e"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xd12bbb31172cfee8"
+                  }
+                ],
+                "repetition": 10
+              }
+            ]
+          }
+        },
+        {
+          "achieved_contention": {
+            "contested_anchors": {
+              "max": 1,
+              "mean": 1.0,
+              "min": 1
+            },
+            "contested_ops": {
+              "max": 2000,
+              "mean": 2000.0,
+              "min": 2000
+            },
+            "head_children_repetition_1": [
+              1000,
+              1000
+            ],
+            "max_concurrent_siblings": {
+              "max": 2000,
+              "mean": 2000.0,
+              "min": 2000
+            },
+            "model": "rga_anchor_simulation"
+          },
+          "kind": "partition_heal",
+          "name": "divergence-n2-same_region-empty-1e3",
+          "node_count": 2,
+          "op_count": 2000,
+          "params": {
+            "baseline": null,
+            "groups": [
+              [
+                0
+              ],
+              [
+                1
+              ]
+            ],
+            "heal_topology": "full_mesh",
+            "locality": "same_region",
+            "ops_per_group": 1000,
+            "workload": "text_splice",
+            "write_pattern": "concentrated"
+          },
+          "path": "scenarios/divergence-n2-same_region-empty-1e3.toml",
+          "seeds": {
+            "base": "0x5eedd1f50ff5e7a1",
+            "per_repetition": [
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xe9968847230b8b06"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x72217af0451e0d34"
+                  }
+                ],
+                "repetition": 1
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xd1e2630f0efa8674"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xe1f93da3a8a9bfff"
+                  }
+                ],
+                "repetition": 2
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x0d72ddbc25b49a74"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x779a8d07da8fcbcf"
+                  }
+                ],
+                "repetition": 3
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x99ad29614ca69d4c"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x6be53af473c9b1af"
+                  }
+                ],
+                "repetition": 4
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x66c245e0223b0db4"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x679d4b5dbd4436c8"
+                  }
+                ],
+                "repetition": 5
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xb2946a20df202a81"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x40c4004945f91c02"
+                  }
+                ],
+                "repetition": 6
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x8097350bdcbbfcc3"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x6708c21707e8f418"
+                  }
+                ],
+                "repetition": 7
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x600db34d6e809b3d"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x1968f15a568427f8"
+                  }
+                ],
+                "repetition": 8
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x08894cab8ac60573"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x5be69b7fe954d799"
+                  }
+                ],
+                "repetition": 9
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x65d0b67dfc54d9c8"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x818c9c7e0783e4a9"
+                  }
+                ],
+                "repetition": 10
+              }
+            ]
+          }
+        },
+        {
+          "achieved_contention": {
+            "contested_anchors": {
+              "max": 1,
+              "mean": 1.0,
+              "min": 1
+            },
+            "contested_ops": {
+              "max": 20000,
+              "mean": 20000.0,
+              "min": 20000
+            },
+            "head_children_repetition_1": [
+              10000,
+              10000
+            ],
+            "max_concurrent_siblings": {
+              "max": 20000,
+              "mean": 20000.0,
+              "min": 20000
+            },
+            "model": "rga_anchor_simulation"
+          },
+          "kind": "partition_heal",
+          "name": "divergence-n2-same_region-empty-1e4",
+          "node_count": 2,
+          "op_count": 20000,
+          "params": {
+            "baseline": null,
+            "groups": [
+              [
+                0
+              ],
+              [
+                1
+              ]
+            ],
+            "heal_topology": "full_mesh",
+            "locality": "same_region",
+            "ops_per_group": 10000,
+            "workload": "text_splice",
+            "write_pattern": "concentrated"
+          },
+          "path": "scenarios/divergence-n2-same_region-empty-1e4.toml",
+          "seeds": {
+            "base": "0x5eedd1f50ff5e7a1",
+            "per_repetition": [
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x3d9c389e6b73f9be"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xd69989e5247a0cfc"
+                  }
+                ],
+                "repetition": 1
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x1ab505ec2dc6a596"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x0f50485996f26e88"
+                  }
+                ],
+                "repetition": 2
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x5373c475788c37cc"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x595ec3dab11ec92d"
+                  }
+                ],
+                "repetition": 3
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xe219f880e3d6b6bc"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x1d8592144a3d4a2d"
+                  }
+                ],
+                "repetition": 4
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x437241335f8e8b46"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x94fd56dfb35fecb2"
+                  }
+                ],
+                "repetition": 5
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x789de3e410406e12"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x6072747acaad5b6a"
+                  }
+                ],
+                "repetition": 6
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xfbc380077dec026c"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x983d8fef077fc63a"
+                  }
+                ],
+                "repetition": 7
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xfe0ec917514e69ca"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x276b29d9b786e793"
+                  }
+                ],
+                "repetition": 8
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x2283a7622ef2c13e"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x6e0b07fab2b430e0"
+                  }
+                ],
+                "repetition": 9
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xbcc3910439d3758e"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xd12bbb31172cfee8"
+                  }
+                ],
+                "repetition": 10
+              }
+            ]
+          }
+        }
+      ],
+      "schema_version": 3,
+      "deferred": {
+        "window": {
+          "start": 1794101621,
+          "end": 1794102194
+        },
+        "tx_total": 904,
+        "deferred_total": 0,
+        "deferred_series": []
+      }
+    }
+  ]
+}

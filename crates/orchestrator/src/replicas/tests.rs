@@ -281,3 +281,56 @@ async fn unblock_and_kick_heals_without_reconnecting() {
     wait_for_pair(&mut clients).await;
     check_tasks(&mut tasks).unwrap();
 }
+
+// ── instance ids ───────────────────────────────────────────────────────
+
+/// A seeded id stays in effect after a `Load`, as `run_partition_heal` needs.
+///
+/// A Yrs head is the client id (8 bytes, big-endian) and a clock. So after one
+/// write, the heads show the client id that the library used. The Yrs adapter
+/// keeps the low `INSTANCE_ID_BITS` bits of the id and sets the next bit.
+#[tokio::test]
+async fn a_seeded_id_survives_a_load() {
+    use common::INSTANCE_ID_BITS;
+    use common::proto::{Empty, LoadRequest};
+    use tonic::Request;
+
+    let mut tasks = JoinSet::new();
+    let (_, mut clients) = spawn_nodes(1, Crdt::Yrs, &mut tasks).await.unwrap();
+
+    // A document that another replica wrote.
+    ensure_text_all(&mut clients, 0..1).await.unwrap();
+    text_splice(&mut clients[0], TEXT_OBJ, 0, "base")
+        .await
+        .unwrap();
+    let state = clients[0]
+        .encode(Request::new(Empty {}))
+        .await
+        .unwrap()
+        .into_inner()
+        .state;
+
+    let id: u128 = 0x0123_4567_89ab_cdef;
+    reset_all(&clients).await.unwrap();
+    set_instance_ids(&clients, &[id]).await.unwrap();
+    clients[0]
+        .load(Request::new(LoadRequest { state }))
+        .await
+        .unwrap();
+    ensure_text_all(&mut clients, 0..1).await.unwrap();
+    text_splice(&mut clients[0], TEXT_OBJ, 0, "x")
+        .await
+        .unwrap();
+
+    let client_id = (id as u64 & ((1 << INSTANCE_ID_BITS) - 1)) | (1 << INSTANCE_ID_BITS);
+    let heads = clients[0]
+        .get_heads(Request::new(Empty {}))
+        .await
+        .unwrap()
+        .into_inner()
+        .heads;
+    assert!(
+        heads.iter().any(|h| h[..8] == client_id.to_be_bytes()),
+        "no head has the seeded client id {client_id:#x}"
+    );
+}

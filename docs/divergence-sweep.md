@@ -144,6 +144,13 @@ an Automerge replica can compute for hundreds of milliseconds between two messag
 of one handshake. The heal then measures a reconnect, not a first contact. See
 [`metrics.md`](metrics.md).
 
+**The reconnect.** At the unblock, each replica keeps only the sync state that its
+library keeps across a disconnect. Automerge keeps the heads that both sides have,
+as its documented persistence of sync state does. Yrs and Loro keep none, and
+exchange versions again. Keeping all state was wrong for Automerge: the peer's last
+request survived the partition, and the first message of the heal tested the whole
+history against it.
+
 **The sync protocols.** Automerge has its own sync protocol. Yrs and Loro have none,
 so their adapters add one that follows the Yjs sync protocol: each side sends its
 state vector or version vector, and the other side answers with what that version
@@ -248,8 +255,33 @@ same stream. Repetitions within a cell vary the seed, which is what produces the
 run-to-run variance estimate. Cross-library comparisons hold the workload fixed,
 so a difference between libraries cannot be sampling noise.
 
+**The library ids are seeded too.** A library breaks ties between concurrent ops
+with the id of the replica, and some id pairs change the cost of a merge: a Loro
+merge can be about 400 times slower (see
+[`tools/findings/README.md`](../tools/findings/README.md)). So each replica's id
+comes from a seed:
+
+```
+ids = seeded_instance_ids(id_seed_for(repetition), node_count)
+```
+
+The id seed depends on the repetition only. So:
+
+- Repetition `r` of every cell, on every library, uses the same ids. A difference
+  between two cells is not an effect of the ids. This is a paired design.
+- The repetitions of a cell use different ids. The spread of a cell includes the
+  spread that the ids cause, so report the spread, not only the median. For Loro,
+  a cell can have fast and slow repetitions.
+- A rerun repeats each trial exactly, its ids included.
+
+The orchestrator sets the ids after the reset, before the starting document loads.
+A `Load` keeps the replica's id. Before 2026-11-07, every trial drew random ids,
+because each `Reset` and `Load` made a new document with a random id. The seeded
+ids of the replay tool did not reach the orchestrator.
+
 Seeds and cell parameters are written to the provenance file before the first
-trial, so an interrupted sweep still leaves a record of what it was running.
+trial, so an interrupted sweep still leaves a record of what it was running. The
+provenance also lists the id seed of each repetition, under `instance_ids`.
 
 ## Current scope and limits
 
@@ -300,6 +332,43 @@ took about 690 ms, and the Yrs sync layer could not heal 10⁵ ops per side with
 these are about 254 ms and 0.9 s. Automerge still could not heal 10⁵ within 600 s.
 See [`data/divergence-paper-pilot-2026-11-07/`](../data/divergence-paper-pilot-2026-11-07/).
 
+**2026-11-07 — in a probe, kept sync state cost Automerge about 140 ms.** In an
+in-process probe with the replica's adapter on the B4 paper, a heal of one op per side
+took 188-195 ms of adapter time with all sync state kept, and 54-56 ms after
+`sync_reconnect`. Of the 54 ms, about 43 ms is the two receives that apply one
+change each. Automerge's apply of one change walks the document, so this cost grows
+with the history. On the lanes, the reconnect alone did not lower the floor much. See
+the next observation.
+
+**2026-11-07 — the Automerge floor on the lanes was a logging cost.** After the
+reconnect change, a heal of one op per side still took about 260 ms on the docker
+lane and about 250 ms on the in-process lane. One received change took about 125 ms in
+the replica, against about 21 ms in the probe. A profile showed that most of the time
+went to `tracing`: Automerge's `load_changes` has an `#[instrument]` span that records
+the whole change graph with `Debug`, and the replica's log subscriber at INFO enabled
+it. On the paper, each received change formatted 259,779 change hashes. The probes
+install no subscriber, so they did not pay this cost. The log filter now keeps the
+CRDT libraries at WARN (`replica::logging`). The heal then took 43-46 ms on the docker
+lane. Across the grid, the paper cells of Automerge fell by about 200 ms up to 10⁴ and
+by about 0.9 s at 10⁵, and the empty controls changed little. See
+[`data/divergence-grid-2026-11-07/`](../data/divergence-grid-2026-11-07/).
+
+**2026-11-07 — the Yrs floor was the fingerprint poll.** A Yrs heal of one op per
+side on the B4 paper takes under 1 ms of adapter time in process. On the docker lane
+it took 8.4-8.8 ms on the pilot code, and the trace showed two polls. With the
+reconnect heal it took 3.6-3.8 ms and one poll. Each poll encoded the full document
+(377 KB) on each replica. The Yrs fingerprint is now the state vector and the delete
+set, which is about 15 times cheaper. The delete-set encode in the Yrs sync layer
+costs about 0.02 ms, so it was not a cause.
+
+**2026-11-07 — a Yrs insert at a random position gets slower as inserts add up.**
+In process, on the B4 paper, an insert at a random position cost about 0.03 ms after
+2,000 inserts and about 0.10 ms after 10,000. Automerge (0.011 ms) and Loro (0.001 ms)
+did not change. This is outside the heal window, but it makes the divergence phase of
+a Yrs `random_position` cell at 10⁵ take about 6 minutes on the docker lane. The
+cause is probably that each insert splits a block, and Yrs walks the blocks to find
+an index. That is not confirmed.
+
 **2026-11-07 — Loro's peer ids can change a merge by about 400 times.** Two Loro
 documents each inserted 10⁴ characters at position 0 and imported the other's update,
 with no Replicant code. For a given pair of peer ids, an import took either about 10
@@ -307,6 +376,34 @@ ms or about 4,300 ms, on one side, both, or neither. In 12 random pairs, 10 of 2
 imports were slow. The rule is not known. It is not which id is lower. On the docker
 lane, `same_region` at 10⁴ took 26 ms, 5,400 ms, or 10,700 ms, and this explains the
 bimodal Loro results. With a starting document, `random_position` did not show it.
+
+**2026-11-07 — with seeded ids, the Loro slow path is a property of the id pair.** In
+the seeded grid, the same repetitions (2, 3, 5, 6, 8, and 9) were slow in every
+contested Loro cell, and repetitions 4, 7, and 10 were fast. So the slow path depends
+on the ids. Repetition 1 was slow only in the cells that start empty. In the paper
+cells, repetition 1 was also the only one whose writer continued the baseline author's
+history (fixed later with `BASELINE_AUTHOR`), so the grid cannot tell whether the
+document or the author made the difference.
+At `same_region-1e5`, one cell had 269 ms on a fast pair and about 1,180 s on a slow
+pair. The median of such a cell only counts the slow pairs, so report the fast and slow
+groups. See [`data/divergence-grid-2026-11-07/`](../data/divergence-grid-2026-11-07/).
+
+**2026-11-07 — Yrs `same_region` grows with the square of the ops.** The heal took
+44 ms at 10³, 3.8 s at 10⁴, and 353 s at 10⁵, from the paper and from an empty start.
+In `same_region` every insert contests one anchor, so the contested share is 100% at
+every size, and the number of concurrent siblings on that anchor grows with the ops.
+
+**2026-11-07 — the ids can also change a Yrs merge.** In the seeded grid, Yrs
+`random_position-1e5` took 2,207 ms in repetition 1 and 876-880 ms in repetitions 2
+and 3. A rerun gave 2,249, 879, and 865 ms. No other Yrs cell showed it. The cause is
+not known. Repetition 1 differs in three ways: its ids, its insert positions (the seed
+picks both), and the baseline author effect. A rerun with the author fix and fixed
+positions can separate them.
+
+**2026-11-07 — the heal timeout does not stop a long import.** The heal timeout is
+600 s, but two Loro trials converged after about 1,180 s and passed. The orchestrator
+checks the timeout only after a fingerprint poll returns, and the poll waits for the
+adapter lock while an import runs.
 
 **2026-08-06 — the shared text object is what makes locality reach the CRDT.**
 A standalone Automerge 0.9 probe at 10⁴ operations per side. With each replica

@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 use crate::contention::{self, AchievedContention};
 use crate::replicas::ReplicaEndpoint;
 use crate::scenario::{PartitionConfig, ScenarioBody, ScenarioFile, WriteKind};
-use crate::workload::{DIVERGENCE_SEED_BASE, seed_for};
+use crate::workload::{DIVERGENCE_SEED_BASE, id_seed_for, seed_for};
 
 /// Version of the emitted JSON shape. Raise it whenever the shape changes in a
 /// way an existing reader would misread.
@@ -147,6 +147,20 @@ fn scenario_entry(scenario: &ScenarioFile, path: Option<&PathBuf>, trials: usize
                     "locality": c.locality,
                     "heal_topology": c.heal_topology,
                     "baseline": c.baseline,
+                }),
+            );
+            // The library ids of each repetition. They apply to every workload.
+            let id_seeds: Vec<Value> = (1..=trials)
+                .map(
+                    |rep| json!({"repetition": rep, "seed": format!("{:#018x}", id_seed_for(rep))}),
+                )
+                .collect();
+            obj.insert(
+                "instance_ids".into(),
+                json!({
+                    "rule": "seeded_instance_ids(id_seed_for(repetition), node_count); \
+                             the same ids for repetition r in every cell and library",
+                    "per_repetition": id_seeds,
                 }),
             );
             // Seeds only mean something for the text workload — `MapPut` keys

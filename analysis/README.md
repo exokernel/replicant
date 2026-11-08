@@ -26,6 +26,18 @@ Every run is traced.
 [`tour_helpers.py`](tour_helpers.py) holds the code that runs the
 orchestrator and draws the charts.
 
+[`divergence.py`](divergence.py) is a second marimo notebook. It explains the
+divergence study: what a merge costs after replicas diverge, how a cell runs,
+which faults in the measurement were found and fixed, the library findings, and
+the grid. It reads only archived data under `data/`, so it needs no Docker and no
+build. [`divergence_helpers.py`](divergence_helpers.py) holds its loaders and
+charts.
+
+```sh
+just divergence-notebook      # with its code
+just divergence-notebook run  # as an app
+```
+
 [`archive/`](archive/) holds the first set of Jupyter notebooks, and the
 commands that generate their input data. They are kept so their analysis and
 plots can be reused.

@@ -249,8 +249,8 @@ impl CrdtAdapter for AutomergeAdapter {
 
     fn doc_size_bytes(&mut self) -> usize {
         // `save()` produces the full binary encoding. Automerge has no cheaper
-        // size query. The cost is acceptable because this runs once per op,
-        // for the size gauge.
+        // size query. The cost is acceptable because only `GetStats` calls
+        // this, after the timed window.
         self.doc.save().len()
     }
 
@@ -282,6 +282,18 @@ impl CrdtAdapter for AutomergeAdapter {
         // creates a fresh `sync::State`, which starts the protocol from the
         // full handshake.
         self.sync_states.remove(peer);
+    }
+
+    fn sync_reconnect(&mut self, peer: &str) {
+        // This is Automerge's documented persistence of sync state. The
+        // encoding keeps only `shared_heads`. It drops the last `have` of the
+        // peer and the record of sent changes. A kept `have` with an empty
+        // `last_sync` makes the next generate test the whole history against
+        // the peer's bloom filter.
+        if let Some(state) = self.sync_states.get_mut(peer) {
+            *state = sync::State::decode(&state.encode())
+                .expect("a sync state decodes its own encoding");
+        }
     }
 
     fn reset(&mut self) {
@@ -390,7 +402,10 @@ impl CrdtAdapter for AutomergeAdapter {
     }
 
     fn load(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
+        // Keep this replica's actor. `AutoCommit::load` picks a random one.
+        let actor = self.doc.get_actor().clone();
         self.doc = AutoCommit::load(bytes).context("loading an Automerge document")?;
+        self.doc.set_actor(actor);
         self.objects.clear();
         self.sync_states.clear();
         Ok(())
@@ -415,6 +430,7 @@ mod tests {
         set_instance_id_gives_distinct_replicas,
         wide_ids_stay_distinct,
         fixed_ids_make_a_merge_repeatable,
+        load_keeps_the_instance_id,
         identical_ops_yield_equal_fingerprints,
         disjoint_edits_converge_after_sync,
         concurrent_edits_to_same_key_converge,
@@ -443,6 +459,8 @@ mod tests {
         sync_reset_recovers_from_a_lost_message,
         sync_reset_recovers_from_a_lost_data_update,
         sync_reset_unknown_peer_is_noop,
+        sync_reconnect_recovers_from_a_lost_message,
+        sync_reconnect_unknown_peer_is_noop,
         text_length_errors_on_missing_or_wrong_type,
         save_bytes_not_canonical_across_converged_replicas,
     );

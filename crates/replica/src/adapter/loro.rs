@@ -392,6 +392,11 @@ impl CrdtAdapter for LoroAdapter {
         self.peers.remove(peer);
     }
 
+    fn sync_reconnect(&mut self, peer: &str) {
+        // Loro persists no sync state. A reconnect is a new version exchange.
+        self.sync_reset(peer);
+    }
+
     fn reset(&mut self) {
         *self = Self::new();
     }
@@ -507,7 +512,12 @@ impl CrdtAdapter for LoroAdapter {
     }
 
     fn load(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
+        // Keep this replica's peer id. `Self::new` picks a random one.
+        let peer = self.doc.peer_id();
         *self = Self::new();
+        self.doc
+            .set_peer_id(peer)
+            .context("keeping the Loro peer id")?;
         self.doc
             .import(bytes)
             .context("importing a Loro snapshot")?;
@@ -534,6 +544,7 @@ mod tests {
         set_instance_id_gives_distinct_replicas,
         wide_ids_stay_distinct,
         fixed_ids_make_a_merge_repeatable,
+        load_keeps_the_instance_id,
         identical_ops_yield_equal_fingerprints,
         disjoint_edits_converge_after_sync,
         concurrent_edits_to_same_key_converge,
@@ -557,6 +568,8 @@ mod tests {
         sync_reset_recovers_from_a_lost_message,
         sync_reset_recovers_from_a_lost_data_update,
         sync_reset_unknown_peer_is_noop,
+        sync_reconnect_recovers_from_a_lost_message,
+        sync_reconnect_unknown_peer_is_noop,
         // Characterization shared with Yrs.
         ensure_text_is_a_pure_lookup_no_change_authored,
         partitioned_text_edits_interleave_even_without_ensure_text,

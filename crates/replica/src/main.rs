@@ -58,8 +58,9 @@ async fn main() -> anyhow::Result<()> {
     // the exporter and the subscriber are built.
     let args = Args::parse();
 
+    // Not a level: the CRDT libraries must stay at WARN. See `replica::logging`.
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
+        .with_env_filter(replica::logging::filter())
         .init();
 
     let provider = init_metrics()?;

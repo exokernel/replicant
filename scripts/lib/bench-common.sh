@@ -46,8 +46,9 @@ bench_bucket_scenarios() {
 
 # Prepare the output CSV and provenance paths.
 #
-# The CSV is truncated: bench runs are not additive across invocations. A
-# previous run worth keeping must be copied out first.
+# The CSV is truncated and the provenance file is removed: bench runs are not
+# additive across invocations. A previous run worth keeping must be copied out
+# first.
 bench_init_output() {
     out="$1"
     # Run-provenance file for $out — commit, host, build profile, seeds, cell
@@ -56,6 +57,9 @@ bench_init_output() {
     meta="${out%.csv}.meta.json"
     mkdir -p results
     : > "$out"
+    # Remove the provenance of the previous run. If this run fails before
+    # bench_finalize, an old file would describe a run that did not happen.
+    rm -f "$meta"
     header_written=0
     metas=()  # per-group provenance temp files, merged into "$meta" at the end
 }

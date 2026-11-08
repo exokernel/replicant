@@ -89,6 +89,28 @@ pub fn seed_for(config: &PartitionConfig, node: usize, repetition: usize) -> u64
     SplitMix64::new(mixed).next_u64()
 }
 
+/// Mixed into [`id_seed_for`], so the id seed of a repetition differs from the
+/// seed of every operation stream.
+const ID_SEED_TAG: u64 = 0x1D5E_ED00_1D5E_ED00;
+
+/// Returns the seed of the library ids of every replica in one repetition.
+/// [`common::seeded_instance_ids`] turns it into the ids.
+///
+/// Some id pairs change the cost of a merge (see `tools/findings/README.md`).
+/// So the seed depends on the repetition only, not on the cell:
+///
+/// - Repetition `r` of every cell, on every library, uses the same ids. A
+///   difference between two cells is then not an effect of the ids.
+/// - The repetitions of a cell use different ids, so a cell shows the spread
+///   that the ids cause.
+/// - A rerun repeats each trial exactly, its ids included.
+pub fn id_seed_for(repetition: usize) -> u64 {
+    let mixed = DIVERGENCE_SEED_BASE
+        ^ ID_SEED_TAG
+        ^ (repetition as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    SplitMix64::new(mixed).next_u64()
+}
+
 /// The insert positions that one replica draws in one repetition of a cell.
 ///
 /// Each position is drawn against the replica's simulated text length. That

@@ -191,30 +191,41 @@ impl ReplicaState {
     /// Blocks or unblocks sync traffic with `peers`. See
     /// [`Self::blocked_peers`].
     ///
-    /// An unblock keeps the sync protocol state for each peer, so the heal
-    /// sends only what changed. So block a link only when its sync is idle. A
-    /// message that the peer drops because of the block would leave this
-    /// replica's state recording data as sent that never arrived, and sync
-    /// would stall. The orchestrator waits for idle sync with `SyncPending`.
+    /// An unblock is a reconnect to the same peer. For each link that was
+    /// blocked, it calls [`CrdtAdapter::sync_reconnect`]. The adapter keeps
+    /// only the sync state that its library keeps across a disconnect. For
+    /// Automerge, that is the heads that both peers have, so the heal sends
+    /// only what changed. Yrs and Loro start a new version exchange. A link
+    /// that was not blocked keeps all of its state.
     ///
     /// This method sends no sync traffic. The orchestrator calls `KickSync`
     /// after both ends of every healed link are unblocked. A kick from here
     /// could reach a peer that is still blocked, and that peer would drop it.
+    ///
+    /// [`CrdtAdapter::sync_reconnect`]: common::CrdtAdapter::sync_reconnect
     pub(super) fn set_peer_links(&self, peers: &[NodeId], blocked: bool) {
-        {
+        // Release the lock on the blocked set before the adapter lock is
+        // taken. This method never holds both locks.
+        let reconnected: Vec<&NodeId> = {
             let mut set = self.blocked();
-            for peer in peers {
-                if blocked {
-                    set.insert(peer.clone());
-                } else {
-                    set.remove(peer);
-                }
+            if blocked {
+                set.extend(peers.iter().cloned());
+                Vec::new()
+            } else {
+                peers.iter().filter(|peer| set.remove(*peer)).collect()
+            }
+        };
+        if !reconnected.is_empty() {
+            let mut adapter = self.adapter();
+            for peer in &reconnected {
+                adapter.sync_reconnect(peer);
             }
         }
         tracing::info!(
             actor = %self.actor_id,
             ?peers,
             blocked,
+            ?reconnected,
             "peer links updated"
         );
     }
@@ -599,6 +610,34 @@ mod tests {
         assert!(
             rx.try_recv().is_ok(),
             "post-unblock kick must start the handshake"
+        );
+    }
+
+    /// An unblock reconnects only the links that were blocked. Automerge then
+    /// forgets a message that it sent but the peer did not confirm, and sends
+    /// again. A link that was not blocked keeps that record, and sends nothing.
+    #[test]
+    fn unblock_reconnects_only_blocked_links() {
+        let state = new_state();
+        let (tx_blocked, mut rx_blocked) = mpsc::channel::<Vec<u8>>(8);
+        let (tx_open, mut rx_open) = mpsc::channel::<Vec<u8>>(8);
+        state.register_peer(id("node-1"), tx_blocked);
+        state.register_peer(id("node-2"), tx_open);
+        state.apply_op_timed(&map_put("before-block")).unwrap();
+        state.flush_to_peers();
+        assert!(rx_blocked.try_recv().is_ok() && rx_open.try_recv().is_ok());
+
+        // No replies come, so both peers have an unconfirmed message.
+        state.set_peer_links(&[id("node-1")], true);
+        state.set_peer_links(&[id("node-1"), id("node-2")], false);
+        state.kick_sync(&[id("node-1"), id("node-2")]);
+        assert!(
+            rx_blocked.try_recv().is_ok(),
+            "a reconnected link must start sync again"
+        );
+        assert!(
+            rx_open.try_recv().is_err(),
+            "a link that was not blocked must keep its sync state"
         );
     }
 

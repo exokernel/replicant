@@ -12,19 +12,22 @@
 //! encoded bytes. Each trial then loads these bytes on every replica. This does not
 //! use the sync protocol, and it happens before the clock starts.
 //!
-//! A replica that loads a document takes a new random id, so the replicas do not
-//! share an author id.
+//! The store builds the document under [`BASELINE_AUTHOR`], an id that no trial
+//! uses. A replica that loads the document keeps its own id. So every trial
+//! starts from the same author history, and no trial writer continues it.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
-use common::proto;
+use common::{ensure_distinct_instance_ids, proto};
 use replay::oracle::{CheckPlan, Content};
 use replay::trace::{ContentKind, Trace, read_verified};
 use tonic::Request;
 
-use crate::replicas::{Client, ensure_text_all, fingerprint, verify_text_length};
+use crate::replicas::{
+    Client, ensure_text_all, fingerprint, reset_all, set_instance_ids, verify_text_length,
+};
 use crate::scenario::Baseline;
 
 /// The traces and the encoded documents of the baselines of one run.
@@ -41,6 +44,12 @@ pub struct BaselineStore {
     /// The encoded documents, by the path in the scenario.
     encoded: HashMap<PathBuf, Vec<u8>>,
 }
+
+/// The library id that builds every baseline document. It is fixed, so the
+/// author of the baseline history is the same in every trial. The seeded trial
+/// ids look random, and [`BaselineStore::install`] checks that none of them is
+/// equal to this id in the bits that the adapters keep.
+pub const BASELINE_AUTHOR: u128 = 0xba5e_11ae_0000_0000_0000_0000_0000_0001;
 
 /// A trace whose file had the expected hash.
 struct Checked {
@@ -82,7 +91,7 @@ impl BaselineStore {
         let sha256 = baseline.sha256.to_ascii_lowercase();
         let bytes = read_verified(&path, Some(&sha256)).with_context(|| {
             format!(
-                "reading baseline {}. Make the traces with `just gen-traces`",
+                "reading baseline {}. Make the traces with `just gen-traces <crdt-benchmarks clone>`",
                 path.display()
             )
         })?;
@@ -113,11 +122,25 @@ impl BaselineStore {
     /// all replicas hold the same document with the expected length.
     ///
     /// Call this after a reset, while no links exist.
-    pub async fn install(&mut self, baseline: &Baseline, clients: &mut [Client]) -> Result<()> {
+    /// `ids` are the trial ids that the replicas have now. To build the document,
+    /// replica 0 takes [`BASELINE_AUTHOR`] for a moment, and then gets its trial
+    /// id back on an empty document.
+    pub async fn install(
+        &mut self,
+        baseline: &Baseline,
+        clients: &mut [Client],
+        ids: &[u128],
+    ) -> Result<()> {
         self.check(baseline)?;
+        let with_author: Vec<u128> = ids.iter().copied().chain([BASELINE_AUTHOR]).collect();
+        ensure_distinct_instance_ids(&with_author)
+            .context("a trial id is equal to the baseline author id")?;
         if !self.encoded.contains_key(&baseline.trace) {
             let trace = &self.traces[&baseline.trace].trace;
+            set_instance_ids(&clients[..1], &[BASELINE_AUTHOR]).await?;
             let state = build(trace, clients).await?;
+            reset_all(&clients[..1]).await?;
+            set_instance_ids(&clients[..1], &ids[..1]).await?;
             self.encoded.insert(baseline.trace.clone(), state);
         }
         let state = &self.encoded[&baseline.trace];
@@ -243,8 +266,9 @@ mod tests {
             crate::replicas::spawn_nodes(2, replica::adapter::Crdt::Yrs, &mut tasks)
                 .await
                 .unwrap();
+        let ids = common::seeded_instance_ids(1, 2);
         let err = BaselineStore::new(&dir)
-            .install(&baseline, &mut clients)
+            .install(&baseline, &mut clients, &ids)
             .await
             .unwrap_err();
         assert!(

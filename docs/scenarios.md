@@ -270,10 +270,10 @@ A script generates the cells. Do not edit them by hand:
   `just ci` runs this check.
 
 The main-grid cells start from the B4 paper, and six `-empty-` control cells start
-from an empty document. The main-grid cells need the trace of the paper in `traces/`. Make it
-with `just gen-traces`. A scenario with a `[partition_heal.baseline]` table names
-the trace, its SHA-256 hash, and its length, and the orchestrator reads the file
-from `--data-dir`, which is `traces` by default.
+from an empty document. The main-grid cells need the trace of the paper in
+`traces/`. Make it with `just gen-traces <crdt-benchmarks clone>`. A scenario with a
+`[partition_heal.baseline]` table names the trace, its SHA-256 hash, and its length,
+and the orchestrator reads the file from `--data-dir`, which is `traces` by default.
 
 For what the grid measures and why, see
 [`divergence-sweep.md`](divergence-sweep.md).

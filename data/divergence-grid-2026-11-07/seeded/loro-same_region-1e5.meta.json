@@ -1,0 +1,158 @@
+{
+  "invocations": [
+    {
+      "build": {
+        "arch": "aarch64",
+        "orchestrator_version": "0.1.0",
+        "os": "macos",
+        "profile": "release"
+      },
+      "generated_at_unix_ms": 1794113773320,
+      "git": {
+        "commit": "f2e3ec0b7c53bf46a6a9306aae29a42698b396ec",
+        "dirty": false
+      },
+      "host": {
+        "cpus": 18,
+        "hostname": "Artemis"
+      },
+      "run": {
+        "crdt": "loro",
+        "node_source": "external",
+        "replicas": [
+          {
+            "client_addr": "localhost:50051",
+            "peer_addr": "replica-0:50051"
+          },
+          {
+            "client_addr": "localhost:50052",
+            "peer_addr": "replica-1:50051"
+          }
+        ],
+        "trials": 3
+      },
+      "scenarios": [
+        {
+          "achieved_contention": {
+            "contested_anchors": {
+              "max": 1,
+              "mean": 1.0,
+              "min": 1
+            },
+            "contested_ops": {
+              "max": 200000,
+              "mean": 200000.0,
+              "min": 200000
+            },
+            "head_children_repetition_1": [
+              100000,
+              100000
+            ],
+            "max_concurrent_siblings": {
+              "max": 200000,
+              "mean": 200000.0,
+              "min": 200000
+            },
+            "model": "rga_anchor_simulation"
+          },
+          "instance_ids": {
+            "per_repetition": [
+              {
+                "repetition": 1,
+                "seed": "0x847264094d1b44da"
+              },
+              {
+                "repetition": 2,
+                "seed": "0xbc8b7796a697dde0"
+              },
+              {
+                "repetition": 3,
+                "seed": "0x60a88f98938906a7"
+              }
+            ],
+            "rule": "seeded_instance_ids(id_seed_for(repetition), node_count); the same ids for repetition r in every cell and library"
+          },
+          "kind": "partition_heal",
+          "name": "divergence-n2-same_region-1e5",
+          "node_count": 2,
+          "op_count": 200000,
+          "params": {
+            "baseline": {
+              "length": 104852,
+              "sha256": "42c0ff1720c0cad77077e190e36135c9cab9f7bbc266351c0a7fe4981c6a1546",
+              "trace": "editing-traces/automerge-paper.json.gz"
+            },
+            "groups": [
+              [
+                0
+              ],
+              [
+                1
+              ]
+            ],
+            "heal_topology": "full_mesh",
+            "locality": "same_region",
+            "ops_per_group": 100000,
+            "workload": "text_splice",
+            "write_pattern": "concentrated"
+          },
+          "path": "scenarios/divergence-n2-same_region-1e5.toml",
+          "seeds": {
+            "base": "0x5eedd1f50ff5e7a1",
+            "per_repetition": [
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0x8a7050a09a9173aa"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x3a4294bcd1b58001"
+                  }
+                ],
+                "repetition": 1
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xed23821d58fd8881"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0xe494b3c039c76b09"
+                  }
+                ],
+                "repetition": 2
+              },
+              {
+                "by_node": [
+                  {
+                    "node": 0,
+                    "seed": "0xca378737530eb29e"
+                  },
+                  {
+                    "node": 1,
+                    "seed": "0x897449615989e96d"
+                  }
+                ],
+                "repetition": 3
+              }
+            ]
+          }
+        }
+      ],
+      "schema_version": 3,
+      "deferred": {
+        "window": {
+          "start": 1794113772,
+          "end": 1794116349
+        },
+        "tx_total": 15,
+        "deferred_total": 0,
+        "deferred_series": []
+      }
+    }
+  ]
+}

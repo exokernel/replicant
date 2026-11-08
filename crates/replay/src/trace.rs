@@ -162,7 +162,7 @@ pub fn read_verified(path: &Path, sha256: Option<&str>) -> Result<Vec<u8>> {
         let actual = hex(&Sha256::digest(&bytes));
         ensure!(
             actual == expected,
-            "{}: SHA-256 is {actual}, the spec expects {expected}. Run `just gen-traces`.",
+            "{}: SHA-256 is {actual}, the spec expects {expected}. Run `just gen-traces <crdt-benchmarks clone>`.",
             path.display()
         );
     }
