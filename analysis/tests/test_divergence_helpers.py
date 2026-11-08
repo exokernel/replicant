@@ -2,6 +2,7 @@
 
 import json
 
+import pandas as pd
 import pytest
 
 import divergence_helpers as dh
@@ -81,3 +82,12 @@ def test_latest_picks_the_newest_folder_of_a_prefix(tmp_path, monkeypatch):
     assert dh.latest("grid-").name == "grid-2026-11-07"
     with pytest.raises(FileNotFoundError):
         dh.latest("absent-")
+
+
+def test_a_slow_trial_is_ten_times_the_fastest():
+    # Loro random_position-empty-1e4: the largest gap between neighbors is only
+    # 6.6 times, but 803 ms is more than ten times 30.9 ms.
+    groups = dict(dh.split_groups(pd.Series([30.9, 121.4, 803.0, 1599.1])))
+    assert list(groups["fast"]) == [30.9, 121.4]
+    assert list(groups["slow"]) == [803.0, 1599.1]
+    assert [name for name, _ in dh.split_groups(pd.Series([10.0, 11.0, 99.0]))] == ["all"]
