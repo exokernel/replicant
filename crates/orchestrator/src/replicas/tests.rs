@@ -365,8 +365,13 @@ async fn empty_replicas_never_count_as_converged() {
     .await
     .unwrap_err();
     assert!(err.to_string().contains("did not converge"), "{err}");
+    // The deadline check follows each round, so a slow runner can log only one
+    // round before the timeout. So the test asks for at least one.
     let events = events(&log);
-    assert!(events.len() > 1, "the poll gave up after one round");
+    assert!(
+        !events.is_empty(),
+        "the poll gave up before its first round"
+    );
     assert!(events.iter().all(|e| e["event"] == "poll"));
     assert_eq!(events[0]["classes"], serde_json::json!([null, null]));
 }

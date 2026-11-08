@@ -129,9 +129,11 @@ async fn two_processes_sync_and_exit_cleanly_on_sigterm() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
+    // `a` opened the Sync stream, so stop `b` first: it must shut down while an
+    // inbound stream is open. Then `a` stops after its peer went away.
     drop((a_client, b_client));
-    assert!(terminate(&mut a).await.success());
     assert!(terminate(&mut b).await.success());
+    assert!(terminate(&mut a).await.success());
 }
 
 #[test]
