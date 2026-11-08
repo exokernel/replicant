@@ -191,11 +191,11 @@ impl ReplicaState {
     /// Blocks or unblocks sync traffic with `peers`. See
     /// [`Self::blocked_peers`].
     ///
-    /// An unblock also resets the sync protocol state for each peer. The
-    /// reason: the peer can drop a message that this replica generated just
-    /// before the block. This replica's state then records data as sent that
-    /// never arrived, and sync stalls. A fresh handshake removes that risk,
-    /// whatever was in flight when the partition started.
+    /// An unblock keeps the sync protocol state for each peer, so the heal
+    /// sends only what changed. So block a link only when its sync is idle. A
+    /// message that the peer drops because of the block would leave this
+    /// replica's state recording data as sent that never arrived, and sync
+    /// would stall. The orchestrator waits for idle sync with `SyncPending`.
     ///
     /// This method sends no sync traffic. The orchestrator calls `KickSync`
     /// after both ends of every healed link are unblocked. A kick from here
@@ -209,14 +209,6 @@ impl ReplicaState {
                 } else {
                     set.remove(peer);
                 }
-            }
-            // Release this lock before taking the adapter lock. No code holds
-            // both, so there is no lock order to keep.
-        }
-        if !blocked {
-            let mut adapter = self.adapter();
-            for peer in peers {
-                adapter.sync_reset(peer);
             }
         }
         tracing::info!(
@@ -316,8 +308,24 @@ impl ReplicaState {
     // ── Peer registry ──────────────────────────────────────────────────────
 
     /// Adds the outbound channel of `peer_id`.
+    ///
+    /// A new stream starts sync with `peer_id` from nothing. Any state from an
+    /// older stream can record messages that it did not deliver.
     pub(super) fn register_peer(&self, peer_id: NodeId, tx: mpsc::Sender<Vec<u8>>) {
+        self.adapter().sync_reset(&peer_id);
         self.peer_txs().insert(peer_id, tx);
+    }
+
+    /// Returns the connected peers to which the adapter has a sync message to
+    /// send now. Blocked peers are left out, because nothing is sent to them.
+    pub(super) fn sync_pending_peers(&self) -> Vec<NodeId> {
+        let peers: Vec<NodeId> = self.peer_txs().keys().cloned().collect();
+        let blocked = self.blocked().clone();
+        let mut adapter = self.adapter();
+        peers
+            .into_iter()
+            .filter(|p| !blocked.contains(p.as_str()) && adapter.sync_pending(p))
+            .collect()
     }
 
     /// Removes the outbound channel of `peer_id`.

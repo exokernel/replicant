@@ -1,0 +1,4 @@
+{
+  "provenance_unavailable": "This run did not converge within 600 s and wrote no provenance. The bench script then kept the provenance file of an earlier run in the same folder, yrs-1e5-reconnect-docker.meta.json, so this file was a copy of that run's provenance. A later change makes the scripts remove the old file when a run starts. The provenance of this run is lost. The README gives its code commit.",
+  "invocations": []
+}

@@ -1,0 +1,14 @@
+# A standalone check that Loro's merge time depends on the peer ids. It uses no
+# Replicant code. See README.md.
+[package]
+name = "loro-peer-probe"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+# Not a member of the Replicant workspace.
+[workspace]
+
+[dependencies]
+loro = "=1.17.1"

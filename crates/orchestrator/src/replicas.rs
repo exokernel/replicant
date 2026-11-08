@@ -17,7 +17,9 @@ use tonic::transport::Channel;
 
 use common::proto::replica_client::ReplicaClient;
 
-pub use convergence::{fingerprint, record_stats, verify_text_length, wait_for_nodes};
+pub use convergence::{
+    fingerprint, record_stats, verify_text_length, wait_for_nodes, wait_for_sync_idle,
+};
 pub use nodes::{NodeSource, ReplicaEndpoint, acquire_nodes, check_tasks};
 #[cfg(test)]
 pub use nodes::{node_index, node_name, spawn_nodes};

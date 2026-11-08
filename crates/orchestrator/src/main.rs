@@ -25,6 +25,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 
+mod baseline;
 mod contention;
 mod event_log;
 mod metrics;
@@ -37,6 +38,7 @@ mod scenario;
 mod topology;
 mod workload;
 
+use baseline::BaselineStore;
 use event_log::EventLog;
 use output::OutputFormat;
 use replica::adapter::Crdt;
@@ -131,6 +133,10 @@ struct Args {
     #[arg(long, value_parser = crdt_parser())]
     crdt: Option<Crdt>,
 
+    /// The directory that holds the trace files of scenario baselines.
+    #[arg(long, default_value = "traces")]
+    data_dir: PathBuf,
+
     /// TOML scenario files to run. Omit these to run the built-in scenarios.
     scenarios: Vec<PathBuf>,
 }
@@ -218,6 +224,16 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Read every baseline now, so a missing file fails before the first trial.
+    let mut baselines = BaselineStore::new(&args.data_dir);
+    for scenario in &scenarios {
+        if let ScenarioBody::PartitionHeal(c) = &scenario.body
+            && let Some(baseline) = &c.baseline
+        {
+            baselines.check(baseline)?;
+        }
+    }
+
     let mut trace_file = match &args.trace {
         Some(path) => Some(std::io::BufWriter::new(
             std::fs::File::create(path)
@@ -247,7 +263,7 @@ async fn main() -> Result<()> {
                 NodeSource::External(args.replicas.clone())
             };
             let mut log = EventLog::new(trace_file.is_some());
-            let result = run_scenario_once(scenario, source, t, &mut log).await?;
+            let result = run_scenario_once(scenario, source, t, &mut baselines, &mut log).await?;
             if let Some(out) = &mut trace_file {
                 log.write_to(out, &scenario.name, t)?;
             }
@@ -334,13 +350,14 @@ async fn run_scenario_once(
     scenario: &ScenarioFile,
     source: NodeSource,
     repetition: usize,
+    baselines: &mut BaselineStore,
     log: &mut EventLog,
 ) -> Result<RunResult> {
     tracing::info!(scenario = %scenario.name, "starting");
     let result = match &scenario.body {
         ScenarioBody::Topology(config) => runner::run(config, source, log).await?,
         ScenarioBody::PartitionHeal(config) => {
-            partition_heal::run_partition_heal(config, source, repetition, log).await?
+            partition_heal::run_partition_heal(config, source, repetition, baselines, log).await?
         }
     };
     tracing::info!(

@@ -10,14 +10,17 @@
 //!
 //! # Phases
 //!
-//! 1. **Setup.** Reset every replica. For text workloads, create the shared
-//!    text object on every replica. Wire the *complete* post-heal graph, then
-//!    block every cross-group link. A blocked link stays open but carries no
-//!    data.
+//! 1. **Setup.** Reset every replica. If the cell has a baseline, load it on every
+//!    replica. For text workloads, create the shared text object on every
+//!    replica. Wire the *complete* post-heal graph with every link open, wait
+//!    until the sync on every link is idle, then block every cross-group link. A
+//!    blocked link stays open but carries no data, and it keeps its sync state.
 //! 2. **Divergence.** Each group applies `ops_per_group` operations. The blocks
 //!    keep the groups invisible to each other.
-//! 3. **Heal.** Clear the blocks and start the sync handshake. The clock runs
-//!    from the first unblock until every replica reports the same fingerprint.
+//! 3. **Heal.** Clear the blocks and kick the sync. Each side still has the sync
+//!    state from before the partition, so it sends only what changed. The clock
+//!    runs from the first unblock until every replica reports the same
+//!    fingerprint.
 //!
 //! # Why the graph is wired before the clock starts
 //!
@@ -36,16 +39,28 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use tokio::task::JoinSet;
 
+use crate::baseline::BaselineStore;
 use crate::event_log::{Event, EventLog};
 use crate::replicas::{
     Client, NodeSource, TEXT_OBJ, acquire_nodes, apply_write, check_tasks, connect_edges,
     ensure_text_all, fingerprint, kick_sync_edges, record_stats, reset_all, set_links_blocked,
-    text_splice, verify_text_length, wait_for_nodes,
+    text_splice, verify_text_length, wait_for_nodes, wait_for_sync_idle,
 };
 use crate::runner::RunResult;
 use crate::scenario::{Group, HealTopology, PartitionConfig, WriteKind};
 use crate::topology::{self, Connections, intra_group_edges};
 use crate::workload::{PositionStream, target_node};
+
+/// The longest time that a trial waits for the sync before the partition.
+const SYNC_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The longest heal that a trial waits for before it fails.
+///
+/// This only detects a heal that never ends. It does not change a measurement.
+/// Some cells take many seconds: on `same_region` at 10^4 operations per side,
+/// some Loro peer ids make a heal take more than 10 s on the docker lane, and a
+/// cell at 10^5 takes longer.
+const HEAL_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Runs one partition-heal scenario and returns its measurements.
 ///
@@ -55,6 +70,7 @@ pub async fn run_partition_heal(
     config: &PartitionConfig,
     source: NodeSource,
     repetition: usize,
+    baselines: &mut BaselineStore,
     log: &mut EventLog,
 ) -> Result<RunResult> {
     config.validate()?;
@@ -67,8 +83,13 @@ pub async fn run_partition_heal(
     // when the same external stack is reused across many scenarios/trials.
     reset_all(&clients).await?;
 
-    // Create the shared text object on every replica while the document is
-    // still empty and no links exist.
+    if let Some(baseline) = &config.baseline {
+        baselines.install(baseline, &mut clients).await?;
+    }
+
+    // Create the shared text object on every replica while no links exist, and,
+    // for a cell with no baseline, while the document is still empty. A replica
+    // that loaded a baseline has the object already, so this does not change it.
     //
     // This is what makes the heal interleave two sequences. The adapter creates
     // an object on first use. Without this step, replicas that diverge from an
@@ -80,16 +101,19 @@ pub async fn run_partition_heal(
 
     let plan = plan_edges(config);
 
-    // Block every cross-group link BEFORE wiring it, so the streams open
-    // silently. `connect_to_peer`'s opening handshake is itself skipped on a
-    // blocked link. Blocking is by peer ID and does not require the stream to
-    // exist yet, which is what makes this order safe.
-    set_links_blocked(&clients, &plan.heal, true).await?;
-
-    // Wire the full post-heal topology. All of this is outside every timed
-    // window; the heal below only flips flags.
+    // Wire the full post-heal topology, with every link open, and let each link
+    // sync. The documents are equal here, so this exchanges only versions. The
+    // replicas then know each other, as peers do that were in contact before they
+    // went offline, and the heal sends only what changed. All of this is outside
+    // every timed window; the heal below only flips flags.
     let all_edges = plan.all_edges();
     connect_edges(&clients, &endpoints, &all_edges).await?;
+    wait_for_sync_idle(&mut clients, &all_edges, SYNC_IDLE_TIMEOUT).await?;
+
+    // Block the cross-group links only now that their sync is idle. A message in
+    // flight would be dropped by the block, and its sender's sync state would
+    // then be wrong. The links stay open, and their sync state stays.
+    set_links_blocked(&clients, &plan.heal, true).await?;
     check_tasks(&mut tasks)?;
     log.record(Event::Wired {
         edges: all_edges.clone(),
@@ -144,6 +168,18 @@ pub async fn run_partition_heal(
     }
     check_tasks(&mut tasks)?;
 
+    // Equal fingerprints in a group do not mean that its replicas have stopped
+    // sending. A replica can still relay a received change to its other peers.
+    // If such a relay reached a cross-group link after one end was unblocked and
+    // before the other end was, the blocked end would drop it, and the sender
+    // would count it as sent. Then the kick can send nothing, and the heal can
+    // stall. So wait, outside the measured window, until sync inside the groups
+    // is idle. The idle check ignores the blocked peers.
+    if !plan.intra.is_empty() {
+        wait_for_sync_idle(&mut clients, &plan.intra, SYNC_IDLE_TIMEOUT).await?;
+    }
+    check_tasks(&mut tasks)?;
+
     // Validity gate: the partition must actually have held. If any cross-group
     // state leaked during the divergence phase, the groups already agree and
     // the heal measures nothing. Checking here is cheaper and more direct than
@@ -167,24 +203,20 @@ pub async fn run_partition_heal(
     log.record(Event::Kicked);
 
     let all_nodes: Vec<usize> = (0..n).collect();
-    let convergence_ms = wait_for_nodes(
-        &mut clients,
-        &all_nodes,
-        heal_start,
-        Duration::from_secs(10),
-        log,
-    )
-    .await?;
+    let convergence_ms =
+        wait_for_nodes(&mut clients, &all_nodes, heal_start, HEAL_TIMEOUT, log).await?;
     check_tasks(&mut tasks)?;
     record_stats(&mut clients, log).await?;
 
     // Validity gate, outside the measured window: the healed text must contain
     // both sides' inserts. Operations are insert-only and one character each,
-    // so the final length must equal the total operation count. This is the
+    // so the final length must equal the starting length plus the total operation
+    // count. This is the
     // check that separates a real sequence interleave from a heal that
-    // converged by discarding one replica's work.
+    // converged by discarding one replica's work. A baseline adds its length.
     if config.workload == WriteKind::TextSplice {
-        verify_text_length(&mut clients, &all_nodes, config.total_ops()).await?;
+        let expected = config.baseline_len() + config.total_ops();
+        verify_text_length(&mut clients, &all_nodes, expected).await?;
     }
 
     // Report structural fields for the actual post-heal graph (intra-group
@@ -304,10 +336,12 @@ async fn verify_groups_diverged(clients: &mut [Client], groups: &[Group]) -> Res
 mod tests {
     use super::*;
 
+    use std::path::{Path, PathBuf};
+
     use replica::adapter::Crdt;
 
     use crate::replicas::{map_put, spawn_nodes};
-    use crate::scenario::WritePattern;
+    use crate::scenario::{Baseline, WritePattern};
     use crate::workload::Locality;
 
     // ── heal_edges ─────────────────────────────────────────────────────────
@@ -428,6 +462,32 @@ mod tests {
         assert!(err.to_string().contains("partition leaked"), "{err}");
     }
 
+    /// A sync message larger than gRPC's default 4 MiB limit still arrives. An
+    /// Automerge heal of 10^5 ops per side on the B4 paper sends about 13 MB.
+    #[tokio::test]
+    async fn a_sync_message_above_4_mib_arrives() {
+        let mut tasks = JoinSet::new();
+        let (endpoints, mut clients) = spawn_nodes(2, Crdt::Automerge, &mut tasks).await.unwrap();
+        connect_edges(&clients, &endpoints, &[(0, 1)])
+            .await
+            .unwrap();
+        // Text that does not compress, so the sync message stays above 4 MiB.
+        let mut rng = common::SplitMix64::new(7);
+        let big: String = (0..8 << 20)
+            .map(|_| char::from(b'!' + (rng.next_u64() % 94) as u8))
+            .collect();
+        map_put(&mut clients[0], "big", &big).await.unwrap();
+        wait_for_nodes(
+            &mut clients,
+            &[0, 1],
+            Instant::now(),
+            Duration::from_secs(30),
+            &mut EventLog::off(),
+        )
+        .await
+        .unwrap();
+    }
+
     /// The leak gate passes when the groups really do differ.
     #[tokio::test]
     async fn diverged_gate_accepts_genuinely_divergent_groups() {
@@ -462,6 +522,7 @@ mod tests {
             &halves(2, 4),
             NodeSource::InProcess(Crdt::Automerge),
             1,
+            &mut BaselineStore::default(),
             &mut EventLog::off(),
         )
         .await
@@ -470,6 +531,7 @@ mod tests {
             &halves(6, 4),
             NodeSource::InProcess(Crdt::Automerge),
             1,
+            &mut BaselineStore::default(),
             &mut EventLog::off(),
         )
         .await
@@ -496,6 +558,7 @@ mod tests {
             &halves(4, 4),
             NodeSource::InProcess(Crdt::Automerge),
             1,
+            &mut BaselineStore::default(),
             &mut EventLog::off(),
         )
         .await
@@ -536,11 +599,111 @@ mod tests {
                 &config,
                 NodeSource::InProcess(Crdt::Automerge),
                 1,
+                &mut BaselineStore::default(),
                 &mut EventLog::off(),
             )
             .await
             .unwrap_or_else(|e| panic!("locality={locality:?}: {e:#}"));
             assert_eq!(result.total_ops, 50, "locality={locality:?}");
         }
+    }
+
+    // ── Baseline ───────────────────────────────────────────────────────────
+
+    /// A cell whose start is the committed smoke fixture, whose text is `hippo`.
+    fn baseline_cell(sha256: &str, length: usize) -> PartitionConfig {
+        PartitionConfig {
+            ops_per_group: 25,
+            write_pattern: WritePattern::Concentrated,
+            workload: WriteKind::TextSplice,
+            locality: Locality::RandomPosition,
+            baseline: Some(Baseline {
+                trace: "smoke-text.trace.json".into(),
+                sha256: sha256.to_owned(),
+                length,
+            }),
+            ..PartitionConfig::for_test(2, &[&[0], &[1]])
+        }
+    }
+
+    /// The directory that holds the smoke fixture.
+    fn fixtures() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../workloads/fixtures")
+    }
+
+    /// Runs one trial of `config` on `crdt`, with a new store.
+    async fn run_on(config: &PartitionConfig, crdt: Crdt, trial: usize) -> Result<RunResult> {
+        let mut store = BaselineStore::new(&fixtures());
+        run_partition_heal(
+            config,
+            NodeSource::InProcess(crdt),
+            trial,
+            &mut store,
+            &mut EventLog::off(),
+        )
+        .await
+    }
+
+    /// The hash of the smoke fixture, as `workloads/smoke.toml` pins it.
+    const FIXTURE_SHA256: &str = "d49ad91a6c882150cf0d7b020beaf3228b72bb72547da7e299fa355bd028a81e";
+
+    /// Each library merges inserts that attach to shared elements, and keeps the
+    /// baseline and both sides. The final gate in `run_partition_heal` fails if a
+    /// replica loses text. It also fails if two replicas share an author id,
+    /// because their ops then collide.
+    #[tokio::test]
+    async fn a_baseline_cell_keeps_the_start_and_both_sides_on_each_library() {
+        for crdt in Crdt::ALL {
+            let config = baseline_cell(FIXTURE_SHA256, 5);
+            for trial in 1..=3 {
+                let result = run_on(&config, crdt, trial)
+                    .await
+                    .unwrap_or_else(|e| panic!("{crdt} trial {trial}: {e:#}"));
+                assert_eq!(result.total_ops, 50, "{crdt}");
+            }
+        }
+    }
+
+    /// Later trials use the encoded bytes, and do not replay the trace again.
+    #[tokio::test]
+    async fn one_store_serves_many_trials_on_each_library() {
+        for crdt in Crdt::ALL {
+            let config = baseline_cell(FIXTURE_SHA256, 5);
+            let mut store = BaselineStore::new(&fixtures());
+            for trial in 1..=3 {
+                run_partition_heal(
+                    &config,
+                    NodeSource::InProcess(crdt),
+                    trial,
+                    &mut store,
+                    &mut EventLog::off(),
+                )
+                .await
+                .unwrap_or_else(|e| panic!("{crdt} trial {trial}: {e:#}"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_wrong_baseline_length_fails_before_the_partition() {
+        let err = run_on(&baseline_cell(FIXTURE_SHA256, 6), Crdt::Yrs, 1)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("expected 6 chars"), "{err:#}");
+    }
+
+    #[test]
+    fn a_wrong_baseline_hash_fails_the_check() {
+        let mut store = BaselineStore::new(&fixtures());
+        let config = baseline_cell(&"0".repeat(64), 5);
+        assert!(store.check(config.baseline.as_ref().unwrap()).is_err());
+    }
+
+    #[test]
+    fn a_missing_baseline_file_names_the_recipe() {
+        let mut store = BaselineStore::new(Path::new("no-such-directory"));
+        let config = baseline_cell(FIXTURE_SHA256, 5);
+        let err = store.check(config.baseline.as_ref().unwrap()).unwrap_err();
+        assert!(format!("{err:#}").contains("just gen-traces"), "{err:#}");
     }
 }

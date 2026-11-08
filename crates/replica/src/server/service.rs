@@ -32,7 +32,13 @@ pub fn router(state: Arc<ReplicaState>) -> Router {
                 .max_decoding_message_size(MAX_RPC_BYTES)
                 .max_encoding_message_size(MAX_RPC_BYTES),
         )
-        .add_service(SyncServer::new(service))
+        // A sync message can be large: an Automerge heal of 10^5 ops per side
+        // on the B4 paper sends about 13 MB. The default limit is 4 MiB.
+        .add_service(
+            SyncServer::new(service)
+                .max_decoding_message_size(MAX_RPC_BYTES)
+                .max_encoding_message_size(MAX_RPC_BYTES),
+        )
 }
 
 /// Implements both gRPC services for one replica. This module implements
@@ -164,6 +170,19 @@ impl Replica for ReplicaService {
         let peer_ids = to_node_ids(peer_ids)?;
         self.state.set_peer_links(&peer_ids, blocked);
         Ok(Response::new(proto::Empty {}))
+    }
+
+    async fn sync_pending(
+        &self,
+        _: Request<proto::Empty>,
+    ) -> Result<Response<proto::PeerIds>, Status> {
+        let peer_ids = self
+            .state
+            .sync_pending_peers()
+            .into_iter()
+            .map(|p| p.to_string())
+            .collect();
+        Ok(Response::new(proto::PeerIds { peer_ids }))
     }
 
     async fn kick_sync(

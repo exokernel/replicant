@@ -10,6 +10,7 @@
 //! no replica.
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -186,6 +187,25 @@ pub struct PartitionConfig {
     /// Which links to reopen at heal time. Defaults to `FullMesh`.
     #[serde(default)]
     pub heal_topology: HealTopology,
+    /// The document that every replica holds before the partition. Omit this to
+    /// start from an empty document.
+    #[serde(default)]
+    pub baseline: Option<Baseline>,
+}
+
+/// A starting document for a partition-heal cell. A recorded trace makes it. See
+/// [`crate::baseline`].
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Baseline {
+    /// The trace file, relative to `--data-dir`.
+    pub trace: PathBuf,
+    /// The expected SHA-256 hash of the trace file.
+    pub sha256: String,
+    /// The number of visible characters that the trace makes. This is in the
+    /// scenario so that the positions and the contention of a cell come from the
+    /// config, with no trace file.
+    pub length: usize,
 }
 
 impl ScenarioFile {
@@ -269,6 +289,14 @@ impl PartitionConfig {
                 }
             }
         }
+        if let Some(baseline) = &self.baseline {
+            if self.workload != WriteKind::TextSplice {
+                bail!("PartitionConfig: a baseline requires workload=\"text_splice\"");
+            }
+            if baseline.length == 0 {
+                bail!("PartitionConfig: a baseline must have a length above zero");
+            }
+        }
         if self.heal_topology == HealTopology::Bridge && self.groups.len() != 2 {
             bail!(
                 "PartitionConfig: heal_topology=\"bridge\" requires exactly 2 groups, got {}",
@@ -281,6 +309,12 @@ impl PartitionConfig {
     /// Total operations across all groups in one trial.
     pub fn total_ops(&self) -> usize {
         self.groups.len() * self.ops_per_group
+    }
+
+    /// Returns the number of characters that each replica holds when the
+    /// partition opens.
+    pub fn baseline_len(&self) -> usize {
+        self.baseline.as_ref().map_or(0, |b| b.length)
     }
 }
 
@@ -302,6 +336,7 @@ impl PartitionConfig {
             workload: WriteKind::MapPut,
             locality: Locality::Append,
             heal_topology: HealTopology::FullMesh,
+            baseline: None,
         }
     }
 }
@@ -465,6 +500,69 @@ mod tests {
     fn validate_ok_when_full_mesh_with_three_groups() {
         let cfg = PartitionConfig::for_test(6, &[&[0, 1], &[2, 3], &[4, 5]]);
         assert!(cfg.validate().is_ok());
+    }
+
+    /// Each main-grid cell starts from the B4 paper, and each `-empty-` control cell
+    /// starts empty. The hash must match the one that the B4 workload pins, so both
+    /// use one file.
+    #[test]
+    fn main_grid_cells_start_from_the_b4_paper() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let spec: toml::Value = toml::from_str(
+            &std::fs::read_to_string(root.join("workloads/crdt-benchmarks.toml")).unwrap(),
+        )
+        .unwrap();
+        let b4 = spec["workload"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|w| w["name"].as_str() == Some("b4"))
+            .unwrap();
+
+        let (mut main, mut control) = (0, 0);
+        for entry in std::fs::read_dir(root.join("scenarios")).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_str().unwrap().to_owned();
+            if !name.starts_with("divergence-n2-") {
+                continue;
+            }
+            let file: ScenarioFile =
+                toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            file.validate().unwrap();
+            let ScenarioBody::PartitionHeal(cell) = file.body else {
+                panic!("{name} is not a partition-heal cell");
+            };
+            if name.contains("-empty-") {
+                control += 1;
+                assert!(cell.baseline.is_none(), "{name} has a baseline");
+            } else {
+                main += 1;
+                let baseline = cell
+                    .baseline
+                    .unwrap_or_else(|| panic!("{name}: no baseline"));
+                assert_eq!(
+                    baseline.trace.to_str(),
+                    b4["trace"].as_str(),
+                    "{name}: trace"
+                );
+                assert_eq!(baseline.sha256, b4["sha256"].as_str().unwrap(), "{name}");
+                assert_eq!(baseline.length, 104_852, "{name}: length");
+            }
+        }
+        assert_eq!((main, control), (12, 6));
+    }
+
+    #[test]
+    fn a_baseline_requires_a_text_workload() {
+        let cfg = PartitionConfig {
+            baseline: Some(Baseline {
+                trace: "t".into(),
+                sha256: String::new(),
+                length: 1,
+            }),
+            ..PartitionConfig::for_test(2, &[&[0], &[1]])
+        };
+        assert!(cfg.validate().is_err());
     }
 
     #[test]

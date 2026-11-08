@@ -63,6 +63,33 @@ pub(crate) fn sync_until_quiescent<A: CrdtAdapter>(a: &mut A, a_id: &str, b: &mu
     panic!("sync did not reach quiescence within 64 rounds");
 }
 
+/// Does what [`sync_until_quiescent`] does, and returns the bytes of all messages.
+pub(crate) fn sync_bytes_until_quiescent<A: CrdtAdapter>(
+    a: &mut A,
+    a_id: &str,
+    b: &mut A,
+    b_id: &str,
+) -> usize {
+    let mut bytes = 0;
+    for _ in 0..64 {
+        let mut moved = false;
+        if let Some(msg) = a.sync_generate(b_id) {
+            bytes += msg.len();
+            b.sync_receive(a_id, msg).unwrap();
+            moved = true;
+        }
+        if let Some(msg) = b.sync_generate(a_id) {
+            bytes += msg.len();
+            a.sync_receive(b_id, msg).unwrap();
+            moved = true;
+        }
+        if !moved {
+            return bytes;
+        }
+    }
+    panic!("sync did not reach quiescence within 64 rounds");
+}
+
 /// Sends at most one message in each direction between two adapters.
 ///
 /// Returns `true` if any message was sent. Callers use this to decide when to
@@ -411,6 +438,80 @@ pub(crate) fn reads_are_stable_without_writes<A: CrdtAdapter + Default>() {
     let h3 = a.get_heads();
     assert_eq!(h1, h2);
     assert_eq!(h2, h3);
+}
+
+/// `sync_pending` is true exactly when `sync_generate` returns a message, and it
+/// changes no state. The orchestrator relies on it to see that sync is idle
+/// before it blocks a link.
+pub(crate) fn sync_pending_matches_generate<A: CrdtAdapter + Default>() {
+    let (mut a, mut b) = (A::default(), A::default());
+    a.apply_op(&map_put("doc", "k", 1u64)).unwrap();
+    b.apply_op(&map_put("doc", "j", 2u64)).unwrap();
+    for _ in 0..64 {
+        let a_pending = a.sync_pending("b");
+        assert_eq!(a.sync_pending("b"), a_pending, "sync_pending changed state");
+        let a_msg = a.sync_generate("b");
+        assert_eq!(a_msg.is_some(), a_pending);
+        let b_pending = b.sync_pending("a");
+        let b_msg = b.sync_generate("a");
+        assert_eq!(b_msg.is_some(), b_pending);
+        let moved = a_msg.is_some() || b_msg.is_some();
+        if let Some(msg) = a_msg {
+            b.sync_receive("a", msg).unwrap();
+        }
+        if let Some(msg) = b_msg {
+            a.sync_receive("b", msg).unwrap();
+        }
+        if !moved {
+            break;
+        }
+    }
+    assert!(!a.sync_pending("b") && !b.sync_pending("a"));
+    assert_eq!(a.state_fingerprint(), b.state_fingerprint());
+}
+
+/// Two replicas that synced, then each wrote with no contact, send little when they
+/// meet again. The sync state from before the partition stays, so the heal sends
+/// only what changed. The orchestrator's heal depends on this.
+pub(crate) fn a_heal_after_a_quiet_partition_sends_little<A: CrdtAdapter + Default>() {
+    let (mut a, mut b) = (A::default(), A::default());
+    for i in 0..2000u64 {
+        a.apply_op(&map_put("doc", &format!("k{i}"), i)).unwrap();
+    }
+    sync_until_quiescent(&mut a, "a", &mut b, "b");
+    let size = a.encode().len();
+
+    a.apply_op(&map_put("doc", "x", 1u64)).unwrap();
+    b.apply_op(&map_put("doc", "y", 2u64)).unwrap();
+    let bytes = sync_bytes_until_quiescent(&mut a, "a", &mut b, "b");
+    assert!(
+        bytes * 10 < size,
+        "heal sent {bytes} bytes, document is {size}"
+    );
+    assert_eq!(a.state_fingerprint(), b.state_fingerprint());
+}
+
+/// Two replicas that load the same document, and have never synced, do not send it
+/// to each other. Each sends its version, and the other answers with what that
+/// version lacks, as in the Yjs sync protocol. Automerge's protocol sends a summary
+/// of all changes on first contact, so this test is for Yrs and Loro.
+pub(crate) fn first_sync_of_a_shared_document_sends_little<A: CrdtAdapter + Default>() {
+    let mut a = A::default();
+    for i in 0..2000u64 {
+        a.apply_op(&map_put("doc", &format!("k{i}"), i)).unwrap();
+    }
+    let state = a.encode();
+    let mut b = A::default();
+    b.load(&state).unwrap();
+    b.apply_op(&map_put("doc", "y", 2u64)).unwrap();
+
+    let bytes = sync_bytes_until_quiescent(&mut a, "a", &mut b, "b");
+    assert!(
+        bytes * 10 < state.len(),
+        "first sync sent {bytes} bytes, document is {}",
+        state.len()
+    );
+    assert_eq!(a.state_fingerprint(), b.state_fingerprint());
 }
 
 /// After two replicas converge, `sync_generate` returns `None` on both sides.
@@ -913,6 +1014,33 @@ pub(crate) fn sync_reset_recovers_from_a_lost_message<A: CrdtAdapter + Default>(
     assert!(!b.get_heads().is_empty(), "b must have received the change");
 }
 
+/// After the replicas have synced once, a lost data update is recovered by a
+/// reset of both peers. The reset must not keep the sender's record of what it
+/// sent, or the second write would never arrive.
+pub(crate) fn sync_reset_recovers_from_a_lost_data_update<A: CrdtAdapter + Default>() {
+    let mut a = A::default();
+    let mut b = A::default();
+    a.apply_op(&map_put("doc", "k", "v")).unwrap();
+    sync_until_quiescent(&mut a, "a", &mut b, "b");
+    assert_eq!(a.state_fingerprint(), b.state_fingerprint());
+
+    // A second write. Its data message is made but never delivered.
+    a.apply_op(&map_put("doc", "k2", "v2")).unwrap();
+    let lost = a.sync_generate("b");
+    assert!(lost.is_some(), "there was a change to send");
+    drop(lost);
+
+    a.sync_reset("b");
+    b.sync_reset("a");
+    sync_until_quiescent(&mut a, "a", &mut b, "b");
+
+    assert_eq!(a.state_fingerprint(), b.state_fingerprint());
+    assert!(
+        b.read_map("doc").unwrap().contains_key("k2"),
+        "b must have received the second write"
+    );
+}
+
 /// `sync_reset` for a peer with no state does nothing and does not panic.
 ///
 /// Unblocking calls it for peers that never sent a message.
@@ -965,10 +1093,11 @@ pub(crate) fn text_length_errors_on_missing_or_wrong_type<A: CrdtAdapter + Defau
 ///
 /// - Yrs sorts blocks by client id before it writes, so its encoding is
 ///   canonical. See `yrs_save_bytes_are_canonical_across_converged_replicas`.
-/// - Loro's snapshot is canonical except for the encoded width of the random
-///   `PeerID`. Sizes differ in 12-16% of trials, so this test would pass or
+/// - Loro's snapshot differs by a few bytes, from the encoded width of the
+///   random `PeerID` and from the order in which the changes arrived. With
+///   random ids, sizes differ in 12-16% of trials, so this test would pass or
 ///   fail at random. See
-///   `loro_snapshot_is_canonical_across_converged_replicas_with_pinned_peer_ids`.
+///   `loro_snapshot_sizes_of_converged_replicas_differ_by_under_one_percent`.
 ///
 /// So a spread of doc sizes across replicas has a different cause for each
 /// library.

@@ -32,7 +32,11 @@ use crate::workload::{DIVERGENCE_SEED_BASE, seed_for};
 /// unknown fields handles both versions. The bump lets a reader that *needs* the
 /// library name tell a missing field apart from an unknown one: below version 2
 /// its absence means Automerge.
-const SCHEMA_VERSION: u32 = 2;
+///
+/// Version 3 added `params.baseline` and `contested_ops`, and changed
+/// `contested_anchors` from a number to `{min, max, mean}`. With a baseline, this
+/// count differs between repetitions.
+const SCHEMA_VERSION: u32 = 3;
 
 /// The parts of a run that the result CSV does not record.
 pub struct RunMeta<'a> {
@@ -142,6 +146,7 @@ fn scenario_entry(scenario: &ScenarioFile, path: Option<&PathBuf>, trials: usize
                     "workload": c.workload,
                     "locality": c.locality,
                     "heal_topology": c.heal_topology,
+                    "baseline": c.baseline,
                 }),
             );
             // Seeds only mean something for the text workload — `MapPut` keys
@@ -194,31 +199,28 @@ fn achieved_contention(config: &PartitionConfig, trials: usize) -> Option<Value>
     let per_rep: Vec<AchievedContention> = (1..=trials)
         .filter_map(|rep| contention::simulate(config, rep))
         .collect();
-    let (first, rest) = per_rep.split_first()?;
-
-    let siblings: Vec<usize> = per_rep.iter().map(|c| c.max_concurrent_siblings).collect();
-    let total: usize = siblings.iter().sum();
-    // Repetitions differ only in their PRNG stream. A contested-anchor count
-    // that varied between them would mean the metric is not a property of the
-    // cell.
-    debug_assert!(
-        rest.iter()
-            .all(|c| c.contested_anchors == first.contested_anchors),
-        "contested_anchors varies across repetitions"
-    );
+    let first = per_rep.first()?;
 
     Some(json!({
         // Name the model, so a later adapter can state whether this anchor
         // model still describes it.
         "model": "rga_anchor_simulation",
-        "contested_anchors": first.contested_anchors,
-        "max_concurrent_siblings": {
-            "min": siblings.iter().min(),
-            "max": siblings.iter().max(),
-            "mean": total as f64 / siblings.len() as f64,
-        },
+        "contested_anchors": spread(&per_rep, |c| c.contested_anchors),
+        "contested_ops": spread(&per_rep, |c| c.contested_ops),
+        "max_concurrent_siblings": spread(&per_rep, |c| c.max_concurrent_siblings),
         "head_children_repetition_1": first.head_children,
     }))
+}
+
+/// Returns the minimum, maximum, and mean of one number across the repetitions.
+fn spread(per_rep: &[AchievedContention], field: fn(&AchievedContention) -> usize) -> Value {
+    let values: Vec<usize> = per_rep.iter().map(field).collect();
+    let total: usize = values.iter().sum();
+    json!({
+        "min": values.iter().min(),
+        "max": values.iter().max(),
+        "mean": total as f64 / values.len() as f64,
+    })
 }
 
 /// Returns milliseconds since the Unix epoch, or 0 if the clock reads earlier

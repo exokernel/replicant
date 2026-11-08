@@ -122,7 +122,10 @@ async fn open_stream(
         .connect()
         .await
         .with_context(|| format!("cannot connect to peer {peer_id} at {addr}"))?;
-    let mut client = SyncClient::new(channel);
+    // See the limit on the server side, in `router`.
+    let mut client = SyncClient::new(channel)
+        .max_decoding_message_size(common::MAX_RPC_BYTES)
+        .max_encoding_message_size(common::MAX_RPC_BYTES);
 
     let (raw_tx, grpc_rx) = outbound_channel(std::convert::identity);
     let mut request = Request::new(ReceiverStream::new(grpc_rx));
@@ -154,8 +157,10 @@ async fn recv_loop(
                 // Drop the message if the link is blocked. Applying it would
                 // carry changes across the partition. A reply would use up
                 // sync state toward a peer that drops it. The sender now
-                // believes this message arrived. The unblock resets that
-                // state; see `ReplicaState::set_peer_links`.
+                // believes this message arrived, and its state is wrong. The
+                // orchestrator blocks a link only when its sync is idle, so in
+                // its runs nothing arrives here; see
+                // `ReplicaState::set_peer_links`.
                 if state.is_blocked(&peer_id) {
                     tracing::trace!(peer = %peer_id, "link blocked; dropping inbound sync message");
                     continue;
