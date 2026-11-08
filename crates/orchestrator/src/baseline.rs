@@ -218,34 +218,123 @@ async fn verify_same_document(clients: &mut [Client], length: usize) -> Result<(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::path::{Path, PathBuf};
+
     use sha2::{Digest, Sha256};
 
+    use super::BaselineStore;
+    use crate::scenario::Baseline;
+
+    /// Returns an empty directory for one test.
+    fn scratch(test: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("baseline-{}-{test}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Writes `json` as a trace file in `dir`, and returns a baseline that
+    /// names it with its true hash.
+    fn baseline(dir: &Path, name: &str, json: &str) -> Baseline {
+        std::fs::write(dir.join(name), json).unwrap();
+        Baseline {
+            trace: name.into(),
+            sha256: replay::trace::hex(&Sha256::digest(json)),
+            length: 1,
+        }
+    }
+
+    /// Returns the error of `check`, as text.
+    fn refusal(dir: &Path, baseline: &Baseline) -> String {
+        format!("{:#}", BaselineStore::new(dir).check(baseline).unwrap_err())
+    }
+
+    #[test]
+    fn a_single_chain_of_ascii_text_is_accepted() {
+        let dir = scratch("ok");
+        let b = baseline(
+            &dir,
+            "ok.json",
+            r#"{"endContent":"ab","txns":[{"patches":[[0,0,"ab"]]}]}"#,
+        );
+        BaselineStore::new(&dir).check(&b).unwrap();
+    }
+
+    #[test]
+    fn a_baseline_with_the_wrong_hash_is_refused() {
+        let dir = scratch("hash");
+        let mut b = baseline(
+            &dir,
+            "t.json",
+            r#"{"endContent":"a","txns":[{"patches":[[0,0,"a"]]}]}"#,
+        );
+        b.sha256 = "0".repeat(64);
+        let err = refusal(&dir, &b);
+        assert!(
+            err.contains("SHA-256") && err.contains("gen-traces"),
+            "{err}"
+        );
+    }
+
+    /// The divergence cells start every replica from one document, so a
+    /// baseline must be one chain of text edits. A fork has no single text.
+    #[test]
+    fn a_baseline_that_forks_is_refused() {
+        let dir = scratch("fork");
+        let b = baseline(
+            &dir,
+            "fork.json",
+            r#"{"kind":"concurrent","numAgents":2,"oracle":{"kind":"tree_invariants"},"txns":[
+                {"agent":0,"parents":[],"patches":[[0,0,"a"]]},
+                {"agent":0,"parents":[0],"patches":[[0,0,"b"]]},
+                {"agent":1,"parents":[0],"patches":[[0,0,"c"]]}]}"#,
+        );
+        assert!(refusal(&dir, &b).contains("one chain"));
+    }
+
+    #[test]
+    fn a_list_baseline_is_refused() {
+        let dir = scratch("list");
+        let b = baseline(
+            &dir,
+            "list.json",
+            r#"{"oracle":{"kind":"exact_list","values":["a"]},"txns":[{"listOps":[[0,0,["a"]]]}]}"#,
+        );
+        assert!(refusal(&dir, &b).contains("must be text"));
+    }
+
+    /// The Yrs adapter indexes text by bytes, so the positions of a text that
+    /// is not ASCII would differ between libraries.
+    #[test]
+    fn a_baseline_that_is_not_ascii_is_refused() {
+        let dir = scratch("ascii");
+        let b = baseline(
+            &dir,
+            "e.json",
+            r#"{"endContent":"é","txns":[{"patches":[[0,0,"é"]]}]}"#,
+        );
+        assert!(refusal(&dir, &b).contains("must be ASCII"));
+    }
+
     /// A second scenario that gives a checked trace another hash is refused,
-    /// and the same hash again is accepted.
+    /// and the same hash again, in any case, is accepted.
     #[test]
     fn a_checked_trace_with_another_hash_is_refused() {
-        let dir = std::env::temp_dir().join(format!("baseline-hash-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let json = br#"{"endContent":"ab","txns":[{"patches":[[0,0,"ab"]]}]}"#;
-        std::fs::write(dir.join("t.json"), json).unwrap();
-        let baseline = |sha256: String| Baseline {
-            trace: PathBuf::from("t.json"),
-            sha256,
-            length: 2,
-        };
-        let right = replay::trace::hex(&Sha256::digest(json));
+        let dir = scratch("reuse");
+        let json = r#"{"endContent":"ab","txns":[{"patches":[[0,0,"ab"]]}]}"#;
         let mut store = BaselineStore::new(&dir);
+        let mut b = baseline(&dir, "t.json", json);
         // An uppercase pin works when it is checked first, and after a
         // lowercase one.
-        BaselineStore::new(&dir)
-            .check(&baseline(right.to_uppercase()))
-            .unwrap();
-        store.check(&baseline(right.clone())).unwrap();
-        store.check(&baseline(right.to_uppercase())).unwrap();
-        let err = store.check(&baseline("0".repeat(64))).unwrap_err();
-        assert!(err.to_string().contains("in another"), "{err}");
-        std::fs::remove_dir_all(&dir).unwrap();
+        let mut upper = baseline(&dir, "t.json", json);
+        upper.sha256 = upper.sha256.to_uppercase();
+        BaselineStore::new(&dir).check(&upper).unwrap();
+        store.check(&b).unwrap();
+        b.sha256 = b.sha256.to_uppercase();
+        store.check(&b).unwrap();
+        b.sha256 = "0".repeat(64);
+        let err = format!("{:#}", store.check(&b).unwrap_err());
+        assert!(err.contains("in another"), "{err}");
     }
 
     /// A trace whose patches do not make its `endContent` is refused when the
@@ -275,6 +364,67 @@ mod tests {
             format!("{err:#}").contains("not the trace's final text"),
             "{err:#}"
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The store builds the paper under `BASELINE_AUTHOR`. After the install,
+    /// on a cache miss and on a cache hit, replica 0 writes under its own trial
+    /// id, and every change of the baseline has the baseline author.
+    #[tokio::test]
+    async fn the_baseline_has_its_own_author_and_replica_0_keeps_its_trial_id() {
+        use automerge::{ActorId, AutoCommit};
+        use common::proto::Empty;
+        use tonic::Request;
+
+        use crate::replicas::{map_put, reset_all, set_instance_ids, spawn_nodes};
+
+        let dir = scratch("author");
+        let mut b = baseline(
+            &dir,
+            "t.json",
+            r#"{"endContent":"ab","txns":[{"patches":[[0,0,"a"]]},{"patches":[[1,0,"b"]]}]}"#,
+        );
+        b.length = 2;
+        let mut tasks = tokio::task::JoinSet::new();
+        let (_, mut clients) = spawn_nodes(2, replica::adapter::Crdt::Automerge, &mut tasks)
+            .await
+            .unwrap();
+        let ids = common::seeded_instance_ids(7, 2);
+        let actor = |id: u128| ActorId::from(id.to_be_bytes().as_slice());
+        let mut store = BaselineStore::new(&dir);
+        for pass in ["cache miss", "cache hit"] {
+            // Each trial resets the replicas and sets their ids first.
+            reset_all(&clients).await.unwrap();
+            set_instance_ids(&clients, &ids).await.unwrap();
+            store.install(&b, &mut clients, &ids).await.unwrap();
+            map_put(&mut clients[0], "k", "v").await.unwrap();
+            let state = clients[0]
+                .encode(Request::new(Empty {}))
+                .await
+                .unwrap()
+                .into_inner()
+                .state;
+            let mut doc = AutoCommit::load(&state).unwrap();
+            let authors: Vec<ActorId> = doc
+                .get_changes(&[])
+                .iter()
+                .map(|change| change.actor_id().clone())
+                .collect();
+            // The first change creates the text object under the fixed actor of
+            // EnsureText (`replicant-bootstrap` in the Automerge adapter), so
+            // that every replica has the same object.
+            let bootstrap = ActorId::from(b"replicant-bootstrap".as_slice());
+            let (write, history) = authors.split_last().unwrap();
+            assert_eq!(*write, actor(ids[0]), "{pass}: the write has the trial id");
+            assert_eq!(history.first(), Some(&bootstrap), "{pass}: the text object");
+            assert!(history.len() > 1, "{pass}: the baseline has edits");
+            assert!(
+                history[1..]
+                    .iter()
+                    .all(|a| *a == actor(super::BASELINE_AUTHOR)),
+                "{pass}: every baseline edit has the baseline author"
+            );
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

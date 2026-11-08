@@ -427,6 +427,30 @@ fn the_remote_lane_moves_updates_between_replicas() {
     run_trial(&plan, &lane, Ids::ASCENDING).unwrap();
 }
 
+/// The remote lane reads list and map content with `ReadList` and `ReadMap`,
+/// and the oracle checks it, on every library.
+#[test]
+fn the_remote_lane_replays_list_and_map_workloads() {
+    let traces = [
+        r#"{"kind":"concurrent","oracle":{"kind":"tree_invariants"},"numAgents":2,"txns":[
+            {"agent":0,"parents":[],"listOps":[[0,0,["a","b"]]]},
+            {"agent":1,"parents":[],"listOps":[[0,0,["c"]]]}]}"#,
+        r#"{"kind":"concurrent","oracle":{"kind":"map_winner"},"numAgents":2,"txns":[
+            {"agent":0,"parents":[],"mapOps":[["k",0],["only0","x"]]},
+            {"agent":1,"parents":[],"mapOps":[["k","one"]]}]}"#,
+    ];
+    for crdt in Crdt::ALL {
+        let addrs = [spawn_replica(crdt), spawn_replica(crdt)];
+        let lane = Lane::connect(crdt, &addrs).unwrap();
+        for json in traces {
+            let plan = Plan::new(workload(), Trace::parse(json.as_bytes()).unwrap()).unwrap();
+            let r =
+                run_trial(&plan, &lane, Ids::ASCENDING).unwrap_or_else(|e| panic!("{crdt}: {e:#}"));
+            assert!(r.adapter_ms.is_some(), "{crdt}");
+        }
+    }
+}
+
 #[test]
 fn the_remote_lane_refuses_a_plan_with_too_many_replicas() {
     let crdt = Crdt::Yrs;

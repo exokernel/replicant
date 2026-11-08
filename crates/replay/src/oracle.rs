@@ -608,4 +608,40 @@ mod tests {
         let e = CheckPlan::new(&t, 1).unwrap_err();
         assert!(e.to_string().contains("past the end"), "{e}");
     }
+
+    #[test]
+    fn exact_list_check_reports_the_first_difference() {
+        let t = trace(
+            r#"{"oracle":{"kind":"exact_list","values":["a","b"]},
+                "txns":[{"listOps":[[0,0,["a","b"]]]}]}"#,
+        );
+        let plan = CheckPlan::new(&t, 1).unwrap();
+        let list =
+            |v: &[&str]| Content::List(v.iter().map(|s| ScalarVal::Str((*s).into())).collect());
+        plan.check(&list(&["a", "b"])).unwrap();
+        let e = plan.check(&list(&["a", "c", "d"])).unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("expected 2 values, found 3 values, first difference at index 1"),
+            "{e}"
+        );
+        let e = plan.check(&text("ab")).unwrap_err();
+        assert!(e.to_string().contains("different kind"), "{e}");
+    }
+
+    /// Only an exact text can be repeated: the text of N passes is the text of
+    /// one pass N times. No other check has a known result for N passes.
+    #[test]
+    fn repeat_needs_an_exact_text_oracle() {
+        let t = trace(
+            r#"{"kind":"concurrent","oracle":{"kind":"map_winner"},"numAgents":1,
+                "txns":[{"agent":0,"parents":[],"mapOps":[["k",1]]}]}"#,
+        );
+        CheckPlan::new(&t, 1).unwrap();
+        let e = CheckPlan::new(&t, 2).unwrap_err();
+        assert!(
+            e.to_string().contains("repeat needs an exact text oracle"),
+            "{e}"
+        );
+    }
 }

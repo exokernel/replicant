@@ -115,6 +115,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn conversions_keep_the_id() {
+        let id = NodeId::try_from("node-3".to_owned()).unwrap();
+        let as_ref: &str = id.as_ref();
+        assert_eq!(as_ref, "node-3");
+        assert_eq!(String::from(id.clone()), "node-3");
+        assert_eq!(&*std::sync::Arc::<str>::from(&id), "node-3");
+        assert!(NodeId::try_from(String::new()).is_err());
+    }
+
+    #[test]
     fn node_id_accepts_the_scheme_the_system_actually_uses() {
         for name in ["node-0", "node-11", "replica-0"] {
             let id = NodeId::new(name).unwrap();

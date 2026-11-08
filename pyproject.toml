@@ -21,6 +21,12 @@ dependencies = [
 ]
 
 [dependency-groups]
+# The tests of the analysis helpers, and their coverage. `uv sync` installs
+# this group by default, so `just setup` includes it.
+dev = [
+    "pytest",
+    "pytest-cov",
+]
 # The archived Jupyter notebooks in analysis/archive/. `just setup` leaves
 # them out. Run `just setup-archive` to install them.
 archive = [
@@ -33,3 +39,10 @@ archive = [
 
 [tool.uv]
 package = false
+
+[tool.pytest.ini_options]
+testpaths = ["analysis/tests"]
+pythonpath = ["analysis"]
+markers = [
+    "integration: runs the release orchestrator or replay binary (`just test-py-all` builds them)",
+]

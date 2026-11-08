@@ -63,6 +63,44 @@ lint-sh:
 test:
     cargo test --workspace
 
+# Run the unit tests of the analysis helpers (no build, no Docker)
+[group('develop')]
+test-py:
+    {{ python }} -m pytest -m "not integration" -q
+
+# Run every test of the analysis helpers, also those that run the release binaries
+[group('develop')]
+test-py-all:
+    cargo build --release --bin orchestrator --bin replay
+    {{ python }} -m pytest -q
+
+# Measure test coverage of the crates and the analysis helpers; reports go to target/coverage/
+[group('develop')]
+coverage:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! cargo llvm-cov --version >/dev/null 2>&1; then
+        echo "cargo-llvm-cov is not installed. Run: cargo install cargo-llvm-cov --locked" >&2
+        exit 1
+    fi
+    # One profile holds the tests and the smoke runs of `just ci`, so the code
+    # that only a binary runs counts too. A replica in a container does not
+    # count, because its profile stays in the container.
+    cargo llvm-cov clean --workspace
+    cargo llvm-cov --workspace --no-report
+    for crdt in {{ crdts }}; do
+        cargo llvm-cov run --no-report --bin orchestrator -- --crdt "$crdt" > /dev/null
+    done
+    cargo llvm-cov run --no-report --bin replay -- --spec workloads/smoke.toml \
+        --data-dir workloads/fixtures --trials 1 > /dev/null
+    cargo llvm-cov report --html --output-dir target/coverage/rust
+    cargo llvm-cov report --summary-only
+    # The Python integration tests run the release binaries.
+    cargo build --release --bin orchestrator --bin replay
+    {{ python }} -m pytest -q --cov=tour_helpers --cov=divergence_helpers \
+        --cov-report=term-missing --cov-report=html:target/coverage/python
+    echo "Reports: target/coverage/rust/html/index.html and target/coverage/python/index.html"
+
 # Build rustdoc with private items; warnings, such as broken links, are errors
 [group('develop')]
 doc-check:
@@ -80,7 +118,7 @@ smoke:
 
 # Full gate, as run by CI
 [group('develop')]
-ci: fmt-check lint lint-sh test doc-check smoke check-scenarios
+ci: fmt-check lint lint-sh test test-py doc-check smoke check-scenarios
 
 # ── Run in-process ──────────────────────────────────────────────────────────
 
