@@ -23,6 +23,9 @@ libs=(yjs ywasm automerge-wasm automerge loro)
 
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
+# compare.py reads every r*-*.json file in the out dir. Delete the samples of an
+# earlier run, so that a run with fewer repeats does not keep old ones.
+rm -f "$out"/r*-*.json "$out"/r*-*.log "$out/versions.txt"
 rm -rf "$work"
 mkdir -p "$work"
 git -C "$clone" archive HEAD | tar -x -C "$work"

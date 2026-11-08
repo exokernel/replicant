@@ -21,7 +21,7 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 
 use crate::alloc;
@@ -57,6 +57,42 @@ impl IdOrder {
     }
 }
 
+/// Returns the first transaction after the setup that does not have every setup
+/// transaction in its ancestry. Returns `None` when there is no such transaction.
+///
+/// The driver gives the setup to every replica before the timed part. So a later
+/// transaction that does not follow the whole setup would see edits that are
+/// concurrent with it in the trace.
+fn first_txn_outside_setup(trace: &Trace, setup: usize) -> Option<usize> {
+    if setup == 0 {
+        return None;
+    }
+    // One bit for each setup transaction in the ancestry of each transaction.
+    let words = setup.div_ceil(64);
+    let mut ancestry = vec![0u64; trace.txns.len() * words];
+    let full: Vec<u64> = (0..words)
+        .map(|w| match setup - w * 64 {
+            n if n >= 64 => u64::MAX,
+            n => (1 << n) - 1,
+        })
+        .collect();
+    for (i, txn) in trace.txns.iter().enumerate() {
+        let (done, rest) = ancestry.split_at_mut(i * words);
+        let bits = &mut rest[..words];
+        for &p in &txn.parents {
+            for (bit, parent) in bits.iter_mut().zip(&done[p * words..(p + 1) * words]) {
+                *bit |= parent;
+            }
+        }
+        if i < setup {
+            bits[i / 64] |= 1 << (i % 64);
+        } else if bits != full.as_slice() {
+            return Some(i);
+        }
+    }
+    None
+}
+
 /// A trace with its run settings. Build it once, then run many trials.
 pub struct Plan {
     /// The run settings.
@@ -87,6 +123,14 @@ impl Plan {
             workload.setup_txns == 0 || workload.repeat == 1,
             "repeat cannot have setup transactions"
         );
+        if let Some(i) = first_txn_outside_setup(&trace, workload.setup_txns) {
+            bail!(
+                "txn {i} does not follow all {} setup transactions. Every replica \
+                 gets the setup first, so the replay would make concurrent edits \
+                 causal",
+                workload.setup_txns
+            );
+        }
         ensure!(
             (1..=replicas).contains(&check_replicas),
             "check_replicas must be in 1..={replicas}"

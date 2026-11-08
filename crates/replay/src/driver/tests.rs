@@ -261,6 +261,77 @@ fn plan_rejects_repeat_with_a_receiver() {
     assert!(Plan::new(bad, trace).is_err());
 }
 
+/// Two root inserts are concurrent. The setup broadcast would give the second
+/// writer the first insert before its own, so the plan refuses the workload.
+#[test]
+fn plan_rejects_a_txn_that_does_not_follow_the_setup() {
+    let trace = Trace::parse(
+        br#"{"kind":"concurrent","oracle":{"kind":"tree_invariants"},"numAgents":2,"txns":[
+            {"agent":0,"parents":[],"patches":[[0,0,"a"]]},
+            {"agent":1,"parents":[],"patches":[[0,0,"b"]]}]}"#,
+    )
+    .unwrap();
+    let setup = Workload {
+        setup_txns: 1,
+        ..workload()
+    };
+    let err = Plan::new(setup, trace).err().expect("the plan must fail");
+    assert!(
+        format!("{err:#}").contains("txn 1 does not follow"),
+        "{err:#}"
+    );
+}
+
+/// A later txn must follow every setup txn, not only the last one. Txn 2 follows
+/// txn 1 but not txn 0, so a setup of two is refused, and a setup of one is not.
+#[test]
+fn every_setup_txn_must_be_an_ancestor() {
+    let json = br#"{"kind":"concurrent","oracle":{"kind":"tree_invariants"},"numAgents":2,"txns":[
+        {"agent":0,"parents":[],"patches":[[0,0,"a"]]},
+        {"agent":1,"parents":[],"patches":[[0,0,"b"]]},
+        {"agent":1,"parents":[1],"patches":[[0,0,"c"]]}]}"#;
+    let plan = |setup_txns| {
+        Plan::new(
+            Workload {
+                setup_txns,
+                ..workload()
+            },
+            Trace::parse(json).unwrap(),
+        )
+    };
+    assert!(plan(2).is_err());
+    assert_eq!(
+        first_txn_outside_setup(&Trace::parse(json).unwrap(), 1),
+        Some(1)
+    );
+    assert!(plan(0).is_ok());
+}
+
+/// The check uses one bit for each setup txn, so it must work past 64 of them.
+#[test]
+fn the_setup_check_works_past_64_setup_txns() {
+    // A chain of 70 txns by agent 0. Txn 70 is by agent 1 and follows txn 63 only.
+    let mut txns: Vec<String> = (0..70)
+        .map(|i| {
+            let parents = if i == 0 {
+                String::new()
+            } else {
+                (i - 1).to_string()
+            };
+            format!(r#"{{"agent":0,"parents":[{parents}],"patches":[[0,0,"x"]]}}"#)
+        })
+        .collect();
+    txns.push(r#"{"agent":1,"parents":[63],"patches":[[0,0,"y"]]}"#.into());
+    let json = format!(
+        r#"{{"kind":"concurrent","oracle":{{"kind":"tree_invariants"}},"numAgents":2,"txns":[{}]}}"#,
+        txns.join(",")
+    );
+    let trace = Trace::parse(json.as_bytes()).unwrap();
+    assert_eq!(first_txn_outside_setup(&trace, 64), None);
+    assert_eq!(first_txn_outside_setup(&trace, 65), Some(70));
+    assert_eq!(first_txn_outside_setup(&trace, 70), Some(70));
+}
+
 /// The remote lane: a real replica behind gRPC runs the same plan, and the
 /// result row also gives the adapter time.
 #[test]

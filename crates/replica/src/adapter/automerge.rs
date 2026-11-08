@@ -356,13 +356,17 @@ impl CrdtAdapter for AutomergeAdapter {
         for op in ops {
             self.apply_uncommitted(op)?;
         }
-        self.doc.commit();
-        // The last local change holds these ops and no others, so the update
-        // does not repeat changes that this replica received from a peer.
+        // The commit gives no hash when the ops changed nothing, for example a
+        // delete of a missing key. Then the update is empty. Otherwise, the new
+        // change holds these ops and no others, so the update does not repeat
+        // changes that this replica received from a peer.
+        let Some(hash) = self.doc.commit() else {
+            return Ok(Vec::new());
+        };
         self.doc
-            .get_last_local_change()
+            .get_change_by_hash(&hash)
             .map(|change| change.raw_bytes().to_vec())
-            .context("apply_txn: no local change after a commit")
+            .context("apply_txn: no change for the new commit hash")
     }
 
     fn apply_updates(&mut self, updates: &[&[u8]]) -> anyhow::Result<()> {
@@ -390,7 +394,7 @@ impl CrdtAdapter for AutomergeAdapter {
 mod tests {
     use super::AutomergeAdapter;
     use crate::adapter::conformance::*;
-    use common::CrdtAdapter;
+    use common::{CrdtAdapter, Op};
 
     conformance_tests!(
         AutomergeAdapter:
@@ -435,6 +439,20 @@ mod tests {
     // Not wrapped here: uint_above_i64_max_is_rejected and the two Yrs and
     // Loro mirrors of the bootstrap tests. The test below asserts what
     // Automerge does instead of the first.
+
+    /// A transaction that changes nothing gives an empty update. It must not
+    /// give the change of an earlier transaction again.
+    #[test]
+    fn a_txn_that_changes_nothing_gives_an_empty_update() {
+        let mut a = AutomergeAdapter::default();
+        let first = a.apply_txn(&[map_put("", "k", 1i64)]).unwrap();
+        assert!(!first.is_empty());
+        let missing = Op::MapDelete {
+            obj: String::new(),
+            key: "missing".into(),
+        };
+        assert_eq!(a.apply_txn(&[missing]).unwrap(), Vec::<u8>::new());
+    }
 
     /// Automerge version of `uint_above_i64_max_is_rejected` (Yrs and Loro).
     ///

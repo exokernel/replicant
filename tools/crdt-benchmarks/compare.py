@@ -35,8 +35,11 @@ B2_DOCS = 2
 N = 6000
 FIXED_ID_NOTE = (
     "B3 is not comparable for Yrs time and Loro size. The replay uses fixed, "
-    "ascending ids, and the JS libraries use random ids. See docs/replay.md."
+    "ascending ids, and the JS libraries use random ids. See docs/replay.md. "
+    "The tables show these cells, and the totals leave them out."
 )
+# The (metric, library) pairs that the fixed ids make not comparable on B3.
+FIXED_ID_SKEW = {("time", "yrs"), ("docSize", "loro")}
 
 Row = dict[str, Any]
 JsValues = dict[tuple[str, str, str], list[float]]
@@ -48,6 +51,11 @@ def reference(bench: str, lib: str) -> str:
     if lib == "automerge" and bench.startswith("b2."):
         return B2_AUTOMERGE_REFERENCE
     return REFERENCE[lib]
+
+
+def skewed(bench: str, metric: str, lib: str) -> bool:
+    """Return True if the fixed ids make `metric` of `lib` not comparable on `bench`."""
+    return bench.startswith("b3.") and (metric, lib) in FIXED_ID_SKEW
 
 
 def load_js(directory: Path) -> JsValues:
@@ -157,7 +165,8 @@ def report_sizes(js: JsValues, trials: Trials, benches: Sequence[str]) -> None:
                 cells.append("-")
                 continue
             ratio = replay_median(ours, "doc_size") / theirs
-            ratios[lib].append(ratio)
+            if not skewed(bench, "docSize", lib):
+                ratios[lib].append(ratio)
             cells.append(f"{ratio:.3f}")
         rows.append(cells)
     print_table(["benchmark", *LIBS], rows)
@@ -202,6 +211,7 @@ def report_times(js: JsValues, trials: Trials, benches: Sequence[str]) -> None:
         if (
             len(ours) == len(theirs) == len(LIBS)
             and min(*ours.values(), *theirs.values()) >= MIN_MS
+            and not any(skewed(bench, "time", lib) for lib in LIBS)
         ):
             rank_ours, rank_js = ranking(ours), ranking(theirs)
             compared += 1
