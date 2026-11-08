@@ -173,7 +173,7 @@ mod tests {
         PartitionConfig {
             ops_per_group: ops,
             write_pattern: WritePattern::Concentrated,
-            workload: crate::scenario::Workload::TextSplice,
+            workload: crate::scenario::WriteKind::TextSplice,
             locality,
             ..PartitionConfig::for_test(2, &[&[0], &[1]])
         }

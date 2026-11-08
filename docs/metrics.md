@@ -28,7 +28,7 @@ so consumers don't need to infer them from names.
 All five are emitted by the **replica** binary; the orchestrator emits no
 OTel metrics of its own (it consumes them via the file exporter or
 Prometheus). Defined in [`crates/replica/src/metrics.rs`](../crates/replica/src/metrics.rs);
-recorded at call sites in [`crates/replica/src/server.rs`](../crates/replica/src/server.rs).
+recorded at call sites in [`crates/replica/src/server/`](../crates/replica/src/server/).
 
 ### Op metrics
 
@@ -126,7 +126,7 @@ column. Reasons:
   pandas without joining against the OTel snapshot.
 
 See `wait_for_nodes` in
-[`crates/orchestrator/src/replicas.rs`](../crates/orchestrator/src/replicas.rs)
+[`crates/orchestrator/src/replicas/convergence.rs`](../crates/orchestrator/src/replicas/convergence.rs)
 for the measurement protocol — fingerprint-poll loop after the workload
 burst until all replicas report identical `GetStateFingerprint`.
 
@@ -211,7 +211,7 @@ aspirational metrics — this file was previously full of them and went stale.
    struct) with a `replicant.*` name, OTel type, unit, and the attribute
    keys it uses.
 2. Build it in `Metrics::new`.
-3. Record it at the relevant call site in `server.rs` (or wherever the
+3. Record it at the relevant call site in `server/` (or wherever the
    measurement boundary lives — keep recordings **outside** the
    `CrdtAdapter` trait so adapters stay purely functional).
 4. Add a row to the appropriate table above.

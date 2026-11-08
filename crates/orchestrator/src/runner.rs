@@ -9,12 +9,12 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use tokio::task::JoinSet;
 
+use crate::event_log::{Event, EventLog};
 use crate::replicas::{
     NodeSource, acquire_nodes, apply_write, check_tasks, connect_edges, ensure_text_all,
     record_stats, reset_all, verify_text_length, wait_for_nodes,
 };
-use crate::scenario::{TopologyConfig, Workload};
-use crate::trace::{Event, Trace};
+use crate::scenario::{TopologyConfig, WriteKind};
 use crate::workload::target_node;
 
 /// What one completed trial measured.
@@ -54,7 +54,7 @@ pub struct RunResult {
 pub async fn run(
     config: &TopologyConfig,
     source: NodeSource,
-    trace: &mut Trace,
+    log: &mut EventLog,
 ) -> Result<RunResult> {
     config.validate()?;
 
@@ -69,7 +69,7 @@ pub async fn run(
     // Create the shared text object on every node before any edge exists. See
     // `ensure_text_all`. Without this each node creates its own object on first
     // write, and those creations then collide as a map-key conflict.
-    if config.workload == Workload::TextSplice {
+    if config.workload == WriteKind::TextSplice {
         ensure_text_all(&mut clients, 0..n).await?;
     }
 
@@ -79,7 +79,7 @@ pub async fn run(
     let diameter = config.connections.diameter(n);
     connect_edges(&clients, &endpoints, &edges).await?;
     check_tasks(&mut tasks)?;
-    trace.record(Event::Wired {
+    log.record(Event::Wired {
         edges,
         blocked: Vec::new(),
     });
@@ -89,11 +89,11 @@ pub async fn run(
     // so a clock started after the writes would always read 0.
     let all_nodes: Vec<usize> = (0..n).collect();
     let measure_start = Instant::now();
-    trace.record(Event::ClockStart);
+    log.record(Event::ClockStart);
     for i in 0..config.op_count {
         let target = target_node(&config.write_pattern, i, &all_nodes);
         apply_write(&mut clients[target], config.workload, i).await?;
-        trace.record(Event::Write {
+        log.record(Event::Write {
             node: target,
             op: i,
         });
@@ -114,15 +114,15 @@ pub async fn run(
         &all_nodes,
         measure_start,
         Duration::from_secs(5) + pacing_budget,
-        trace,
+        log,
     )
     .await?;
     check_tasks(&mut tasks)?;
-    record_stats(&mut clients, trace).await?;
+    record_stats(&mut clients, log).await?;
 
     // Validity gate, outside the measured window: the converged text must hold
     // one character per operation, because operations are insert-only.
-    if config.workload == Workload::TextSplice {
+    if config.workload == WriteKind::TextSplice {
         verify_text_length(&mut clients, &all_nodes, config.op_count).await?;
     }
 
@@ -159,7 +159,7 @@ mod tests {
         let result = run(
             &config,
             NodeSource::InProcess(Crdt::Automerge),
-            &mut Trace::off(),
+            &mut EventLog::off(),
         )
         .await
         .unwrap();

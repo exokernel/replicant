@@ -36,15 +36,15 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use tokio::task::JoinSet;
 
+use crate::event_log::{Event, EventLog};
 use crate::replicas::{
     Client, NodeSource, TEXT_OBJ, acquire_nodes, apply_write, check_tasks, connect_edges,
     ensure_text_all, fingerprint, kick_sync_edges, record_stats, reset_all, set_links_blocked,
     text_splice, verify_text_length, wait_for_nodes,
 };
 use crate::runner::RunResult;
-use crate::scenario::{Group, HealTopology, PartitionConfig, Workload};
+use crate::scenario::{Group, HealTopology, PartitionConfig, WriteKind};
 use crate::topology::{self, Connections, intra_group_edges};
-use crate::trace::{Event, Trace};
 use crate::workload::{PositionStream, target_node};
 
 /// Runs one partition-heal scenario and returns its measurements.
@@ -55,7 +55,7 @@ pub async fn run_partition_heal(
     config: &PartitionConfig,
     source: NodeSource,
     repetition: usize,
-    trace: &mut Trace,
+    log: &mut EventLog,
 ) -> Result<RunResult> {
     config.validate()?;
 
@@ -74,7 +74,7 @@ pub async fn run_partition_heal(
     // an object on first use. Without this step, replicas that diverge from an
     // empty document each create their own `ROOT["text"]`, and the heal then
     // resolves a map-key conflict that discards one side's text completely.
-    if config.workload == Workload::TextSplice {
+    if config.workload == WriteKind::TextSplice {
         ensure_text_all(&mut clients, 0..n).await?;
     }
 
@@ -91,7 +91,7 @@ pub async fn run_partition_heal(
     let all_edges = plan.all_edges();
     connect_edges(&clients, &endpoints, &all_edges).await?;
     check_tasks(&mut tasks)?;
-    trace.record(Event::Wired {
+    log.record(Event::Wired {
         edges: all_edges.clone(),
         blocked: plan.heal.clone(),
     });
@@ -107,10 +107,10 @@ pub async fn run_partition_heal(
         for i in 0..config.ops_per_group {
             let target = target_node(&config.write_pattern, i, &group.nodes);
             match config.workload {
-                Workload::MapPut => {
-                    apply_write(&mut clients[target], Workload::MapPut, op_idx).await?;
+                WriteKind::MapPut => {
+                    apply_write(&mut clients[target], WriteKind::MapPut, op_idx).await?;
                 }
-                Workload::TextSplice => {
+                WriteKind::TextSplice => {
                     let pos = streams
                         .entry(target)
                         .or_insert_with(|| PositionStream::new(config, target, repetition))
@@ -118,7 +118,7 @@ pub async fn run_partition_heal(
                     text_splice(&mut clients[target], TEXT_OBJ, pos, "x").await?;
                 }
             }
-            trace.record(Event::Write {
+            log.record(Event::Write {
                 node: target,
                 op: op_idx,
             });
@@ -137,7 +137,7 @@ pub async fn run_partition_heal(
                 &group.nodes,
                 Instant::now(),
                 Duration::from_secs(5),
-                trace,
+                log,
             )
             .await?;
         }
@@ -159,12 +159,12 @@ pub async fn run_partition_heal(
     // still-blocked peer would be dropped on arrival, and the sender would then
     // wait for a reply that never comes.
     let heal_start = Instant::now();
-    trace.record(Event::ClockStart);
+    log.record(Event::ClockStart);
     set_links_blocked(&clients, &plan.heal, false).await?;
     let wiring_ms = heal_start.elapsed().as_secs_f64() * 1000.0;
-    trace.record(Event::Unblocked);
+    log.record(Event::Unblocked);
     kick_sync_edges(&clients, &plan.heal).await?;
-    trace.record(Event::Kicked);
+    log.record(Event::Kicked);
 
     let all_nodes: Vec<usize> = (0..n).collect();
     let convergence_ms = wait_for_nodes(
@@ -172,18 +172,18 @@ pub async fn run_partition_heal(
         &all_nodes,
         heal_start,
         Duration::from_secs(10),
-        trace,
+        log,
     )
     .await?;
     check_tasks(&mut tasks)?;
-    record_stats(&mut clients, trace).await?;
+    record_stats(&mut clients, log).await?;
 
     // Validity gate, outside the measured window: the healed text must contain
     // both sides' inserts. Operations are insert-only and one character each,
     // so the final length must equal the total operation count. This is the
     // check that separates a real sequence interleave from a heal that
     // converged by discarding one replica's work.
-    if config.workload == Workload::TextSplice {
+    if config.workload == WriteKind::TextSplice {
         verify_text_length(&mut clients, &all_nodes, config.total_ops()).await?;
     }
 
@@ -416,7 +416,7 @@ mod tests {
             &[0, 1],
             Instant::now(),
             Duration::from_secs(5),
-            &mut Trace::off(),
+            &mut EventLog::off(),
         )
         .await
         .unwrap();
@@ -462,7 +462,7 @@ mod tests {
             &halves(2, 4),
             NodeSource::InProcess(Crdt::Automerge),
             1,
-            &mut Trace::off(),
+            &mut EventLog::off(),
         )
         .await
         .unwrap();
@@ -470,7 +470,7 @@ mod tests {
             &halves(6, 4),
             NodeSource::InProcess(Crdt::Automerge),
             1,
-            &mut Trace::off(),
+            &mut EventLog::off(),
         )
         .await
         .unwrap();
@@ -496,7 +496,7 @@ mod tests {
             &halves(4, 4),
             NodeSource::InProcess(Crdt::Automerge),
             1,
-            &mut Trace::off(),
+            &mut EventLog::off(),
         )
         .await
         .unwrap();
@@ -528,7 +528,7 @@ mod tests {
             let config = PartitionConfig {
                 ops_per_group: 25,
                 write_pattern: WritePattern::Concentrated,
-                workload: Workload::TextSplice,
+                workload: WriteKind::TextSplice,
                 locality,
                 ..PartitionConfig::for_test(2, &[&[0], &[1]])
             };
@@ -536,7 +536,7 @@ mod tests {
                 &config,
                 NodeSource::InProcess(Crdt::Automerge),
                 1,
-                &mut Trace::off(),
+                &mut EventLog::off(),
             )
             .await
             .unwrap_or_else(|e| panic!("locality={locality:?}: {e:#}"));

@@ -1,11 +1,11 @@
 //! A per-trial event log, written by `--trace`.
 //!
-//! The CSV row says how long a trial took to converge. The trace shows how it
+//! The CSV row says how long a trial took to converge. The log shows how it
 //! got there: which links exist, when each write lands, and, at each poll,
 //! which replicas already agree. The guided notebook in `analysis/` uses it to
 //! draw a trial on a timeline.
 //!
-//! A disabled [`Trace`] records nothing, and each call returns at once. An
+//! A disabled [`EventLog`] records nothing, and each call returns at once. An
 //! enabled one does a little work inside the timed window: it reads the clock,
 //! and it compares fingerprints at each poll. Do not use traced runs for
 //! measurements.
@@ -17,7 +17,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 /// The events of one trial.
-pub struct Trace {
+pub struct EventLog {
     /// When the trial started. Every event time is relative to it.
     origin: Instant,
     /// `false` makes every recording method a no-op.
@@ -93,7 +93,7 @@ pub struct PeerStats {
     pub deferred: u64,
 }
 
-/// One line of the trace file.
+/// One line of the log file.
 #[derive(Serialize)]
 struct Line<'a> {
     /// The scenario name.
@@ -107,8 +107,8 @@ struct Line<'a> {
     event: &'a Event,
 }
 
-impl Trace {
-    /// Starts a trace whose clock starts now. With `enabled` false, the trace
+impl EventLog {
+    /// Starts a log whose clock starts now. With `enabled` false, the log
     /// records nothing.
     pub fn new(enabled: bool) -> Self {
         Self {
@@ -119,14 +119,14 @@ impl Trace {
         }
     }
 
-    /// A trace that records nothing.
+    /// A log that records nothing.
     #[cfg(test)]
     pub fn off() -> Self {
         Self::new(false)
     }
 
-    /// Whether this trace records anything. Check it before work that only
-    /// the trace needs, such as extra RPCs.
+    /// Whether this log records anything. Check it before work that only
+    /// the log needs, such as extra RPCs.
     pub fn enabled(&self) -> bool {
         self.enabled
     }
@@ -188,22 +188,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn disabled_trace_records_nothing() {
-        let mut trace = Trace::off();
-        trace.record(Event::ClockStart);
-        trace.poll(&[0], &[vec![1]]);
+    fn disabled_log_records_nothing() {
+        let mut log = EventLog::off();
+        log.record(Event::ClockStart);
+        log.poll(&[0], &[vec![1]]);
         let mut out = Vec::new();
-        trace.write_to(&mut out, "s", 1).unwrap();
+        log.write_to(&mut out, "s", 1).unwrap();
         assert!(out.is_empty());
     }
 
     #[test]
     fn classes_are_stable_across_polls() {
-        let mut trace = Trace::new(true);
-        trace.poll(&[0, 1, 2], &[vec![], vec![7], vec![9]]);
-        trace.poll(&[0, 1, 2], &[vec![9], vec![9], vec![9]]);
+        let mut log = EventLog::new(true);
+        log.poll(&[0, 1, 2], &[vec![], vec![7], vec![9]]);
+        log.poll(&[0, 1, 2], &[vec![9], vec![9], vec![9]]);
         let mut out = Vec::new();
-        trace.write_to(&mut out, "s", 3).unwrap();
+        log.write_to(&mut out, "s", 3).unwrap();
         let lines: Vec<serde_json::Value> = String::from_utf8(out)
             .unwrap()
             .lines()
