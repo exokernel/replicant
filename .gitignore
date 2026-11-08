@@ -14,6 +14,9 @@ deploy/docker/compose.generated.yaml
 __pycache__/
 __marimo__/
 
+# The data file of pytest-cov. `just coverage` writes it; the reports go to target/.
+/.coverage
+
 # Personal study notebook for porting crdt-benchmarks. Not part of the repository.
 /analysis/benchmark-study.md
 

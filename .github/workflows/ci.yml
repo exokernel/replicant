@@ -4,24 +4,23 @@ name: CI
 # also changes code still runs. The list names what to skip, not what to run,
 # so a new source directory triggers CI by default.
 #
-# Skipped: markdown, the archived data in data/ (only notebooks read it),
-# analysis/ (CI installs its own pyyaml), and repo dotfiles. Not skipped:
+# Skipped: markdown, the archived data in data/ (only notebooks read it), and
+# repo dotfiles. Not skipped: analysis/ (`just test-py` tests its helpers),
 # scenarios/ (`just check-scenarios` reads it), the Justfile, scripts/, the
-# Dockerfile, deploy/, proto/, rust-toolchain.toml, and this file.
+# Dockerfile, deploy/, proto/, pyproject.toml, uv.lock, rust-toolchain.toml,
+# and this file.
 on:
   push:
     branches: [main]
     paths-ignore:
       - '**.md'
       - 'data/**'
-      - 'analysis/**'
       - '.gitignore'
       - '.gitattributes'
   pull_request:
     paths-ignore:
       - '**.md'
       - 'data/**'
-      - 'analysis/**'
       - '.gitignore'
       - '.gitattributes'
 
@@ -50,6 +49,12 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: just
+      # `just test-py` needs the locked Python packages. `just setup` installs
+      # them into .venv, and the Justfile prefers that python3 when it exists.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.3
+      - name: Install Python packages
+        run: just setup
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
       - name: Run the gate
