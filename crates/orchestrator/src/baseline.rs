@@ -34,10 +34,19 @@ use crate::scenario::Baseline;
 pub struct BaselineStore {
     /// The directory that holds the trace files.
     data_dir: PathBuf,
-    /// The parsed traces, by the path in the scenario.
-    traces: HashMap<PathBuf, Trace>,
+    /// The parsed traces and their checked SHA-256 hashes, by the path in the
+    /// scenario.
+    traces: HashMap<PathBuf, Checked>,
     /// The encoded documents, by the path in the scenario.
     encoded: HashMap<PathBuf, Vec<u8>>,
+}
+
+/// A trace whose file had the expected hash.
+struct Checked {
+    /// The hash that the scenario asked for, and the file had.
+    sha256: String,
+    /// The parsed trace.
+    trace: Trace,
 }
 
 impl BaselineStore {
@@ -52,9 +61,18 @@ impl BaselineStore {
     /// Reads and checks the trace of `baseline`, if the store does not have it.
     ///
     /// Call this before the first trial, so that a missing file or a wrong hash
-    /// fails before a sweep runs.
+    /// fails before a sweep runs. A trace that the store has already checked
+    /// must have the same hash in `baseline`. Two scenarios that give one path
+    /// two hashes cannot both be right.
     pub fn check(&mut self, baseline: &Baseline) -> Result<()> {
-        if self.traces.contains_key(&baseline.trace) {
+        if let Some(checked) = self.traces.get(&baseline.trace) {
+            ensure!(
+                checked.sha256.eq_ignore_ascii_case(&baseline.sha256),
+                "baseline {} has SHA-256 {} in one scenario and {} in another",
+                baseline.trace.display(),
+                checked.sha256,
+                baseline.sha256
+            );
             return Ok(());
         }
         let path = self.data_dir.join(&baseline.trace);
@@ -77,7 +95,13 @@ impl BaselineStore {
             "baseline {} must be ASCII",
             path.display()
         );
-        self.traces.insert(baseline.trace.clone(), trace);
+        self.traces.insert(
+            baseline.trace.clone(),
+            Checked {
+                sha256: baseline.sha256.clone(),
+                trace,
+            },
+        );
         Ok(())
     }
 
@@ -88,7 +112,7 @@ impl BaselineStore {
     pub async fn install(&mut self, baseline: &Baseline, clients: &mut [Client]) -> Result<()> {
         self.check(baseline)?;
         if !self.encoded.contains_key(&baseline.trace) {
-            let trace = &self.traces[&baseline.trace];
+            let trace = &self.traces[&baseline.trace].trace;
             let state = build(trace, clients).await?;
             self.encoded.insert(baseline.trace.clone(), state);
         }
@@ -147,4 +171,32 @@ async fn verify_same_document(clients: &mut [Client], length: usize) -> Result<(
     }
     let all: Vec<usize> = (0..clients.len()).collect();
     verify_text_length(clients, &all, length).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    /// A second scenario that gives a checked trace another hash is refused,
+    /// and the same hash again is accepted.
+    #[test]
+    fn a_checked_trace_with_another_hash_is_refused() {
+        let dir = std::env::temp_dir().join(format!("baseline-hash-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let json = br#"{"endContent":"ab","txns":[{"patches":[[0,0,"ab"]]}]}"#;
+        std::fs::write(dir.join("t.json"), json).unwrap();
+        let baseline = |sha256: String| Baseline {
+            trace: PathBuf::from("t.json"),
+            sha256,
+            length: 2,
+        };
+        let right = replay::trace::hex(&Sha256::digest(json));
+        let mut store = BaselineStore::new(&dir);
+        store.check(&baseline(right.clone())).unwrap();
+        store.check(&baseline(right.to_uppercase())).unwrap();
+        let err = store.check(&baseline("0".repeat(64))).unwrap_err();
+        assert!(err.to_string().contains("in another"), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

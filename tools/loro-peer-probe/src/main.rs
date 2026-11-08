@@ -32,6 +32,7 @@ fn main() {
         let t = Instant::now(); a.import(&ub).unwrap(); let ta = t.elapsed().as_secs_f64() * 1e3;
         let t = Instant::now(); b.import(&ua).unwrap(); let tb = t.elapsed().as_secs_f64() * 1e3;
         assert_eq!(a.get_text("text").to_string(), b.get_text("text").to_string());
-        println!("{label},{pa:#018x},{pb:#018x},{ta:.1},{tb:.1},{}", pa < pb);
+        // Quote the label: some labels have a comma, such as "1,2".
+        println!("\"{label}\",{pa:#018x},{pb:#018x},{ta:.1},{tb:.1},{}", pa < pb);
     }
 }

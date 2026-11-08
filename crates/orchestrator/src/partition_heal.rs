@@ -168,6 +168,18 @@ pub async fn run_partition_heal(
     }
     check_tasks(&mut tasks)?;
 
+    // Equal fingerprints in a group do not mean that its replicas have stopped
+    // sending. A replica can still relay a received change to its other peers.
+    // If such a relay reached a cross-group link after one end was unblocked and
+    // before the other end was, the blocked end would drop it, and the sender
+    // would count it as sent. Then the kick can send nothing, and the heal can
+    // stall. So wait, outside the measured window, until sync inside the groups
+    // is idle. The idle check ignores the blocked peers.
+    if !plan.intra.is_empty() {
+        wait_for_sync_idle(&mut clients, &plan.intra, SYNC_IDLE_TIMEOUT).await?;
+    }
+    check_tasks(&mut tasks)?;
+
     // Validity gate: the partition must actually have held. If any cross-group
     // state leaked during the divergence phase, the groups already agree and
     // the heal measures nothing. Checking here is cheaper and more direct than

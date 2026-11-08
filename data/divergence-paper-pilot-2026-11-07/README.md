@@ -23,6 +23,13 @@ merge.
 
 A `1e5` file with no trial rows is a cell that did not converge within 600 s.
 
+Three of these runs have no provenance: `automerge-1e5-first-contact-docker`,
+`automerge-1e5-reconnect-docker`, and `yrs-1e5-first-contact-docker`. A run that
+timed out wrote no provenance file, and the bench script kept the file of an earlier
+run in this folder. So these files were copies of a Loro or Yrs run. Each one now
+says `provenance_unavailable`, with the run it was copied from. The table above
+gives their code commits.
+
 ## Results
 
 Median `convergence_ms`. The contested share is from the contention model.
