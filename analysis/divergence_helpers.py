@@ -132,30 +132,27 @@ def _load_loro_peers(path: Path) -> pd.DataFrame:
     return df
 
 
-#: Two trials of one cell this many times apart, with no trial between them,
-#: split the cell into a fast and a slow group. The Loro peer-id effect makes
-#: such cells: on `same_region` at 10^4, 25 ms against 11,000 ms.
+#: A trial more than this many times the fastest trial of its cell is slow. This
+#: is the rule of the grid archive's README. The Loro peer-id effect makes such
+#: cells: on `same_region` at 10^4, 25 ms against 11,000 ms.
 BIMODAL_RATIO = 10.0
 
 
 def split_groups(values: pd.Series) -> list[tuple[str, pd.Series]]:
-    """Splits the trial times of one cell at their largest gap, if the next
-    value is at least `BIMODAL_RATIO` times the one before it. Returns
-    `[("all", values)]` or `[("fast", ...), ("slow", ...)]`."""
+    """Splits the trial times of one cell into a fast and a slow group. A trial
+    is slow if it is more than `BIMODAL_RATIO` times the fastest trial. Returns
+    `[("all", values)]` if no trial is slow, else `[("fast", ...), ("slow", ...)]`."""
     ordered = values.sort_values()
-    if len(ordered) < 2:
+    slow = ordered > BIMODAL_RATIO * ordered.min()
+    if not slow.any():
         return [("all", ordered)]
-    ratios = ordered.to_numpy()[1:] / ordered.to_numpy()[:-1]
-    cut = int(ratios.argmax())
-    if ratios[cut] < BIMODAL_RATIO:
-        return [("all", ordered)]
-    return [("fast", ordered.iloc[: cut + 1]), ("slow", ordered.iloc[cut + 1 :])]
+    return [("fast", ordered[~slow]), ("slow", ordered[slow])]
 
 
 def medians(grid: pd.DataFrame) -> pd.DataFrame:
     """Returns the median, minimum, and maximum of each cell and library.
 
-    A cell whose trials fall into two groups (see `split_groups`) gives two
+    A cell with slow trials (see `split_groups`) gives two
     rows, `group = "fast"` and `"slow"`. One median of both groups would
     describe no trial. Other cells give one row with `group = "all"`.
     """

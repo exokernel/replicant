@@ -262,9 +262,10 @@ def _(libraries, locality, seeded, start):
     mo.vstack([
         mo.md(rf"""
         Each small point is one trial, and each large marker is a median. The
-        line joins the medians of cells with one group. A Loro cell whose trials
-        fall into two groups, at least ten times apart, shows a fast and a slow
-        median instead, because one median of both would describe no trial.
+        line joins the medians of cells with one group. A Loro cell with slow
+        trials, each more than ten times the fastest trial of the cell (the
+        rule of the grid archive), shows a fast and a slow median instead,
+        because one median of both would describe no trial.
         Both axes are logarithmic, so a straight line is a power law: a slope of 1 means the
         time grows in proportion to the ops, and a slope of 2 means it grows with
         their square.
