@@ -1,7 +1,10 @@
 """Helpers for tour.py: run the orchestrator, and draw what it reports.
 
 The notebook builds scenarios as dicts, runs them with `run`, and draws the
-result with `graph_chart` and `timeline_chart`.
+result with `graph_chart` and `timeline_chart`. `dry_run` reads what the
+orchestrator would run, with no replica. `replay` runs the replay binary, and
+`replay_trace` runs one trace that the notebook writes. `check_archive` compares
+each archived result file with its provenance file.
 
 A run uses one of three lanes:
 
@@ -29,6 +32,7 @@ import socket
 import subprocess
 import tempfile
 import time
+import tomllib
 from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -40,6 +44,18 @@ import pandas as pd
 
 REPO = Path(__file__).resolve().parent.parent
 BINARY = REPO / "target" / "release" / "orchestrator"
+REPLAY = REPO / "target" / "release" / "replay"
+
+#: The trace files. `just gen-traces` makes them. They are not in the repository.
+TRACES = REPO / "traces"
+
+#: The B4 paper of crdt-benchmarks as a starting document. The divergence grid
+#: uses it. Must match `scenarios/gen-divergence-grid.py`.
+PAPER = {
+    "trace": "editing-traces/automerge-paper.json.gz",
+    "sha256": "42c0ff1720c0cad77077e190e36135c9cab9f7bbc266351c0a7fe4981c6a1546",
+    "length": 104852,
+}
 
 # Must match `crdts` in the Justfile.
 CRDTS = ("automerge", "yrs", "loro")
@@ -49,12 +65,13 @@ alt.data_transformers.disable_max_rows()
 
 
 def build() -> Path:
-    """Builds the release orchestrator, and returns the path to the binary.
+    """Builds the release orchestrator and replay binaries, and returns the path
+    to the orchestrator.
 
     Debug builds are much slower, and their timings mean nothing.
     """
     proc = subprocess.run(
-        ["cargo", "build", "--release", "--bin", "orchestrator"],
+        ["cargo", "build", "--release", "--bin", "orchestrator", "--bin", "replay"],
         cwd=REPO,
         capture_output=True,
         text=True,
@@ -75,6 +92,13 @@ def docker_available() -> bool:
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
+
+
+def traces_available(*paths: str) -> bool:
+    """True if each path exists under `traces/`. With no paths, true if the
+    crdt-benchmarks and editing-traces folders exist."""
+    paths = paths or ("crdt-benchmarks", "editing-traces")
+    return all((TRACES / p).exists() for p in paths)
 
 
 def kind_installed() -> bool:
@@ -321,20 +345,25 @@ def partition(
     write_pattern: str = "round_robin",
     workload: str = "map_put",
     locality: str = "append",
+    baseline: dict | None = None,
 ) -> dict:
-    """A partition-heal scenario: the groups write apart, then the links heal."""
-    return {
-        "name": name,
-        "partition_heal": {
-            "node_count": sum(len(g) for g in groups),
-            "write_pattern": write_pattern,
-            "heal_topology": heal_topology,
-            "workload": workload,
-            "locality": locality,
-            "ops_per_group": ops_per_group,
-            "groups": groups,
-        },
+    """A partition-heal scenario: the groups write apart, then the links heal.
+
+    `baseline` is the starting document, such as `PAPER`. It needs the text
+    workload and the trace file under `traces/`.
+    """
+    body = {
+        "node_count": sum(len(g) for g in groups),
+        "write_pattern": write_pattern,
+        "heal_topology": heal_topology,
+        "workload": workload,
+        "locality": locality,
+        "ops_per_group": ops_per_group,
+        "groups": groups,
     }
+    if baseline is not None:
+        body["baseline"] = baseline
+    return {"name": name, "partition_heal": body}
 
 
 def to_toml(scenario: dict) -> str:
@@ -356,7 +385,15 @@ def to_toml(scenario: dict) -> str:
         if section == "name":
             continue
         lines += ["", f"[{section}]"]
-        lines += [f"{k} = {value(v)}" for k, v in body.items() if k != "groups"]
+        tables = {k: v for k, v in body.items() if isinstance(v, dict)}
+        lines += [
+            f"{k} = {value(v)}"
+            for k, v in body.items()
+            if k != "groups" and k not in tables
+        ]
+        for key, table in tables.items():
+            lines += ["", f"[{section}.{key}]"]
+            lines += [f"{k} = {value(v)}" for k, v in table.items()]
         for group in body.get("groups", []):
             lines += ["", f"[[{section}.groups]]", f"nodes = {value(group)}"]
     return "\n".join(lines) + "\n"
@@ -449,12 +486,18 @@ class Run:
 
 
 def run(
-    scenario: dict, crdt: str, binary: Path, trials: int = 1, lane: str = "docker"
+    scenario: dict,
+    crdt: str,
+    binary: Path,
+    trials: int = 1,
+    lane: str = "docker",
+    env: dict[str, str] | None = None,
 ) -> Run:
     """Runs `scenario` with `crdt` in `lane`, traced, and returns the result.
 
     `binary` comes from `build()`. Passing it makes each caller wait for the
-    build.
+    build. `env` adds environment variables to the orchestrator, such as
+    `RUST_LOG`. In a container lane they do not reach the replicas.
     """
     if lane in STACKS:
         STACKS[lane].ensure(crdt)
@@ -471,11 +514,13 @@ def run(
                 "--output", "json",
                 "--trials", str(trials),
                 "--trace", str(tmp / "trace.jsonl"),
+                "--data-dir", str(TRACES),
                 *lane_args,
                 str(tmp / "scenario.toml"),
             ],
             capture_output=True,
             text=True,
+            env={**os.environ, **env} if env else None,
         )
         if proc.returncode != 0:
             raise RuntimeError(f"orchestrator failed:\n{proc.stderr[-3000:]}")
@@ -509,6 +554,210 @@ def phase_times(events: list[Event]) -> dict[str, float]:
 
 def poll_count(events: list[Event]) -> int:
     return sum(e["event"] == "poll" for e in events)
+
+
+def timed_polls(events: list[Event]) -> list[float]:
+    """The time of each poll after `clock_start`, in ms since `clock_start`.
+
+    The trace records a poll when every fingerprint of that poll has
+    returned. So the first value is the floor of `convergence_ms`: no trial
+    can read less.
+    """
+    start = phase_times(events)["clock_start"]
+    return [e["t_ms"] - start for e in events if e["event"] == "poll" and e["t_ms"] >= start]
+
+
+def poll_rounds(events: list[Event]) -> list[float]:
+    """The time between each two polls after `clock_start`, in ms.
+
+    One poll asks each replica for its fingerprint in turn, and then the
+    orchestrator waits 1 ms. So this is the step of `convergence_ms`.
+    """
+    times = timed_polls(events)
+    return [b - a for a, b in zip(times, times[1:])]
+
+
+def dry_run(scenarios: Sequence[dict], crdt: str, binary: Path) -> list[dict]:
+    """Returns the provenance entry of each scenario, with no replica and no
+    trial: the parameters, the seeds, the library ids, and the contention.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        files = []
+        for i, scenario in enumerate(scenarios):
+            files.append(tmp / f"{i}.toml")
+            files[-1].write_text(to_toml(scenario))
+        proc = subprocess.run(
+            [
+                str(binary), "--dry-run", "--crdt", crdt,
+                "--provenance", str(tmp / "provenance.json"),
+                *map(str, files),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(f"orchestrator failed:\n{proc.stderr[-3000:]}")
+        return json.loads((tmp / "provenance.json").read_text())["scenarios"]
+
+
+# ── Replay ──────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class ReplayRun:
+    """What one replay run reports. Each table has one row per result row."""
+
+    #: The `run` row: commit, host, build profile, and library versions.
+    run: dict[str, Any]
+    #: One row per workload: the shape of its causal graph.
+    workloads: pd.DataFrame
+    #: One row per trial that passed its check.
+    trials: pd.DataFrame
+    #: One row per trial that failed, with its error.
+    failed: pd.DataFrame
+    #: One row per workload that the lane cannot run, with the reason.
+    skipped: pd.DataFrame
+
+
+def replay(
+    *args: str,
+    crdts: Sequence[str] = CRDTS,
+    trials: int = 3,
+    replicas: str | None = None,
+    data_dir: Path = TRACES,
+) -> ReplayRun:
+    """Runs the replay binary and returns its rows.
+
+    `args` go to the binary as they are, such as `--spec` or `--only`.
+    `replicas` is a `--replicas` value. Then the replay calls those replicas
+    over gRPC, and `crdts` must name the one library that they run.
+    `data_dir` holds the trace files that the spec names.
+
+    A trial that fails its check is a row in `failed`, not an error. The
+    function raises only if the binary wrote no result rows.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "replay.jsonl"
+        proc = subprocess.run(
+            [
+                str(REPLAY),
+                "--data-dir", str(data_dir),
+                "--crdt", ",".join(crdts),
+                "--trials", str(trials),
+                "--no-memory",
+                "--out", str(out),
+                *(["--replicas", replicas] if replicas else []),
+                *args,
+            ],
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+        )
+        rows = (
+            [json.loads(line) for line in out.read_text().splitlines() if line.strip()]
+            if out.exists()
+            else []
+        )
+    if not rows:
+        raise RuntimeError(f"replay failed:\n{proc.stderr[-3000:]}")
+
+    def table(kind: str) -> pd.DataFrame:
+        return pd.DataFrame([r for r in rows if r["row_type"] == kind])
+
+    return ReplayRun(
+        run=next(r for r in rows if r["row_type"] == "run"),
+        workloads=table("workload"),
+        trials=table("trial"),
+        failed=table("failed"),
+        skipped=table("skipped"),
+    )
+
+
+def replay_trace(trace: dict, *args: str, crdts: Sequence[str] = CRDTS, trials: int = 1) -> ReplayRun:
+    """Writes `trace` to a file, and replays it with default settings."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "notebook.trace.json"
+        path.write_text(json.dumps(trace))
+        return replay("--trace", str(path), *args, crdts=crdts, trials=trials)
+
+
+def library_versions() -> dict[str, str]:
+    """The version of each CRDT library crate, from `Cargo.lock`."""
+    lock = tomllib.loads((REPO / "Cargo.lock").read_text())
+    return {p["name"]: p["version"] for p in lock["package"] if p["name"] in CRDTS}
+
+
+def workloads() -> pd.DataFrame:
+    """One row per workload of each spec in `workloads/`, with a column that
+    says if its trace file is present."""
+    rows = []
+    for spec in sorted((REPO / "workloads").glob("*.toml")):
+        data_dir = REPO / "workloads" / "fixtures" if spec.stem == "smoke" else TRACES
+        for w in tomllib.loads(spec.read_text())["workload"]:
+            rows.append(
+                {
+                    "spec": spec.name,
+                    "name": w["name"],
+                    "description": w.get("description", ""),
+                    "receivers": w.get("receivers", 0),
+                    "timing": w.get("timing", "all"),
+                    "heavy": w.get("heavy", False),
+                    "trace present": (data_dir / w["trace"]).exists(),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def trace_graph(trace: dict) -> str:
+    """Returns a mermaid flowchart of a trace's causal graph: one box per
+    transaction, and an arrow from each parent.
+
+    A trace without `parents` is a chain: each transaction follows the one
+    before it.
+    """
+    lines = ["flowchart LR"]
+    for i, txn in enumerate(trace["txns"]):
+        ops = "; ".join(f"{p[0]},{p[1]},'{p[2]}'" for p in txn.get("patches", []))
+        lines.append(f'    t{i}["txn {i}, agent {txn.get("agent", 0)}<br/>{ops}"]')
+        parents = txn.get("parents", [i - 1] if i else [])
+        lines += [f"    t{p} --> t{i}" for p in parents]
+    return "\n".join(lines)
+
+
+# ── Provenance ──────────────────────────────────────────────────────────────
+
+
+def check_archive(data: Path = REPO / "data") -> pd.DataFrame:
+    """Compares each archived result CSV with its provenance file.
+
+    A file name that starts with a library name must match `run.crdt` in the
+    provenance. A CSV with no rows is a run that failed. One row per CSV that
+    has a provenance file.
+    """
+    rows = []
+    for csv in sorted(data.rglob("*.csv")):
+        meta_path = csv.with_suffix(".meta.json")
+        if not meta_path.exists():
+            continue
+        meta = json.loads(meta_path.read_text())
+        libraries = sorted(
+            {i.get("run", {}).get("crdt", "") for i in meta.get("invocations", [meta])} - {""}
+        )
+        named = csv.name.split("-")[0]
+        named = named if named in CRDTS else ""
+        empty = csv.stat().st_size == 0
+        agrees = not named or libraries == [named]
+        rows.append(
+            {
+                "file": str(csv.relative_to(data)),
+                "name says": named or "-",
+                "provenance says": ", ".join(libraries) or "-",
+                "csv rows": "none" if empty else "yes",
+                "verdict": "ok" if agrees else "WRONG LABEL",
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 # ── Charts ──────────────────────────────────────────────────────────────────

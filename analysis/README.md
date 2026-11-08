@@ -2,7 +2,12 @@
 
 [`tour.py`](tour.py) is a guided [marimo](https://marimo.io) notebook. It
 explains how Replicant works and how to read what it measures, and it runs
-small scenarios live. It is for a reader who knows CRDTs but not Replicant.
+small examples live. It is for a reader who knows CRDTs but not Replicant. It
+covers the principles and rules of Replicant, its crates and architecture (with
+diagrams of the sync protocols and of one trial), steady-state and
+partition-heal scenarios, the contention model, the convergence poll, the
+generation and replay of crdt-benchmarks traces, and four measurement faults,
+each as a worked example.
 
 ```sh
 just setup      # installs uv.lock into .venv, without the archive packages
@@ -22,9 +27,12 @@ cluster named `replicant`, and forwards the replicas to host ports `51051` and
 up and Grafana to `:3001`. Only one stack runs at a time: before the notebook
 starts one, it stops the other. It stops the kind stack by scaling its pods to
 zero, so the cluster stays. `just k8s-down` deletes the cluster.
-Every run is traced.
+Every run is traced. The notebook also builds the release `replay` binary. The
+replay examples of section 7 and some examples of section 8 need the trace
+files in `traces/`, which `just gen-traces <clone>` makes. Without them, those
+cells show a note and do not run.
 [`tour_helpers.py`](tour_helpers.py) holds the code that runs the
-orchestrator and draws the charts.
+orchestrator and the replay, and draws the charts.
 
 [`divergence.py`](divergence.py) is a second marimo notebook. It explains the
 divergence study: what a merge costs after replicas diverge, how a cell runs,
