@@ -49,13 +49,16 @@ the persisted state (`CrdtAdapter::sync_reconnect`).
 
 ### `automerge-apply-cost`: one change costs more to apply on a long history
 
-Automerge 0.12.0. A target applies 50 changes of one character each, one at a time,
-with `load_incremental`:
+Automerge 0.12.0. A target applies 20 changes of one character each, one at a time,
+with `load_incremental`, at each of five positions (the start, 25%, 50%, 75%, and
+the end of the text):
 
 | Document | Changes in history | Mean time of one apply |
 |---|---|---|
-| `paper` | 259,779 | 15.3-15.7 ms |
-| `small` (100 characters) | 1 | 0.018-0.019 ms |
+| `paper` | 259,779 | 15.3-16.2 ms at every position |
+| `small` (100 characters) | 1 | 0.017-0.019 ms at every position |
+
+The position of the change does not change the time.
 
 Why: the apply walks the operations of the document (`BatchApply::apply`, and
 `ChangeGraph::remove_ancestors` in a profile). This is the same mechanism as the
