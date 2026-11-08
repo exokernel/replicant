@@ -56,7 +56,7 @@ lint-sh:
     fi
     # -x follows each `. scripts/lib/...` so the shared functions are checked
     # against their call sites.
-    shellcheck -x scripts/*.sh scripts/lib/*.sh
+    shellcheck -x scripts/*.sh scripts/lib/*.sh tools/crdt-benchmarks/*.sh
 
 # Run all tests
 [group('develop')]
@@ -88,6 +88,28 @@ ci: fmt-check lint lint-sh test doc-check smoke check-scenarios
 [group('run')]
 run *args:
     cargo run --release --bin orchestrator -- {{ args }}
+
+# Replay workloads in-process (release build), e.g. `just replay --only b4 --trials 10`
+[group('run')]
+replay *args:
+    cargo run --release --bin replay -- {{ args }}
+
+# Replay workloads on containerized replicas, e.g. `just replay-docker 1 yrs --only b4`
+[group('docker')]
+replay-docker replicas crdt *args:
+    scripts/replay-docker.sh '{{ replicas }}' '{{ crdt }}' {{ args }}
+
+# Make the trace files in traces/ and the specs in workloads/ from a crdt-benchmarks clone
+[group('data')]
+gen-traces clone:
+    tools/crdt-benchmarks/gen-traces.sh '{{ clone }}'
+
+# Compare replay results with crdt-benchmarks results, on the versions the crates use
+[group('data')]
+calibrate clone trials='6' repeats='5':
+    tools/crdt-benchmarks/run-current.sh '{{ clone }}' results/calibration/js-work results/calibration/js '{{ repeats }}'
+    cargo run --release --bin replay -- --trials '{{ trials }}' --out results/calibration/replay.jsonl
+    {{ python }} tools/crdt-benchmarks/compare.py results/calibration/js results/calibration/replay.jsonl
 
 # ── Container stacks ────────────────────────────────────────────────────────
 #

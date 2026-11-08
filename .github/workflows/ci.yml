@@ -43,7 +43,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Install just
@@ -66,7 +66,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Install just
@@ -76,7 +76,7 @@ jobs:
       # gen-compose.py needs pyyaml. `just setup` installs the locked packages
       # into .venv, and the Justfile prefers that python3 when it exists.
       - name: Install uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@v10.3.3
       - name: Install Python packages
         run: just setup
       - name: Cache cargo build
@@ -88,4 +88,12 @@ jobs:
         run: |
           for crdt in $(just --evaluate crdts); do
             just smoke-docker scenarios/full-mesh-n2-text.toml "$crdt"
+          done
+      # One containerized replica runs the workload for one replica, and reports
+      # the workload for two replicas as skipped. The replay checks the content.
+      - name: Run a replay on one containerized replica for each CRDT library
+        run: |
+          for crdt in $(just --evaluate crdts); do
+            just replay-docker 1 "$crdt" --spec workloads/smoke.toml \
+              --data-dir workloads/fixtures --trials 1
           done

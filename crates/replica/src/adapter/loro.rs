@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use common::{CrdtAdapter, Op, ScalarVal};
 use loro::{ExportMode, LoroDoc, LoroValue, VersionVector};
 
@@ -27,6 +27,7 @@ use super::{map_name, require_name};
 ///    `export(ExportMode::updates(&their_vv))`. As with Yrs, the caller must
 ///    track what each peer has. See `peer_vv`.
 pub struct LoroAdapter {
+    /// The document.
     doc: LoroDoc,
     /// The version vector this adapter believes each peer has, based on what
     /// it has sent. Loro keeps no per-peer state (fact 2), so the adapter must.
@@ -38,6 +39,18 @@ pub struct LoroAdapter {
     /// replica's `flush_to_peers` loop and `sync_is_idempotent_once_converged`
     /// need that `None`.
     peer_vv: HashMap<String, VersionVector>,
+}
+
+/// Converts one Loro value to a [`ScalarVal`]. Fails on a value that the op
+/// model does not have.
+fn from_loro_value(value: &LoroValue) -> anyhow::Result<ScalarVal> {
+    Ok(match value {
+        LoroValue::String(s) => ScalarVal::Str(s.to_string()),
+        LoroValue::I64(n) => ScalarVal::Int(*n),
+        LoroValue::Bool(b) => ScalarVal::Bool(*b),
+        LoroValue::Binary(b) => ScalarVal::Bytes(b.to_vec()),
+        other => bail!("value {other:?} has no ScalarVal form"),
+    })
 }
 
 impl Default for LoroAdapter {
@@ -101,10 +114,9 @@ impl LoroAdapter {
             ScalarVal::Bytes(b) => LoroValue::Binary(b.clone().into()),
         })
     }
-}
 
-impl CrdtAdapter for LoroAdapter {
-    fn apply_op(&mut self, op: &Op) -> anyhow::Result<()> {
+    /// Applies `op` in the implicit transaction. Does not commit.
+    fn apply_uncommitted(&mut self, op: &Op) -> anyhow::Result<()> {
         // Every arm converts its inputs before the first edit. An error after
         // an edit would leave half an op in the implicit transaction, and the
         // next commit would keep it.
@@ -169,6 +181,13 @@ impl CrdtAdapter for LoroAdapter {
                     .splice(*pos, *del_count, insert)?;
             }
         }
+        Ok(())
+    }
+}
+
+impl CrdtAdapter for LoroAdapter {
+    fn apply_op(&mut self, op: &Op) -> anyhow::Result<()> {
+        self.apply_uncommitted(op)?;
         // Commit the implicit transaction now. Then `op_duration_ms` includes
         // the commit cost, and the next `sync_generate` sees exactly this
         // change. Without this, Loro commits lazily at the next export or
@@ -325,6 +344,94 @@ impl CrdtAdapter for LoroAdapter {
         require_name(obj)?;
         Ok(self.doc.get_text(obj).len_unicode())
     }
+
+    /// Sets the peer id. The high bit keeps the width of a random `u64` id.
+    fn set_instance_id(&mut self, id: u32) -> anyhow::Result<()> {
+        self.doc
+            .set_peer_id(u64::from(id) | (1 << 63))
+            .context("setting the Loro peer id")
+    }
+
+    /// Checks the name and authors no change. See `ensure_text`.
+    fn ensure_list(&mut self, obj: &str) -> anyhow::Result<()> {
+        require_name(obj)
+    }
+
+    /// Returns the text. An unused name is an empty text. See `text_length`.
+    fn read_text(&mut self, obj: &str) -> anyhow::Result<String> {
+        require_name(obj)?;
+        Ok(self.doc.get_text(obj).to_string())
+    }
+
+    /// Returns the list. An unused name is an empty list. See `text_length`.
+    fn read_list(&mut self, obj: &str) -> anyhow::Result<Vec<ScalarVal>> {
+        require_name(obj)?;
+        self.doc
+            .get_list(obj)
+            .to_vec()
+            .iter()
+            .map(from_loro_value)
+            .collect()
+    }
+
+    /// Returns the map. An unused name is an empty map. See `text_length`.
+    fn read_map(&mut self, obj: &str) -> anyhow::Result<BTreeMap<String, ScalarVal>> {
+        match self.doc.get_map(map_name(obj)).get_value() {
+            LoroValue::Map(values) => values
+                .iter()
+                .map(|(k, v)| Ok((k.clone(), from_loro_value(v)?)))
+                .collect(),
+            other => bail!("read_map: unexpected value {other:?}"),
+        }
+    }
+
+    fn apply_txn(&mut self, ops: &[Op]) -> anyhow::Result<Vec<u8>> {
+        if ops.is_empty() {
+            return Ok(Vec::new());
+        }
+        let before = self.doc.oplog_vv();
+        for op in ops {
+            self.apply_uncommitted(op)?;
+        }
+        self.doc.commit();
+        self.doc
+            .export(ExportMode::updates(&before))
+            .context("exporting a Loro update")
+    }
+
+    fn apply_updates(&mut self, updates: &[&[u8]]) -> anyhow::Result<()> {
+        // One update takes `import`. More take the batch path, which merges
+        // them before it updates the document state. That API needs owned bytes.
+        match updates {
+            [] => Ok(()),
+            [one] => self.doc.import(one).map(drop),
+            many => {
+                let owned: Vec<Vec<u8>> = many.iter().map(|update| update.to_vec()).collect();
+                self.doc.import_batch(&owned).map(drop)
+            }
+        }
+        .context("importing Loro updates")
+    }
+
+    /// Returns a snapshot: full history plus the materialized state.
+    fn encode(&mut self) -> Vec<u8> {
+        // See `doc_size_bytes` for why an error here is not fatal to the caller.
+        match self.doc.export(ExportMode::Snapshot) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::error!(error = %e, "Loro snapshot export failed");
+                Vec::new()
+            }
+        }
+    }
+
+    fn load(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
+        *self = Self::new();
+        self.doc
+            .import(bytes)
+            .context("importing a Loro snapshot")?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -333,119 +440,42 @@ mod tests {
     use crate::adapter::conformance::*;
     use common::{CrdtAdapter, Op};
 
-    // ── Universal conformance (see adapter::conformance) ───────────────────
-
-    #[test]
-    fn loro_identical_ops_yield_equal_fingerprints() {
-        identical_ops_yield_equal_fingerprints::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_disjoint_edits_converge_after_sync() {
-        disjoint_edits_converge_after_sync::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_concurrent_edits_to_same_key_converge() {
-        concurrent_edits_to_same_key_converge::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_post_sync_divergence_is_detected() {
-        post_sync_divergence_is_detected::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_root_map_ops_are_supported() {
-        root_map_ops_are_supported::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_each_op_variant_mutates_the_doc() {
-        each_op_variant_mutates_the_doc::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_reads_are_stable_without_writes() {
-        reads_are_stable_without_writes::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_sync_is_idempotent_once_converged() {
-        sync_is_idempotent_once_converged::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_three_replicas_converge_through_a_hub() {
-        three_replicas_converge_through_a_hub::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_reset_returns_adapter_to_a_fresh_state() {
-        reset_returns_adapter_to_a_fresh_state::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_reset_drops_stale_peer_state() {
-        reset_drops_stale_peer_state::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_reset_allows_clean_re_sync_with_equal_fingerprint() {
-        reset_allows_clean_re_sync_with_equal_fingerprint::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_ensure_text_is_idempotent() {
-        ensure_text_is_idempotent::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_partitioned_text_edits_interleave_after_bootstrap() {
-        partitioned_text_edits_interleave_after_bootstrap::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_ensure_text_adopts_synced_in_object() {
-        ensure_text_adopts_synced_in_object::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_first_local_write_reuses_synced_in_object() {
-        first_local_write_reuses_synced_in_object::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_sync_reset_forgets_quiescence() {
-        sync_reset_forgets_quiescence::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_sync_reset_recovers_from_a_lost_message() {
-        sync_reset_recovers_from_a_lost_message::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_sync_reset_unknown_peer_is_noop() {
-        sync_reset_unknown_peer_is_noop::<LoroAdapter>();
-    }
-
-    // ── Characterization shared with Yrs (see adapter::conformance) ────────
-
-    #[test]
-    fn loro_ensure_text_is_a_pure_lookup_no_change_authored() {
-        ensure_text_is_a_pure_lookup_no_change_authored::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_partitioned_text_edits_interleave_even_without_ensure_text() {
-        partitioned_text_edits_interleave_even_without_ensure_text::<LoroAdapter>();
-    }
-
-    #[test]
-    fn loro_uint_above_i64_max_is_rejected() {
-        uint_above_i64_max_is_rejected::<LoroAdapter>();
-    }
+    conformance_tests!(
+        LoroAdapter:
+        // Universal conformance.
+        reads_return_the_written_content,
+        txn_updates_carry_inserts_and_deletes,
+        txn_applies_ops_in_sequence,
+        txn_update_excludes_received_ops,
+        update_batch_equals_one_by_one,
+        encode_and_load_round_trip,
+        partitioned_list_inserts_merge_after_ensure_list,
+        set_instance_id_gives_distinct_replicas,
+        fixed_ids_make_a_merge_repeatable,
+        identical_ops_yield_equal_fingerprints,
+        disjoint_edits_converge_after_sync,
+        concurrent_edits_to_same_key_converge,
+        post_sync_divergence_is_detected,
+        root_map_ops_are_supported,
+        each_op_variant_mutates_the_doc,
+        reads_are_stable_without_writes,
+        sync_is_idempotent_once_converged,
+        three_replicas_converge_through_a_hub,
+        reset_returns_adapter_to_a_fresh_state,
+        reset_drops_stale_peer_state,
+        reset_allows_clean_re_sync_with_equal_fingerprint,
+        ensure_text_is_idempotent,
+        partitioned_text_edits_interleave_after_bootstrap,
+        ensure_text_adopts_synced_in_object,
+        first_local_write_reuses_synced_in_object,
+        sync_reset_forgets_quiescence,
+        sync_reset_recovers_from_a_lost_message,
+        sync_reset_unknown_peer_is_noop,
+        // Characterization shared with Yrs.
+        ensure_text_is_a_pure_lookup_no_change_authored,
+        partitioned_text_edits_interleave_even_without_ensure_text,
+        uint_above_i64_max_is_rejected,
+    );
 
     // Not wrapped here. Each has a test that asserts what Loro does instead,
     // above or below:

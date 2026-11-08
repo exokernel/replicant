@@ -1,18 +1,19 @@
 //! Generic conformance suite for any [`CrdtAdapter`] implementation.
 //!
 //! Every function here is generic over the adapter. Each adapter module
-//! (`automerge.rs`, `yrs.rs`, `loro.rs`) wraps the functions it supports in a
-//! `#[test]`. If an adapter does not wrap a function, that is a known
+//! (`automerge.rs`, `yrs.rs`, `loro.rs`) names the functions it supports in one
+//! `conformance_tests!` call. The macro makes each function a `#[test]`. If an
+//! adapter does not name a function, that is a known
 //! difference, not an omission. A mirror test then asserts what the adapter
 //! does instead. The mirror is in the adapter's own test module, or here if
 //! more than one adapter needs it.
 //!
-//! A new adapter is complete when every function that it wraps passes.
+//! A new adapter is complete when every function that it names passes.
 //!
 //! # Two kinds of function
 //!
 //! - **Universal**: a property that every adapter must have. Every adapter
-//!   wraps these.
+//!   names these.
 //! - **Characterization** (marked `ACCOMMODATION` in the doc comment): a
 //!   property that only some libraries have. These stay here, not in one
 //!   adapter module, because the body uses no library-specific code and a
@@ -27,6 +28,27 @@
 //! `ensure_text_is_a_pure_lookup_no_change_authored` is.
 
 use common::{CrdtAdapter, Op, ScalarVal};
+
+/// Defines one `#[test]` per conformance function, for one adapter.
+///
+/// The tests go in a `suite` module, so that a test name cannot hide a function
+/// that the adapter's own tests call. The list stays explicit, so a function that
+/// an adapter leaves out is visible.
+macro_rules! conformance_tests {
+    ($adapter:ty: $($name:ident,)+) => {
+        mod suite {
+            use super::*;
+
+            $(
+                #[test]
+                fn $name() {
+                    $crate::adapter::conformance::$name::<$adapter>();
+                }
+            )+
+        }
+    };
+}
+pub(crate) use conformance_tests;
 
 /// Sends sync messages between two adapters until both return `None`.
 /// `None` means that each side believes the other is up to date.
@@ -963,4 +985,217 @@ pub(crate) fn save_bytes_not_canonical_across_converged_replicas<A: CrdtAdapter 
         "save() became canonical across line replicas — sizes: {sizes:?}. \
          Tighten the notebook doc-size table to strict equality.",
     );
+}
+
+// ── Replay surface (read-back, updates, encode and load) ───────────────────
+
+fn splice(pos: usize, del_count: usize, insert: &str) -> Op {
+    Op::TextSplice {
+        obj: "text".into(),
+        pos,
+        del_count,
+        insert: insert.into(),
+    }
+}
+
+fn list_insert(index: usize, value: i64) -> Op {
+    Op::ListInsert {
+        obj: "list".into(),
+        index,
+        value: ScalarVal::Int(value),
+    }
+}
+
+/// `read_text`, `read_list`, and `read_map` return what the ops wrote.
+pub(crate) fn reads_return_the_written_content<A: CrdtAdapter + Default>() {
+    let mut a = A::default();
+    a.ensure_text("text").unwrap();
+    a.apply_op(&splice(0, 0, "hello")).unwrap();
+    a.apply_op(&splice(1, 3, "ipp")).unwrap();
+    assert_eq!(a.read_text("text").unwrap(), "hippo");
+
+    let mut b = A::default();
+    b.ensure_list("list").unwrap();
+    b.apply_op(&Op::ListSplice {
+        obj: "list".into(),
+        pos: 0,
+        del_count: 0,
+        values: vec![ScalarVal::Int(7), ScalarVal::Str("x".into())],
+    })
+    .unwrap();
+    b.apply_op(&list_insert(1, 8)).unwrap();
+    assert_eq!(
+        b.read_list("list").unwrap(),
+        vec![
+            ScalarVal::Int(7),
+            ScalarVal::Int(8),
+            ScalarVal::Str("x".into())
+        ]
+    );
+
+    let mut c = A::default();
+    c.apply_op(&map_put("", "n", ScalarVal::Int(-3))).unwrap();
+    c.apply_op(&map_put("", "s", "v")).unwrap();
+    let map = c.read_map("").unwrap();
+    assert_eq!(map.get("n"), Some(&ScalarVal::Int(-3)));
+    assert_eq!(map.get("s"), Some(&ScalarVal::Str("v".into())));
+    assert_eq!(map.len(), 2);
+}
+
+/// An update from `apply_txn` carries its ops to another replica. This must
+/// also hold for a delete made after the two replicas agreed. A library can
+/// record a delete apart from its inserts.
+pub(crate) fn txn_updates_carry_inserts_and_deletes<A: CrdtAdapter + Default>() {
+    let (mut a, mut b) = (A::default(), A::default());
+    a.ensure_text("text").unwrap();
+    b.ensure_text("text").unwrap();
+
+    let u1 = a.apply_txn(&[splice(0, 0, "abcdef")]).unwrap();
+    b.apply_updates(&[u1.as_slice()]).unwrap();
+    assert_eq!(b.read_text("text").unwrap(), "abcdef");
+
+    let u2 = a.apply_txn(&[splice(1, 2, "")]).unwrap();
+    b.apply_updates(&[u2.as_slice()]).unwrap();
+    assert_eq!(b.read_text("text").unwrap(), "adef");
+    assert_eq!(a.read_text("text").unwrap(), "adef");
+}
+
+/// All ops of one `apply_txn` go in one update, and later ops see earlier ones.
+pub(crate) fn txn_applies_ops_in_sequence<A: CrdtAdapter + Default>() {
+    let (mut a, mut b) = (A::default(), A::default());
+    a.ensure_text("text").unwrap();
+    b.ensure_text("text").unwrap();
+    let update = a
+        .apply_txn(&[splice(0, 0, "ac"), splice(1, 0, "b"), splice(0, 1, "z")])
+        .unwrap();
+    b.apply_updates(&[update.as_slice()]).unwrap();
+    assert_eq!(a.read_text("text").unwrap(), "zbc");
+    assert_eq!(b.read_text("text").unwrap(), "zbc");
+    assert!(a.apply_txn(&[]).unwrap().is_empty());
+}
+
+/// An update holds only the ops of its own transaction. It does not repeat ops
+/// that the replica received from a peer. Otherwise update size counts the same
+/// ops twice.
+pub(crate) fn txn_update_excludes_received_ops<A: CrdtAdapter + Default>() {
+    let (mut a, mut b) = (A::default(), A::default());
+    a.ensure_text("text").unwrap();
+    b.ensure_text("text").unwrap();
+    let big = "x".repeat(4000);
+    let received = a.apply_txn(&[splice(0, 0, &big)]).unwrap();
+    b.apply_updates(&[received.as_slice()]).unwrap();
+
+    let own = b.apply_txn(&[splice(0, 0, "y")]).unwrap();
+    assert!(
+        own.len() < received.len() / 2,
+        "own update has {} bytes, the received update has {}",
+        own.len(),
+        received.len()
+    );
+}
+
+/// Several updates in one `apply_updates` call give the same text as one call
+/// per update.
+pub(crate) fn update_batch_equals_one_by_one<A: CrdtAdapter + Default>() {
+    let mut a = A::default();
+    a.ensure_text("text").unwrap();
+    let updates: Vec<Vec<u8>> = (0..20)
+        .map(|i| a.apply_txn(&[splice(i, 0, "k")]).unwrap())
+        .collect();
+
+    let (mut batch, mut single) = (A::default(), A::default());
+    batch.ensure_text("text").unwrap();
+    single.ensure_text("text").unwrap();
+    let slices: Vec<&[u8]> = updates.iter().map(Vec::as_slice).collect();
+    batch.apply_updates(&slices).unwrap();
+    for update in &updates {
+        single.apply_updates(&[update.as_slice()]).unwrap();
+    }
+    let expected = a.read_text("text").unwrap();
+    assert_eq!(batch.read_text("text").unwrap(), expected);
+    assert_eq!(single.read_text("text").unwrap(), expected);
+}
+
+/// `encode` then `load` keeps text, list, and map content. The loaded replica
+/// can continue to edit. `doc_size_bytes` is the length of `encode`.
+pub(crate) fn encode_and_load_round_trip<A: CrdtAdapter + Default>() {
+    let mut text = A::default();
+    text.ensure_text("text").unwrap();
+    text.apply_op(&splice(0, 0, "hello")).unwrap();
+    text.apply_op(&splice(0, 1, "")).unwrap();
+    let bytes = text.encode();
+    assert_eq!(bytes.len(), text.doc_size_bytes());
+    let mut loaded = A::default();
+    loaded.load(&bytes).unwrap();
+    assert_eq!(loaded.read_text("text").unwrap(), "ello");
+    loaded.apply_op(&splice(0, 0, "h")).unwrap();
+    assert_eq!(loaded.read_text("text").unwrap(), "hello");
+
+    let mut list = A::default();
+    list.ensure_list("list").unwrap();
+    list.apply_op(&list_insert(0, 1)).unwrap();
+    let mut loaded = A::default();
+    loaded.load(&list.encode()).unwrap();
+    assert_eq!(loaded.read_list("list").unwrap(), vec![ScalarVal::Int(1)]);
+
+    let mut map = A::default();
+    map.apply_op(&map_put("", "k", "v")).unwrap();
+    let mut loaded = A::default();
+    loaded.load(&map.encode()).unwrap();
+    assert_eq!(
+        loaded.read_map("").unwrap().get("k"),
+        Some(&ScalarVal::Str("v".into()))
+    );
+}
+
+/// After `ensure_list`, two replicas that never synced share one list. Without
+/// this, Automerge keeps one side's list and discards the other's inserts.
+pub(crate) fn partitioned_list_inserts_merge_after_ensure_list<A: CrdtAdapter + Default>() {
+    let (mut a, mut b) = (A::default(), A::default());
+    a.ensure_list("list").unwrap();
+    b.ensure_list("list").unwrap();
+    let ua = a.apply_txn(&[list_insert(0, 1)]).unwrap();
+    let ub = b.apply_txn(&[list_insert(0, 2)]).unwrap();
+    a.apply_updates(&[ub.as_slice()]).unwrap();
+    b.apply_updates(&[ua.as_slice()]).unwrap();
+    let merged = a.read_list("list").unwrap();
+    assert_eq!(merged.len(), 2, "a merge lost one side: {merged:?}");
+    assert_eq!(merged, b.read_list("list").unwrap());
+}
+
+/// After `set_instance_id`, an edit works and syncs to another replica. Two ids
+/// give two distinct replicas, so both sides' ops survive.
+pub(crate) fn set_instance_id_gives_distinct_replicas<A: CrdtAdapter + Default>() {
+    let (mut a, mut b) = (A::default(), A::default());
+    a.set_instance_id(1).unwrap();
+    b.set_instance_id(2).unwrap();
+    a.ensure_text("text").unwrap();
+    b.ensure_text("text").unwrap();
+    let ua = a.apply_txn(&[splice(0, 0, "a")]).unwrap();
+    let ub = b.apply_txn(&[splice(0, 0, "b")]).unwrap();
+    a.apply_updates(&[ub.as_slice()]).unwrap();
+    b.apply_updates(&[ua.as_slice()]).unwrap();
+    let merged = a.read_text("text").unwrap();
+    assert_eq!(merged.chars().count(), 2);
+    assert_eq!(merged, b.read_text("text").unwrap());
+}
+
+/// The same ids give the same order of concurrent inserts on each run.
+pub(crate) fn fixed_ids_make_a_merge_repeatable<A: CrdtAdapter + Default>() {
+    let run = || {
+        let (mut a, mut b) = (A::default(), A::default());
+        a.set_instance_id(1).unwrap();
+        b.set_instance_id(2).unwrap();
+        a.ensure_text("text").unwrap();
+        b.ensure_text("text").unwrap();
+        let ua = a.apply_txn(&[splice(0, 0, "aaa")]).unwrap();
+        let ub = b.apply_txn(&[splice(0, 0, "bbb")]).unwrap();
+        a.apply_updates(&[ub.as_slice()]).unwrap();
+        b.apply_updates(&[ua.as_slice()]).unwrap();
+        a.read_text("text").unwrap()
+    };
+    let first = run();
+    for _ in 0..8 {
+        assert_eq!(run(), first);
+    }
 }

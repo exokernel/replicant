@@ -16,3 +16,6 @@ __marimo__/
 
 # Personal study notebook for porting crdt-benchmarks. Not part of the repository.
 /analysis/benchmark-study.md
+
+# Trace files for the replay binary. `just gen-traces` makes them.
+/traces/

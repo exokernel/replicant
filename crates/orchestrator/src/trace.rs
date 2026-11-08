@@ -22,6 +22,7 @@ pub struct Trace {
     origin: Instant,
     /// `false` makes every recording method a no-op.
     enabled: bool,
+    /// Each event, with its time in milliseconds since `origin`.
     events: Vec<(f64, Event)>,
     /// Each distinct non-empty fingerprint seen so far, in order of first
     /// appearance. A fingerprint's index here is its class.
@@ -35,13 +36,20 @@ pub enum Event {
     /// Every link is open. `blocked` lists the links that drop all traffic
     /// until the heal.
     Wired {
+        /// Every wired link.
         edges: Vec<(usize, usize)>,
+        /// The wired links that drop all traffic until the heal.
         blocked: Vec<(usize, usize)>,
     },
     /// `convergence_ms` counts from here.
     ClockStart,
     /// Write number `op` was applied at `node`.
-    Write { node: usize, op: usize },
+    Write {
+        /// The node that applied the write.
+        node: usize,
+        /// The write number.
+        op: usize,
+    },
     /// The blocked links were unblocked. The heal starts.
     Unblocked,
     /// A sync handshake was sent on each healed link.
@@ -50,16 +58,24 @@ pub enum Event {
     /// `nodes[i]`: replicas in the same class have the same state. `None`
     /// means the replica has no operations yet.
     Poll {
+        /// The polled nodes.
         nodes: Vec<usize>,
+        /// The fingerprint class of each polled node.
         classes: Vec<Option<usize>>,
     },
     /// Every node in `nodes` has the same fingerprint.
-    Converged { nodes: Vec<usize> },
+    Converged {
+        /// The nodes that agree.
+        nodes: Vec<usize>,
+    },
     /// What `node` reported after the trial, outside the timed window: its
     /// document size, and its sync message counts for each peer.
     Stats {
+        /// The reporting node.
         node: usize,
+        /// The length of the encoded document, in bytes.
         doc_size_bytes: u64,
+        /// The sync message counts for each peer.
         peers: Vec<PeerStats>,
     },
 }
@@ -67,19 +83,26 @@ pub enum Event {
 /// Sync message counts on the link from one replica to `peer`.
 #[derive(Serialize)]
 pub struct PeerStats {
+    /// The peer's node index.
     pub peer: usize,
+    /// Messages sent to the peer.
     pub tx: u64,
+    /// Messages received from the peer.
     pub rx: u64,
+    /// Flushes skipped because the channel to the peer was full.
     pub deferred: u64,
 }
 
 /// One line of the trace file.
 #[derive(Serialize)]
 struct Line<'a> {
+    /// The scenario name.
     scenario: &'a str,
+    /// The trial number.
     trial: usize,
     /// Milliseconds since the trial started.
     t_ms: f64,
+    /// The event. Its fields appear at the top level of the line.
     #[serde(flatten)]
     event: &'a Event,
 }

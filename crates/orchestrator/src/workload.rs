@@ -68,6 +68,7 @@ impl Locality {
 /// versions. Seeds are recorded in results metadata; the same seed replays the
 /// identical op stream against any adapter (Automerge, Yrs, …).
 pub struct SplitMix64 {
+    /// The counter that each draw advances.
     state: u64,
 }
 
@@ -125,8 +126,11 @@ pub fn seed_for(config: &PartitionConfig, node: usize, repetition: usize) -> u64
 /// [`crate::partition_heal`] sends these positions to the replicas, and
 /// [`crate::contention`] reads the same stream to measure it.
 pub struct PositionStream {
+    /// The rule that picks each position.
     locality: Locality,
+    /// The source of random draws.
     rng: SplitMix64,
+    /// The simulated text length so far.
     len: usize,
 }
 

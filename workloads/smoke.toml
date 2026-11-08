@@ -1,0 +1,15 @@
+# A tiny workload that checks the replay path end to end, with no generated data.
+# Run it with --data-dir workloads/fixtures. CI runs it on a containerized replica.
+
+[[workload]]
+name = "smoke.single"
+description = "One replica: text inserts and a delete"
+trace = "smoke-text.trace.json"
+sha256 = "d49ad91a6c882150cf0d7b020beaf3228b72bb72547da7e299fa355bd028a81e"
+
+[[workload]]
+name = "smoke.receiver"
+description = "Two replicas: a writer and a receiver"
+trace = "smoke-text.trace.json"
+sha256 = "d49ad91a6c882150cf0d7b020beaf3228b72bb72547da7e299fa355bd028a81e"
+receivers = 1

@@ -84,8 +84,8 @@ for n in "${ns[@]}"; do
     #
     # Waiting for the totals to stop changing covers both: quiescence
     # implies delivery has caught up, whatever the pipeline latency is.
-    # Liveness is checked on doc_size_bytes rather than on tx, because
-    # doc_size is emitted on every local op and so exists even for a
+    # Liveness is checked on the op duration histogram rather than on tx,
+    # because it records every local op and so exists even for a
     # single-replica scenario that never syncs. The `or vector(...)`
     # fallbacks turn "series absent" into a stable sentinel, so an absent
     # counter compares equal to itself instead of alternating with an
@@ -98,7 +98,7 @@ for n in "${ns[@]}"; do
     prev="init"
     while :; do
         sleep 3
-        live=$(promq 'count(replicant_doc_size_bytes) or vector(0)') || live=0
+        live=$(promq 'count(replicant_op_duration_milliseconds_count) or vector(0)') || live=0
         cur=$(promq 'sum(replicant_sync_messages_tx_total) or vector(-1)') || cur="none"
         if [ "${live:-0}" != "0" ] && [ "$cur" = "$prev" ]; then
             break  # delivered, and unchanged across two reads 3s apart

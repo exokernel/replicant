@@ -32,6 +32,7 @@ fn parse_node_id(s: &str) -> Result<NodeId, String> {
     NodeId::new(s).map_err(|e| e.to_string())
 }
 
+/// The command-line arguments.
 #[derive(clap::Parser)]
 #[command(about = "Replicant replica process")]
 struct Args {

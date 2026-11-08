@@ -1,12 +1,16 @@
 //! [`common::CrdtAdapter`] implementations, one per CRDT library.
 //!
-//! Each submodule holds one adapter struct. It also holds the `#[test]`
-//! wrappers that run the generic functions of the `conformance` test module
-//! against that adapter. A new adapter is complete when every generic function
-//! it wraps passes. The `conformance` module doc defines "generic" and "wraps".
+//! Each submodule holds one adapter struct. It also holds one
+//! `conformance_tests!` call, which runs the generic functions of the
+//! `conformance` test module against that adapter. A new adapter is complete when
+//! every function that it names passes. The `conformance` module doc explains
+//! the two kinds of function.
 
+/// The adapter for Automerge.
 mod automerge;
+/// The adapter for Loro.
 mod loro;
+/// The adapter for Yrs.
 mod yrs;
 
 pub use automerge::AutomergeAdapter;
@@ -62,8 +66,11 @@ pub(crate) fn require_name(obj: &str) -> anyhow::Result<()> {
 /// [`std::str::FromStr`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Crdt {
+    /// [`AutomergeAdapter`].
     Automerge,
+    /// [`YrsAdapter`].
     Yrs,
+    /// [`LoroAdapter`].
     Loro,
 }
 

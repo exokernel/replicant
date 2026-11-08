@@ -1,6 +1,8 @@
 //! [`CrdtAdapter`], the interface that each CRDT backend implements.
 
-use crate::Op;
+use std::collections::BTreeMap;
+
+use crate::{Op, ScalarVal};
 
 /// The library-agnostic interface between the replica scaffolding and a CRDT
 /// library.
@@ -133,4 +135,69 @@ pub trait CrdtAdapter: Send + 'static {
     /// `verify_text_length` does this. With a wrong object name, it fails
     /// on a length mismatch instead of an error.
     fn text_length(&mut self, obj: &str) -> anyhow::Result<usize>;
+
+    /// Sets the id that the library uses for this replica's ops. Call this on
+    /// an empty document.
+    ///
+    /// The library breaks ties between concurrent ops with this id. It is random
+    /// by default, so a replay can have a different result on each run. A replay
+    /// sets a fixed id for each agent, and the ids must differ. The adapter keeps
+    /// the encoded width of a random id, so a fixed id does not change the
+    /// document size.
+    fn set_instance_id(&mut self, id: u32) -> anyhow::Result<()>;
+
+    /// Creates the named list object under ROOT, so that every replica has the
+    /// same object identity without any sync.
+    ///
+    /// The contract is the same as [`Self::ensure_text`]. Call this before
+    /// concurrent list writes on replicas that have not synced.
+    fn ensure_list(&mut self, obj: &str) -> anyhow::Result<()>;
+
+    /// Returns the content of the named text object.
+    ///
+    /// The replay driver compares this with the expected content of a
+    /// workload. Returns an error if the object does not exist, where the
+    /// library can express that. See [`Self::text_length`].
+    fn read_text(&mut self, obj: &str) -> anyhow::Result<String>;
+
+    /// Returns the content of the named list object. See [`Self::read_text`].
+    fn read_list(&mut self, obj: &str) -> anyhow::Result<Vec<ScalarVal>>;
+
+    /// Returns the content of the named map object. An empty `obj` names ROOT.
+    ///
+    /// An adapter stores [`ScalarVal::Uint`] as a signed integer if the library
+    /// has no unsigned type. So a replay workload must use
+    /// [`ScalarVal::Int`] to compare the same value on every adapter.
+    fn read_map(&mut self, obj: &str) -> anyhow::Result<BTreeMap<String, ScalarVal>>;
+
+    /// Applies `ops` in one library transaction. Returns the update that holds
+    /// these ops and no others.
+    ///
+    /// [`Self::apply_updates`] on another replica accepts the update. The
+    /// update contains the deletes of this transaction. Returns an empty vector
+    /// if `ops` is empty.
+    ///
+    /// If this returns an error, the document state is not specified. Call
+    /// [`Self::reset`] before the next use.
+    fn apply_txn(&mut self, ops: &[Op]) -> anyhow::Result<Vec<u8>>;
+
+    /// Applies updates that [`Self::apply_txn`] returned on another replica.
+    ///
+    /// The caller must give the updates in causal order. An adapter can use a
+    /// batch path for all `updates` in one call. Each adapter uses the same path
+    /// as its crdt-benchmarks factory, so that the two can be compared: Yrs uses
+    /// one transaction, Loro uses a batch import, and Automerge applies one
+    /// update at a time.
+    fn apply_updates(&mut self, updates: &[&[u8]]) -> anyhow::Result<()>;
+
+    /// Returns the full encoded document. [`Self::load`] accepts it.
+    ///
+    /// [`Self::doc_size_bytes`] returns the length of this encoding.
+    fn encode(&mut self) -> Vec<u8>;
+
+    /// Replaces the document with one that [`Self::encode`] returned.
+    ///
+    /// This discards all per-peer sync state. The adapter takes a new instance
+    /// id, so it is a different replica from the one that encoded the document.
+    fn load(&mut self, bytes: &[u8]) -> anyhow::Result<()>;
 }

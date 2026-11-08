@@ -121,7 +121,7 @@ async fn spawn_node(
             tracing::error!("replica server exited with error: {e:#}");
         }
     });
-    let client = ReplicaClient::connect(format!("http://{addr}")).await?;
+    let client = common::connect_replica(&addr.to_string()).await?;
     Ok((ReplicaEndpoint::loopback(addr.to_string()), client))
 }
 
@@ -150,7 +150,7 @@ pub async fn spawn_nodes(
 async fn connect_external(endpoints: &[ReplicaEndpoint]) -> Result<Vec<Client>> {
     let mut clients = Vec::with_capacity(endpoints.len());
     for ep in endpoints {
-        let mut client = ReplicaClient::connect(format!("http://{}", ep.client_addr))
+        let mut client = common::connect_replica(&ep.client_addr)
             .await
             .with_context(|| format!("connecting to external replica at {}", ep.client_addr))?;
         fingerprint(&mut client)
@@ -340,7 +340,7 @@ pub async fn kick_sync_edges(clients: &[Client], edges: &[(usize, usize)]) -> Re
 // ── Writes ─────────────────────────────────────────────────────────────────
 
 /// Name of the shared text object that every `TextSplice` workload writes to.
-pub const TEXT_OBJ: &str = "text";
+pub use common::TEXT_OBJ;
 
 /// Applies one `MapPut` to the root map.
 pub async fn map_put(client: &mut Client, key: &str, val: &str) -> Result<()> {
@@ -469,14 +469,17 @@ pub async fn wait_for_nodes(
     }
 }
 
-/// Records each node's `GetStats` reply in `trace`. Does nothing when `trace`
-/// is disabled. Call it after the timed window.
+/// Calls `GetStats` on each node and records the replies in `trace`.
+///
+/// Call it after the timed window. Each call does a full encode of the document.
+/// The call also makes the replica record its `replicant.doc.size_bytes` gauge,
+/// so run it also when `trace` is disabled.
 pub async fn record_stats(clients: &mut [Client], trace: &mut Trace) -> Result<()> {
-    if !trace.enabled() {
-        return Ok(());
-    }
     for (node, client) in clients.iter_mut().enumerate() {
         let stats = client.get_stats(Request::new(Empty {})).await?.into_inner();
+        if !trace.enabled() {
+            continue;
+        }
         let peers = stats
             .peers
             .into_iter()

@@ -25,15 +25,18 @@ use common::proto::{
     replica_server::{Replica, ReplicaServer},
     sync_server::SyncServer,
 };
-use common::{CrdtAdapter, Op};
+use common::{CrdtAdapter, MAX_RPC_BYTES, Op};
 
 use crate::metrics::Metrics;
 
 /// Sync message counts on the link to one peer.
 #[derive(Clone, Copy, Default)]
 struct PeerCounts {
+    /// Messages sent to the peer.
     tx: u64,
+    /// Messages received from the peer.
     rx: u64,
+    /// Flushes skipped because the channel to the peer was full.
     deferred: u64,
 }
 
@@ -117,14 +120,17 @@ impl ReplicaState {
         self.adapter.lock().expect("adapter mutex poisoned")
     }
 
+    /// Locks and returns the outbound channel of each peer.
     fn peer_txs(&self) -> MutexGuard<'_, HashMap<NodeId, mpsc::Sender<Vec<u8>>>> {
         self.peer_txs.lock().expect("peer_txs mutex poisoned")
     }
 
+    /// Locks and returns the task of each peer stream.
     fn peer_tasks(&self) -> MutexGuard<'_, Vec<JoinHandle<()>>> {
         self.peer_tasks.lock().expect("peer_tasks mutex poisoned")
     }
 
+    /// Locks and returns the peers whose links are blocked.
     fn blocked(&self) -> MutexGuard<'_, HashSet<NodeId>> {
         self.blocked_peers
             .lock()
@@ -145,36 +151,55 @@ impl ReplicaState {
         Ok(t0.elapsed().as_secs_f64() * 1000.0)
     }
 
+    /// Runs `f` on the adapter. Returns its result and the time in the adapter
+    /// in nanoseconds. The timer starts after the lock is acquired, as in
+    /// [`Self::apply_op_timed`].
+    fn timed<T>(&self, f: impl FnOnce(&mut dyn CrdtAdapter) -> T) -> (T, u64) {
+        let mut adapter = self.adapter();
+        let t0 = Instant::now();
+        let out = f(adapter.as_mut());
+        (out, t0.elapsed().as_nanos() as u64)
+    }
+
+    /// Returns the document heads. See [`CrdtAdapter::get_heads`].
     fn get_heads(&self) -> Vec<Vec<u8>> {
         self.adapter().get_heads()
     }
 
+    /// Returns the fingerprint. See [`CrdtAdapter::state_fingerprint`].
     fn state_fingerprint(&self) -> Vec<u8> {
         self.adapter().state_fingerprint()
     }
 
+    /// Returns the encoded size. This does a full encode of the document.
     fn doc_size_bytes(&self) -> usize {
         self.adapter().doc_size_bytes()
     }
 
+    /// Returns the next sync message for `peer`. See
+    /// [`CrdtAdapter::sync_generate`].
     fn sync_generate(&self, peer: &str) -> Option<Vec<u8>> {
         self.adapter().sync_generate(peer)
     }
 
+    /// Applies a sync message from `peer`. See [`CrdtAdapter::sync_receive`].
     fn sync_receive(&self, peer: &str, msg: Vec<u8>) -> anyhow::Result<()> {
         self.adapter().sync_receive(peer, msg)
     }
 
+    /// Creates the text object. See [`CrdtAdapter::ensure_text`].
     fn ensure_text(&self, obj: &str) -> anyhow::Result<()> {
         self.adapter().ensure_text(obj)
     }
 
+    /// Returns the text length. See [`CrdtAdapter::text_length`].
     fn text_length(&self, obj: &str) -> anyhow::Result<usize> {
         self.adapter().text_length(obj)
     }
 
     // ── Peer links ─────────────────────────────────────────────────────────
 
+    /// Returns true if the link to `peer` is blocked.
     fn is_blocked(&self, peer: &str) -> bool {
         self.blocked().contains(peer)
     }
@@ -223,6 +248,7 @@ impl ReplicaState {
     // These methods attach the attributes that each instrument expects. Add
     // new attributes here, not at the call sites.
 
+    /// Records the time of one op in the op duration histogram.
     fn record_op_duration(&self, op_name: &'static str, elapsed_ms: f64) {
         self.metrics.op_duration_ms.record(
             elapsed_ms,
@@ -231,23 +257,26 @@ impl ReplicaState {
     }
 
     /// Samples the document size and records it on the gauge.
-    fn record_doc_size(&self) {
-        self.metrics.doc_size_bytes.record(
-            self.doc_size_bytes() as u64,
-            std::slice::from_ref(&self.actor_attr),
-        );
+    /// Records the document size gauge.
+    fn record_doc_size(&self, size_bytes: u64) {
+        self.metrics
+            .doc_size_bytes
+            .record(size_bytes, std::slice::from_ref(&self.actor_attr));
     }
 
+    /// Counts one sync message sent to `peer_id`.
     fn record_sync_tx(&self, peer_id: &NodeId) {
         self.metrics.sync_tx.add(1, &self.peer_attrs(peer_id));
         self.count(peer_id, |c| c.tx += 1);
     }
 
+    /// Counts one sync message received from `peer_id`.
     fn record_sync_rx(&self, peer_id: &NodeId) {
         self.metrics.sync_rx.add(1, &self.peer_attrs(peer_id));
         self.count(peer_id, |c| c.rx += 1);
     }
 
+    /// Counts one flush to `peer_id` that was skipped, because the channel was full.
     fn record_sync_deferred(&self, peer_id: &NodeId) {
         self.metrics.sync_deferred.add(1, &self.peer_attrs(peer_id));
         self.count(peer_id, |c| c.deferred += 1);
@@ -263,7 +292,12 @@ impl ReplicaState {
     }
 
     /// Returns the document size and the per-peer sync counts since the last
-    /// reset, sorted by peer ID.
+    /// reset, sorted by peer ID. Also records the size gauge.
+    ///
+    /// This is the only place that records the gauge. The size comes from a
+    /// full encode of the document, and its cost grows with the document. Do
+    /// not call this on the op path or the sync path. There it adds a full
+    /// encode to each op and to each sync message.
     fn stats(&self) -> proto::ReplicaStats {
         let mut peers: Vec<proto::PeerStats> = self
             .peer_stats
@@ -278,8 +312,10 @@ impl ReplicaState {
             })
             .collect();
         peers.sort_by(|a, b| a.peer_id.cmp(&b.peer_id));
+        let doc_size_bytes = self.doc_size_bytes() as u64;
+        self.record_doc_size(doc_size_bytes);
         proto::ReplicaStats {
-            doc_size_bytes: self.doc_size_bytes() as u64,
+            doc_size_bytes,
             peers,
         }
     }
@@ -295,10 +331,12 @@ impl ReplicaState {
 
     // ── Peer registry ──────────────────────────────────────────────────────
 
+    /// Adds the outbound channel of `peer_id`.
     fn register_peer(&self, peer_id: NodeId, tx: mpsc::Sender<Vec<u8>>) {
         self.peer_txs().insert(peer_id, tx);
     }
 
+    /// Removes the outbound channel of `peer_id`.
     fn deregister_peer(&self, peer_id: &str) {
         self.peer_txs().remove(peer_id);
     }
@@ -441,7 +479,11 @@ impl ReplicaState {
 pub fn router(state: Arc<ReplicaState>) -> Router {
     let service = ReplicaService { state };
     Server::builder()
-        .add_service(ReplicaServer::new(service.clone()))
+        .add_service(
+            ReplicaServer::new(service.clone())
+                .max_decoding_message_size(MAX_RPC_BYTES)
+                .max_encoding_message_size(MAX_RPC_BYTES),
+        )
         .add_service(SyncServer::new(service))
 }
 
@@ -470,7 +512,6 @@ impl Replica for ReplicaService {
             .map_err(|e| Status::internal(e.to_string()))?;
 
         self.state.record_op_duration(op.name(), elapsed_ms);
-        self.state.record_doc_size();
 
         self.state.flush_to_peers();
 
@@ -587,6 +628,117 @@ impl Replica for ReplicaService {
         self.state.kick_sync(&peer_ids);
         Ok(Response::new(proto::Empty {}))
     }
+
+    async fn set_instance_id(
+        &self,
+        request: Request<proto::InstanceId>,
+    ) -> Result<Response<proto::Empty>, Status> {
+        let id = request.into_inner().id;
+        let (result, _) = self.state.timed(|a| a.set_instance_id(id));
+        result.map_err(internal)?;
+        Ok(Response::new(proto::Empty {}))
+    }
+
+    async fn ensure_list(
+        &self,
+        request: Request<proto::ObjRef>,
+    ) -> Result<Response<proto::Empty>, Status> {
+        let obj = request.into_inner().obj;
+        let (result, _) = self.state.timed(|a| a.ensure_list(&obj));
+        result.map_err(internal)?;
+        Ok(Response::new(proto::Empty {}))
+    }
+
+    async fn read_text(
+        &self,
+        request: Request<proto::ObjRef>,
+    ) -> Result<Response<proto::ReadTextResponse>, Status> {
+        let obj = request.into_inner().obj;
+        let (text, adapter_ns) = self.state.timed(|a| a.read_text(&obj));
+        Ok(Response::new(proto::ReadTextResponse {
+            text: text.map_err(internal)?,
+            adapter_ns,
+        }))
+    }
+
+    async fn read_list(
+        &self,
+        request: Request<proto::ObjRef>,
+    ) -> Result<Response<proto::ReadListResponse>, Status> {
+        let obj = request.into_inner().obj;
+        let (values, adapter_ns) = self.state.timed(|a| a.read_list(&obj));
+        let values = values.map_err(internal)?;
+        Ok(Response::new(proto::ReadListResponse {
+            values: values.iter().map(Into::into).collect(),
+            adapter_ns,
+        }))
+    }
+
+    async fn read_map(
+        &self,
+        request: Request<proto::ObjRef>,
+    ) -> Result<Response<proto::ReadMapResponse>, Status> {
+        let obj = request.into_inner().obj;
+        let (values, adapter_ns) = self.state.timed(|a| a.read_map(&obj));
+        let values = values.map_err(internal)?;
+        Ok(Response::new(proto::ReadMapResponse {
+            values: values.iter().map(|(k, v)| (k.clone(), v.into())).collect(),
+            adapter_ns,
+        }))
+    }
+
+    async fn apply_txn(
+        &self,
+        request: Request<proto::TxnRequest>,
+    ) -> Result<Response<proto::TxnResponse>, Status> {
+        let ops = request
+            .into_inner()
+            .ops
+            .into_iter()
+            .map(Op::try_from)
+            .collect::<anyhow::Result<Vec<_>>>()
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let (update, adapter_ns) = self.state.timed(|a| a.apply_txn(&ops));
+        let update = update.map_err(internal)?;
+        self.state
+            .record_op_duration("apply_txn", adapter_ns as f64 / 1e6);
+        self.state.flush_to_peers();
+        Ok(Response::new(proto::TxnResponse { update, adapter_ns }))
+    }
+
+    async fn apply_updates(
+        &self,
+        request: Request<proto::UpdatesRequest>,
+    ) -> Result<Response<proto::TimedResponse>, Status> {
+        let updates = request.into_inner().updates;
+        let updates: Vec<&[u8]> = updates.iter().map(Vec::as_slice).collect();
+        let (result, adapter_ns) = self.state.timed(|a| a.apply_updates(&updates));
+        result.map_err(internal)?;
+        Ok(Response::new(proto::TimedResponse { adapter_ns }))
+    }
+
+    async fn encode(
+        &self,
+        _: Request<proto::Empty>,
+    ) -> Result<Response<proto::EncodeResponse>, Status> {
+        let (state, adapter_ns) = self.state.timed(|a| a.encode());
+        Ok(Response::new(proto::EncodeResponse { state, adapter_ns }))
+    }
+
+    async fn load(
+        &self,
+        request: Request<proto::LoadRequest>,
+    ) -> Result<Response<proto::TimedResponse>, Status> {
+        let state = request.into_inner().state;
+        let (result, adapter_ns) = self.state.timed(|a| a.load(&state));
+        result.map_err(internal)?;
+        Ok(Response::new(proto::TimedResponse { adapter_ns }))
+    }
+}
+
+/// Converts an adapter error to a gRPC status.
+fn internal(e: anyhow::Error) -> Status {
+    Status::internal(format!("{e:#}"))
 }
 
 /// Converts a list of peer IDs from the wire. If any ID is bad, the whole

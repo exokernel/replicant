@@ -165,11 +165,6 @@ async fn recv_loop(
                     break;
                 }
                 state.record_sync_rx(&peer_id);
-                // Record the doc size here too. apply_op records it only for
-                // local writes. Without this, a replica that only receives
-                // changes would report its size from before the merge, and
-                // the size checks after convergence would fail.
-                state.record_doc_size();
                 // Reply at once if the protocol has something to send back.
                 // Count the reply like any other sent message.
                 if let Some(response) = state.sync_generate(&peer_id) {

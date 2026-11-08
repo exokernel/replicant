@@ -3,20 +3,30 @@ members = [
     "crates/common",
     "crates/replica",
     "crates/orchestrator",
+    "crates/replay",
 ]
 resolver = "2"
+
+# Every item needs a doc comment, also a private one. `just lint` and CI turn
+# these warnings into errors. Generated proto code has an exemption in the common
+# crate.
+[workspace.lints.rust]
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+missing_docs_in_private_items = "warn"
 
 [workspace.dependencies]
 anyhow               = "1"
 clap                 = { version = "4", features = ["derive"] }
 serde                = { version = "1", features = ["derive"] }
 serde_json           = "1"
-toml                 = "1"
+toml                 = "1.2"
 prost                = "0.14"
 tokio                = { version = "1", features = ["full"] }
 tokio-stream         = "0.1"
-tonic                = { version = "0.14", features = ["transport"] }
-tonic-prost          = "0.14"
+tonic                = { version = "0.14.9", features = ["transport"] }
+tonic-prost          = "0.14.9"
 tracing              = "0.1"
 tracing-subscriber   = { version = "0.3", features = ["env-filter"] }
 opentelemetry        = "0.33"

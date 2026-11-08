@@ -56,6 +56,20 @@ service Replica {
   // unblocked both endpoints of every healed link. Peers with nothing to
   // exchange or no open stream are skipped silently.
   rpc KickSync            (PeerIds)    returns (Empty);
+
+  // The replay surface. The `replay` binary drives a replica with these calls.
+  // It moves updates between replicas itself, so no sync stream runs. Each
+  // reply gives adapter_ns: the time in the adapter, without gRPC. Each RPC
+  // matches the CrdtAdapter method of the same name.
+  rpc SetInstanceId       (InstanceId)     returns (Empty);
+  rpc EnsureList          (ObjRef)         returns (Empty);
+  rpc ReadText            (ObjRef)         returns (ReadTextResponse);
+  rpc ReadList            (ObjRef)         returns (ReadListResponse);
+  rpc ReadMap             (ObjRef)         returns (ReadMapResponse);
+  rpc ApplyTxn            (TxnRequest)     returns (TxnResponse);
+  rpc ApplyUpdates        (UpdatesRequest) returns (TimedResponse);
+  rpc Encode              (Empty)          returns (EncodeResponse);
+  rpc Load                (LoadRequest)    returns (TimedResponse);
 }
 
 // ── Replica ↔ Replica ──────────────────────────────────────────────────────
@@ -169,3 +183,23 @@ message PeerStats {
   // Flushes skipped because the peer's outbound channel was full.
   uint64 deferred = 4;
 }
+
+// ── Replay messages ────────────────────────────────────────────────────────
+
+message InstanceId { uint32 id = 1; }
+
+message TimedResponse { uint64 adapter_ns = 1; }
+
+message ReadTextResponse { string text = 1; uint64 adapter_ns = 2; }
+message ReadListResponse { repeated ScalarValue values = 1; uint64 adapter_ns = 2; }
+message ReadMapResponse  { map<string, ScalarValue> values = 1; uint64 adapter_ns = 2; }
+
+// All ops go in one library transaction.
+message TxnRequest  { repeated OpRequest ops = 1; }
+message TxnResponse { bytes update = 1; uint64 adapter_ns = 2; }
+
+// Updates in causal order. All of them go in one adapter call.
+message UpdatesRequest { repeated bytes updates = 1; }
+
+message EncodeResponse { bytes state = 1; uint64 adapter_ns = 2; }
+message LoadRequest    { bytes state = 1; }
