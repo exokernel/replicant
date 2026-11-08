@@ -402,7 +402,10 @@ impl CrdtAdapter for AutomergeAdapter {
     }
 
     fn load(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
+        // Keep this replica's actor. `AutoCommit::load` picks a random one.
+        let actor = self.doc.get_actor().clone();
         self.doc = AutoCommit::load(bytes).context("loading an Automerge document")?;
+        self.doc.set_actor(actor);
         self.objects.clear();
         self.sync_states.clear();
         Ok(())
@@ -427,6 +430,7 @@ mod tests {
         set_instance_id_gives_distinct_replicas,
         wide_ids_stay_distinct,
         fixed_ids_make_a_merge_repeatable,
+        load_keeps_the_instance_id,
         identical_ops_yield_equal_fingerprints,
         disjoint_edits_converge_after_sync,
         concurrent_edits_to_same_key_converge,

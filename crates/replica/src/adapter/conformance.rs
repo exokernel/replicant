@@ -1382,3 +1382,36 @@ pub(crate) fn fixed_ids_make_a_merge_repeatable<A: CrdtAdapter + Default>() {
         assert_eq!(run(), first);
     }
 }
+
+/// `load` keeps an id that `set_instance_id` set before it.
+///
+/// The orchestrator sets each replica's id after a reset, and then loads the
+/// starting document. If the load took a random id, the merge order of
+/// concurrent inserts would change from run to run. The check is the same as in
+/// `fixed_ids_make_a_merge_repeatable`, with a load before the edits.
+pub(crate) fn load_keeps_the_instance_id<A: CrdtAdapter + Default>() {
+    let base = {
+        let mut b = A::default();
+        b.ensure_text("text").unwrap();
+        b.apply_op(&splice(0, 0, "base")).unwrap();
+        b.encode()
+    };
+    let run = || {
+        let (mut a, mut b) = (A::default(), A::default());
+        a.set_instance_id(1).unwrap();
+        b.set_instance_id(2).unwrap();
+        for r in [&mut a, &mut b] {
+            r.load(&base).unwrap();
+            r.ensure_text("text").unwrap();
+        }
+        let ua = a.apply_txn(&[splice(2, 0, "aaa")]).unwrap();
+        let ub = b.apply_txn(&[splice(2, 0, "bbb")]).unwrap();
+        a.apply_updates(&[ub.as_slice()]).unwrap();
+        b.apply_updates(&[ua.as_slice()]).unwrap();
+        a.read_text("text").unwrap()
+    };
+    let first = run();
+    for _ in 0..8 {
+        assert_eq!(run(), first);
+    }
+}

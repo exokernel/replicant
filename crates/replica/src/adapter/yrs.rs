@@ -525,7 +525,11 @@ impl CrdtAdapter for YrsAdapter {
     }
 
     fn load(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
-        *self = Self::new();
+        // Keep this replica's client id. `Self::new` picks a random one.
+        *self = Self {
+            doc: Doc::with_client_id(self.doc.client_id().get()),
+            peers: HashMap::new(),
+        };
         self.apply_updates(&[bytes])
     }
 }
@@ -549,6 +553,7 @@ mod tests {
         set_instance_id_gives_distinct_replicas,
         wide_ids_stay_distinct,
         fixed_ids_make_a_merge_repeatable,
+        load_keeps_the_instance_id,
         identical_ops_yield_equal_fingerprints,
         disjoint_edits_converge_after_sync,
         concurrent_edits_to_same_key_converge,

@@ -22,7 +22,7 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
-use common::{INSTANCE_ID_BITS, SplitMix64};
+use common::{ensure_distinct_instance_ids, seeded_instance_ids};
 use serde::Serialize;
 
 use crate::alloc;
@@ -71,21 +71,9 @@ impl Ids {
         let ids: Vec<u128> = match self.order {
             IdOrder::Ascending => ascending.collect(),
             IdOrder::Descending => ascending.rev().collect(),
-            IdOrder::Seeded => {
-                let mut rng = SplitMix64::new(self.seed);
-                let mut draw = || u128::from(rng.next_u64());
-                (0..replicas).map(|_| (draw() << 64) | draw()).collect()
-            }
+            IdOrder::Seeded => seeded_instance_ids(self.seed, replicas),
         };
-        let kept: HashSet<u128> = ids
-            .iter()
-            .map(|id| id & ((1 << INSTANCE_ID_BITS) - 1))
-            .collect();
-        ensure!(
-            kept.len() == replicas,
-            "id seed {} gives two replicas the same id",
-            self.seed
-        );
+        ensure_distinct_instance_ids(&ids).with_context(|| format!("id seed {}", self.seed))?;
         Ok(ids)
     }
 }

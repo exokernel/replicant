@@ -39,19 +39,20 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use common::{ensure_distinct_instance_ids, seeded_instance_ids};
 use tokio::task::JoinSet;
 
 use crate::baseline::BaselineStore;
 use crate::event_log::{Event, EventLog};
 use crate::replicas::{
     Client, NodeSource, TEXT_OBJ, acquire_nodes, apply_write, check_tasks, connect_edges,
-    ensure_text_all, fingerprint, kick_sync_edges, record_stats, reset_all, set_links_blocked,
-    text_splice, verify_text_length, wait_for_nodes, wait_for_sync_idle,
+    ensure_text_all, fingerprint, kick_sync_edges, record_stats, reset_all, set_instance_ids,
+    set_links_blocked, text_splice, verify_text_length, wait_for_nodes, wait_for_sync_idle,
 };
 use crate::runner::RunResult;
 use crate::scenario::{Group, HealTopology, PartitionConfig, WriteKind};
 use crate::topology::{self, Connections, intra_group_edges};
-use crate::workload::{PositionStream, target_node};
+use crate::workload::{PositionStream, id_seed_for, target_node};
 
 /// The longest time that a trial waits for the sync before the partition.
 const SYNC_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -84,6 +85,12 @@ pub async fn run_partition_heal(
     // Reset before wiring peers so each trial starts from a clean slate even
     // when the same external stack is reused across many scenarios/trials.
     reset_all(&clients).await?;
+
+    // Seed the library ids. Some id pairs change the cost of a merge, so random
+    // ids would make each trial differ from its rerun. See `id_seed_for`.
+    let ids = seeded_instance_ids(id_seed_for(repetition), n);
+    ensure_distinct_instance_ids(&ids)?;
+    set_instance_ids(&clients, &ids).await?;
 
     if let Some(baseline) = &config.baseline {
         baselines.install(baseline, &mut clients).await?;

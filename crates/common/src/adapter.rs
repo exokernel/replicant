@@ -172,7 +172,7 @@ pub trait CrdtAdapter: Send + 'static {
     fn text_length(&mut self, obj: &str) -> anyhow::Result<usize>;
 
     /// Sets the id that the library uses for this replica's ops. Call this on
-    /// an empty document.
+    /// an empty document. A later [`Self::load`] keeps the id.
     ///
     /// The library breaks ties between concurrent ops with this id. It is random
     /// by default, so a replay can have a different result on each run. A replay
@@ -232,7 +232,9 @@ pub trait CrdtAdapter: Send + 'static {
 
     /// Replaces the document with one that [`Self::encode`] returned.
     ///
-    /// This discards all per-peer sync state. The adapter takes a new instance
-    /// id, so it is a different replica from the one that encoded the document.
+    /// This discards all per-peer sync state. The adapter keeps its own
+    /// instance id, and does not take the id of the replica that encoded the
+    /// document. So it stays a different replica, and an id that
+    /// [`Self::set_instance_id`] set before the load stays in effect.
     fn load(&mut self, bytes: &[u8]) -> anyhow::Result<()>;
 }

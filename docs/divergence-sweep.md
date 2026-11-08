@@ -255,8 +255,33 @@ same stream. Repetitions within a cell vary the seed, which is what produces the
 run-to-run variance estimate. Cross-library comparisons hold the workload fixed,
 so a difference between libraries cannot be sampling noise.
 
+**The library ids are seeded too.** A library breaks ties between concurrent ops
+with the id of the replica, and some id pairs change the cost of a merge: a Loro
+merge can be about 400 times slower (see
+[`tools/findings/README.md`](../tools/findings/README.md)). So each replica's id
+comes from a seed:
+
+```
+ids = seeded_instance_ids(id_seed_for(repetition), node_count)
+```
+
+The id seed depends on the repetition only. So:
+
+- Repetition `r` of every cell, on every library, uses the same ids. A difference
+  between two cells is not an effect of the ids. This is a paired design.
+- The repetitions of a cell use different ids. The spread of a cell includes the
+  spread that the ids cause, so report the spread, not only the median. For Loro,
+  a cell can have fast and slow repetitions.
+- A rerun repeats each trial exactly, its ids included.
+
+The orchestrator sets the ids after the reset, before the starting document loads.
+A `Load` keeps the replica's id. Before 2026-11-07, every trial drew random ids,
+because each `Reset` and `Load` made a new document with a random id. The seeded
+ids of the replay tool did not reach the orchestrator.
+
 Seeds and cell parameters are written to the provenance file before the first
-trial, so an interrupted sweep still leaves a record of what it was running.
+trial, so an interrupted sweep still leaves a record of what it was running. The
+provenance also lists the id seed of each repetition, under `instance_ids`.
 
 ## Current scope and limits
 

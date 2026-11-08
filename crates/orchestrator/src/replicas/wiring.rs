@@ -39,6 +39,32 @@ pub async fn reset_all(clients: &[Client]) -> Result<()> {
     join_all(set, "reset").await
 }
 
+/// Sets the library id of each replica: `ids[i]` goes to `clients[i]`.
+///
+/// Call this after [`reset_all`] and before anything else, while each document is
+/// empty. A later `Load` keeps the id. The calls run in parallel.
+pub async fn set_instance_ids(clients: &[Client], ids: &[u128]) -> Result<()> {
+    anyhow::ensure!(
+        clients.len() == ids.len(),
+        "{} ids for {} replicas",
+        ids.len(),
+        clients.len()
+    );
+    let mut set: JoinSet<Result<()>> = JoinSet::new();
+    for (client, &id) in clients.iter().zip(ids) {
+        let mut c = client.clone();
+        set.spawn(async move {
+            c.set_instance_id(Request::new(common::proto::InstanceId {
+                high: (id >> 64) as u64,
+                low: id as u64,
+            }))
+            .await?;
+            Ok(())
+        });
+    }
+    join_all(set, "set_instance_id").await
+}
+
 /// Opens a sync stream for every edge and waits until all of them are ready.
 ///
 /// A `ConnectPeer` call returns only once the TCP connection and the gRPC

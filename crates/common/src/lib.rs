@@ -7,14 +7,17 @@
 //! - [`CrdtAdapter`]: the trait that each CRDT backend (Automerge, Yrs, Loro)
 //!   implements. The replica scaffolding calls it.
 //! - [`SplitMix64`]: a deterministic random number generator.
+//! - [`seeded_instance_ids`]: the seeded library ids of a run's replicas.
 
 mod adapter;
+mod instance_ids;
 mod node_id;
 mod op;
 pub mod provenance;
 mod split_mix64;
 
 pub use adapter::{CrdtAdapter, INSTANCE_ID_BITS};
+pub use instance_ids::{ensure_distinct_instance_ids, seeded_instance_ids};
 pub use node_id::NodeId;
 pub use op::{Op, ScalarVal};
 pub use split_mix64::SplitMix64;
