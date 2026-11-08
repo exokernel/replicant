@@ -86,6 +86,12 @@ def load_replay(path: Path) -> tuple[Row, Trials, list[Row]]:
             case "run":
                 run = row
             case "trial":
+                if row.get("lane", "in_process") != "in_process":
+                    raise SystemExit(
+                        f"error: {path} has a trial on the {row['lane']} lane. Its "
+                        "time_ms includes gRPC, so the JS times cannot compare with "
+                        "it. Calibrate with in-process trials."
+                    )
                 trials.setdefault((row["workload"], row["crdt"]), []).append(row)
             case "skipped" | "failed":
                 problems.append(row)

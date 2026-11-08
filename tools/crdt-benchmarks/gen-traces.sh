@@ -10,8 +10,8 @@
 
 set -euo pipefail
 
-# The commits and the lib0 version that the spec hashes were made with.
-BENCHMARKS_COMMIT=796f702
+# The commits and the lib0 version that the spec hashes were made with. env.sh
+# pins the crdt-benchmarks commit.
 EDITING_TRACES_COMMIT=762fa6c
 LIB0_VERSION=0.2.88
 
@@ -24,11 +24,7 @@ out=${2:-$repo/traces}
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 
-head=$(git -C "$clone" rev-parse --short=7 HEAD)
-if [ "$head" != "$BENCHMARKS_COMMIT" ]; then
-    echo "error: $clone is at $head, expected $BENCHMARKS_COMMIT" >&2
-    exit 1
-fi
+check_benchmarks_commit "$clone"
 
 suite=$out/.src/crdt-benchmarks
 rm -rf "$suite"

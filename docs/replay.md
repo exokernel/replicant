@@ -191,7 +191,9 @@ Discard the first trial of each workload as a warm-up.
 `just calibrate <clone>` runs their suite on the npm releases that match the Rust
 crates, runs the replay, and prints a comparison. `current-versions.patch` makes the
 version changes, and it updates each factory to the current library API. Run both
-sides on one host.
+sides on one host. The clone must be at the commit that made the traces, and the
+scripts refuse any other commit. `compare.py` refuses a trial on the remote lane,
+because its `time_ms` includes gRPC.
 
 These differences make the two sides not directly comparable:
 

@@ -5,8 +5,9 @@
 #
 # Usage: run-current.sh <crdt-benchmarks clone> <work dir> <out dir> [repeats]
 #
-# This script does not change the clone. It copies the clone's commit to the work
-# dir, applies current-versions.patch, and installs with --ignore-scripts. The
+# The clone must be at the commit that made the traces (BENCHMARKS_COMMIT in
+# env.sh). This script does not change the clone. It copies that commit to the
+# work dir, applies current-versions.patch, and installs with --ignore-scripts. The
 # patch keeps lib0 at the version that made the trace files, and it updates each
 # factory to the current library API. It leaves out B4x100.
 
@@ -20,6 +21,7 @@ work=${2:?missing work dir}
 out=${3:?missing out dir}
 repeats=${4:-5}
 libs=(yjs ywasm automerge-wasm automerge loro)
+check_benchmarks_commit "$clone"
 
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
