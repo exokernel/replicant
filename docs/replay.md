@@ -177,6 +177,14 @@ A remote row also gives `adapter_ms`, the time inside the adapter. The differenc
 from `time_ms` is transport. Each op is one RPC, so the remote lane is much slower
 than the library alone.
 
+**Remote `adapter_ms` before 2026-11-07 is too high for Automerge and Loro.** The
+replica's log subscriber enabled the libraries' `tracing` spans, and an enabled span
+formats its arguments. Automerge's `load_changes` span formats the whole change graph
+on each update. The replica now keeps these crates at WARN (`replica::logging`).
+Automerge B1.1 on two containers: `adapter_ms` was about 8.3 s, and is now 1.89-1.91 s,
+against about 1.7 s in process. Loro was not measured again. The in-process lane
+installs no subscriber, so its times are not affected.
+
 The driver moves updates between replicas itself, in both lanes. No sync protocol
 runs, because a sync protocol sends all that a peer has and cannot give one exact
 version. To measure a sync protocol, use the orchestrator's scenarios.

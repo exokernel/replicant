@@ -332,12 +332,26 @@ took about 690 ms, and the Yrs sync layer could not heal 10⁵ ops per side with
 these are about 254 ms and 0.9 s. Automerge still could not heal 10⁵ within 600 s.
 See [`data/divergence-paper-pilot-2026-11-07/`](../data/divergence-paper-pilot-2026-11-07/).
 
-**2026-11-07 — most of the Automerge floor was stale sync state.** In an in-process
-probe with the replica's adapter on the B4 paper, a heal of one op per side took
-188-195 ms of adapter time with all sync state kept, and 54-56 ms after
+**2026-11-07 — in a probe, kept sync state cost Automerge about 140 ms.** In an
+in-process probe with the replica's adapter on the B4 paper, a heal of one op per side
+took 188-195 ms of adapter time with all sync state kept, and 54-56 ms after
 `sync_reconnect`. Of the 54 ms, about 43 ms is the two receives that apply one
 change each. Automerge's apply of one change walks the document, so this cost grows
-with the history.
+with the history. On the lanes, the reconnect alone did not lower the floor much. See
+the next observation.
+
+**2026-11-07 — the Automerge floor on the lanes was a logging cost.** After the
+reconnect change, a heal of one op per side still took about 260 ms on the docker
+lane and about 250 ms on the in-process lane. One received change took about 125 ms in
+the replica, against about 21 ms in the probe. A profile showed that most of the time
+went to `tracing`: Automerge's `load_changes` has an `#[instrument]` span that records
+the whole change graph with `Debug`, and the replica's log subscriber at INFO enabled
+it. On the paper, each received change formatted 259,779 change hashes. The probes
+install no subscriber, so they did not pay this cost. The log filter now keeps the
+CRDT libraries at WARN (`replica::logging`). The heal then took 43-46 ms on the docker
+lane. Across the grid, the paper cells of Automerge fell by about 200 ms up to 10⁴ and
+by about 0.9 s at 10⁵, and the empty controls changed little. See
+[`data/divergence-grid-2026-11-07/`](../data/divergence-grid-2026-11-07/).
 
 **2026-11-07 — the Yrs floor was the fingerprint poll.** A Yrs heal of one op per
 side on the B4 paper takes under 1 ms of adapter time in process. On the docker lane
@@ -362,6 +376,29 @@ ms or about 4,300 ms, on one side, both, or neither. In 12 random pairs, 10 of 2
 imports were slow. The rule is not known. It is not which id is lower. On the docker
 lane, `same_region` at 10⁴ took 26 ms, 5,400 ms, or 10,700 ms, and this explains the
 bimodal Loro results. With a starting document, `random_position` did not show it.
+
+**2026-11-07 — with seeded ids, the Loro slow path is a property of the id pair.** In
+the seeded grid, the same repetitions (2, 3, 5, 6, 8, and 9) were slow in every
+contested Loro cell, and repetitions 4, 7, and 10 were fast. Repetition 1 was slow only
+in the cells that start empty. So the slow path depends on the ids and on the document.
+At `same_region-1e5`, one cell had 269 ms on a fast pair and about 1,180 s on a slow
+pair. The median of such a cell only counts the slow pairs, so report the fast and slow
+groups. See [`data/divergence-grid-2026-11-07/`](../data/divergence-grid-2026-11-07/).
+
+**2026-11-07 — Yrs `same_region` grows with the square of the ops.** The heal took
+44 ms at 10³, 3.8 s at 10⁴, and 353 s at 10⁵, from the paper and from an empty start.
+In `same_region` every insert contests one anchor, so the contested share is 100% at
+every size, and the number of concurrent siblings on that anchor grows with the ops.
+
+**2026-11-07 — the ids can also change a Yrs merge.** In the seeded grid, Yrs
+`random_position-1e5` took 2,207 ms in repetition 1 and 876-880 ms in repetitions 2
+and 3. A rerun gave 2,249, 879, and 865 ms. No other Yrs cell showed it. The cause is
+not known.
+
+**2026-11-07 — the heal timeout does not stop a long import.** The heal timeout is
+600 s, but two Loro trials converged after about 1,180 s and passed. The orchestrator
+checks the timeout only after a fingerprint poll returns, and the poll waits for the
+adapter lock while an import runs.
 
 **2026-08-06 — the shared text object is what makes locality reach the CRDT.**
 A standalone Automerge 0.9 probe at 10⁴ operations per side. With each replica

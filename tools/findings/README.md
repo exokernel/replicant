@@ -94,7 +94,21 @@ result is fixed for each pair of peer ids. In 12 random pairs, 10 of 24 imports 
 slow. The rule is not known. It is not which id is lower.
 
 Effect on Replicant: `same_region` cells on Loro give two or three clusters of times.
-Seeded ids fix the pair for each cell, but one seed can still give a slow pair.
+With seeded ids, the same repetitions are slow in every contested cell, so the slow
+path belongs to the id pair. One repetition was slow only in the cells that start
+empty, so the document matters too. See `data/divergence-grid-2026-11-07/`.
+
+## Findings with no probe yet, seen in the grid
+
+- **Yrs: the ids can change a merge by about 2.5 times.** `random_position-1e5` took
+  about 2,200 ms with the ids of repetition 1, and about 870 ms with the ids of
+  repetitions 2 and 3, in two runs. A probe needs the cell's 10⁵ seeded positions and
+  the two Yrs client ids.
+- **Automerge and Loro: an enabled `tracing` span formats its arguments.**
+  Automerge's `load_changes` records the whole change graph with `Debug`. With a log
+  subscriber at INFO, one received change on the paper took about 125 ms instead of
+  about 21 ms. Replicant now keeps these crates at WARN (`replica::logging`). A probe
+  is the `automerge-apply-cost` probe with a subscriber installed.
 
 ## Findings with a test in Replicant
 
@@ -105,6 +119,7 @@ These are checked by `just test`, not by `just findings`:
 | Converged Loro replicas can give snapshots of different sizes | `loro_snapshot_sizes_of_converged_replicas_differ_by_under_one_percent` (replica) |
 | Converged Yrs replicas with different histories have the same state vector and delete set | `yrs_fingerprint_ignores_history`, `yrs_fingerprint_ignores_history_on_random_edits` (replica) |
 | gRPC's default limit of 4 MiB stopped large sync messages | `a_sync_message_above_4_mib_arrives` (orchestrator) |
+| The log filter keeps the CRDT libraries at WARN | `libraries_are_at_warn_by_default` and two more (replica, `logging`) |
 
 ## Findings with no probe yet
 
