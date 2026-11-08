@@ -204,7 +204,10 @@ pub struct TrialResult {
 /// What one memory trial measured.
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct MemoryResult {
-    /// The peak of live bytes during the replay.
+    /// The highest live bytes during the replay, above the live bytes of the
+    /// trial before its first transaction. The count starts after
+    /// `Trial::new`, so the empty replicas and the replay buffers are not in
+    /// it. So this is the growth that the replay causes, not the total memory.
     pub peak_bytes: i64,
     /// The live bytes that the loaded document holds.
     pub retained_bytes: i64,

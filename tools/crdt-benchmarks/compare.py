@@ -26,6 +26,8 @@ B2_AUTOMERGE_REFERENCE = "automerge"
 LIBS = tuple(REFERENCE)
 # A time below this is mostly rounding, because the JS harness reports whole ms.
 MIN_MS = 5.0
+# Two JS times closer than this are a tie, because the JS harness reports whole ms.
+JS_RESOLUTION_MS = 1.0
 # The largest size difference that still counts as the same document size.
 SIZE_TOLERANCE = 0.02
 # B1 divides total update bytes by its input count, which is 1 for these.
@@ -117,6 +119,12 @@ def ranking(values: dict[str, float]) -> str:
     return "<".join(lib[0] for lib in sorted(values, key=values.__getitem__))
 
 
+def tied(values: dict[str, float], resolution: float) -> bool:
+    """Return True if two values are closer than `resolution`, or equal."""
+    ordered = sorted(values.values())
+    return any(b - a < resolution or a == b for a, b in zip(ordered, ordered[1:]))
+
+
 def bench_order(bench: str) -> list[int | str]:
     """Return a sort key that puts b1.2 before b1.10."""
     return [int(p) if p.isdigit() else p for p in re.findall(r"\d+|[a-z]+", bench)]
@@ -190,7 +198,9 @@ def report_times(js: JsValues, trials: Trials, benches: Sequence[str]) -> None:
     )
     print(
         f"Rank letters run fastest first. A row with a value below {MIN_MS:.0f} ms has "
-        "no rank, because the JS timer rounds to whole ms.\n"
+        "no rank, because the JS timer rounds to whole ms. A row where two JS times "
+        f"are closer than {JS_RESOLUTION_MS:.0f} ms, or two replay times are equal, "
+        "shows tie and is not in the count.\n"
     )
     compared = agreed = 0
     shifts: dict[tuple[str, str], list[float]] = {}
@@ -213,14 +223,17 @@ def report_times(js: JsValues, trials: Trials, benches: Sequence[str]) -> None:
             and min(*ours.values(), *theirs.values()) >= MIN_MS
             and not any(skewed(bench, "time", lib) for lib in LIBS)
         ):
-            rank_ours, rank_js = ranking(ours), ranking(theirs)
-            compared += 1
-            agreed += rank_ours == rank_js
-            agree = "yes" if rank_ours == rank_js else "NO"
-            for i, a in enumerate(LIBS):
-                for b in LIBS[i + 1 :]:
-                    shift = (ours[a] / ours[b]) / (theirs[a] / theirs[b])
-                    shifts.setdefault((a, b), []).append(shift)
+            if tied(theirs, JS_RESOLUTION_MS) or tied(ours, 0.0):
+                rank_ours = rank_js = agree = "tie"
+            else:
+                rank_ours, rank_js = ranking(ours), ranking(theirs)
+                compared += 1
+                agreed += rank_ours == rank_js
+                agree = "yes" if rank_ours == rank_js else "NO"
+                for i, a in enumerate(LIBS):
+                    for b in LIBS[i + 1 :]:
+                        shift = (ours[a] / ours[b]) / (theirs[a] / theirs[b])
+                        shifts.setdefault((a, b), []).append(shift)
         rows.append(
             [
                 bench,

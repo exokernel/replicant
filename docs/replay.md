@@ -106,10 +106,18 @@ trial that fails it gives no timing. A trace without a check does not load.
 | `endContent` | The final text has one correct value. | The text is exact. |
 | `exact_list` | The final list has one correct value. | The list is exact. |
 | `map_winner` | Concurrent writes to map keys. | Each key holds a value that some agent wrote to it. No other key exists. |
-| `tree_invariants` | Concurrent inserts at one position. | The surviving elements match, and each branch keeps its local order. |
+| `tree_invariants` | Concurrent inserts at one position. | The surviving elements match, and the merged sequence is an interleaving of the branches that keeps the local order of each. |
 
 Every check also asserts that all checked replicas agree, and that a document
 loaded from the encoded bytes equals replica 0.
+
+`tree_invariants` checks the branches jointly when at most two branches have two
+or more surviving elements, as in the B2 fork traces. Each element then has one
+place, and an element that two branches share is used once. A check of each
+branch on its own is not enough: with branches `aab` and `aac`, each branch is a
+subsequence of `aabcaa`, but no interleaving gives it. With more branches, the
+check tests each branch on its own. To find if a sequence is an interleaving of
+many sequences is NP-complete, and B3.5 has 1,530 such branches over ten digits.
 
 `crdt-benchmarks` checks less than this. It checks exact content in B1 and B4 only.
 B2.1 and B2.2 check the length. B2.3, B2.4, and B3 check only that replicas agree.
@@ -125,7 +133,12 @@ then run different workloads, with no error.
 So a trace with `tree_invariants` must have no merge. It can fork, and its
 branches merge only at the end of the replay. The validator rejects any other
 shape. A trace with a merge needs an exact check, which fails if the libraries
-disagree. A cell with more than one round of divergence and merge needs a new
+disagree. The exact check is necessary, but it is not sufficient. Two merge
+orders can give the same final text, for example when later edits delete both
+concurrent inserts. The libraries then run different workloads, and the check
+passes. The traces have no intermediate states, so the replay cannot find this
+case. On the real traces, a different merge order almost always changes the
+final text. See [Fixed library ids](#fixed-library-ids). A cell with more than one round of divergence and merge needs a new
 decision before it can use this format.
 
 ## Fixed library ids
@@ -167,7 +180,7 @@ commit, the host, the build profile, and the library versions.
 |---|---|
 | `workload` | `agents`, `txns`, `roots`, `merges`, and `forks` of the causal graph. One row per workload. |
 | `trial` | `time_ms` (includes `read_ms`), `read_ms`, `encode_ms`, `doc_size`, `parse_ms`, `update_bytes`, `update_count`, `adapter_ms` |
-| `memory` | `peak_bytes` during the replay, and `retained_bytes` that the loaded document holds. One extra trial, in process only. Its times are not used. |
+| `memory` | `peak_bytes`, the highest live bytes during the replay above the live bytes of the trial before its first transaction, and `retained_bytes` that the loaded document holds. One extra trial, in process only. Its times are not used. |
 | `skipped` | `reason` |
 | `failed` | `trial`, which is null for the memory trial, and `error`. The binary then exits with an error. |
 

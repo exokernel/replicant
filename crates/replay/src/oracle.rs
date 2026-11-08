@@ -8,7 +8,7 @@
 //! each library has its own rule. For these workloads, [`CheckPlan`] checks the
 //! properties that every library must keep.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::{Context, Result, bail, ensure};
 use common::{Op, ScalarVal};
@@ -58,14 +58,44 @@ pub enum CheckPlan {
     /// library. The merged sequence must:
     ///
     /// - hold exactly the elements that no agent deleted, and
-    /// - keep the local order of each branch.
-    Tree {
-        /// The expected elements, sorted.
-        survivors: Vec<String>,
-        /// The surviving elements of each branch tip, in local order.
-        tips: Vec<Vec<String>>,
-    },
+    /// - be an interleaving of the branches that keeps the local order of each
+    ///   branch. An element that two branches share appears once.
+    ///
+    /// The second rule is a joint check when at most [`MAX_JOINT_CHAINS`]
+    /// branches have two or more survivors. A separate subsequence check for
+    /// each branch is not enough, because two branches can use the same copy
+    /// of a repeated value. With more branches, the plan checks each branch on
+    /// its own: to find if a sequence is an interleaving of many sequences is
+    /// NP-complete, and B3.5 has 1,530 such branches over ten digits.
+    Tree(TreePlan),
 }
+
+/// The data of [`CheckPlan::Tree`].
+#[derive(Debug)]
+pub struct TreePlan {
+    /// The expected elements, sorted.
+    survivors: Vec<String>,
+    /// The surviving elements of each branch tip, in local order.
+    tips: Vec<Vec<String>>,
+    /// The label of each element in `chains`.
+    labels: Vec<u32>,
+    /// The label of each value.
+    label_of: HashMap<String, u32>,
+    /// True for a label that some element outside `chains` has. Such an
+    /// element has no order rule.
+    free: Vec<bool>,
+    /// The tips with two or more survivors, as element ids in local order.
+    chains: Vec<Vec<u32>>,
+    /// For each element id, each chain that holds it and its index there.
+    owners: Vec<Vec<(usize, u32)>>,
+}
+
+/// The most chains for which [`TreePlan`] does the joint check. With two chains,
+/// the search has at most one state for each position in a chain.
+pub const MAX_JOINT_CHAINS: usize = 2;
+
+/// The largest number of search states that the joint branch check keeps.
+const MAX_TREE_STATES: usize = 100_000;
 
 /// Returns the comparison key of one element.
 fn key(value: &ScalarVal) -> String {
@@ -157,16 +187,150 @@ fn tree_plan(trace: &Trace) -> Result<CheckPlan> {
         .map(|(e, _)| e.clone())
         .collect();
     survivors.sort_unstable();
-    let tips = tips
-        .iter()
-        .map(|tip| {
-            tip.iter()
-                .filter(|&&id| !dead[id as usize])
-                .map(|&id| arena[id as usize].clone())
-                .collect()
-        })
+    let tips: Vec<Vec<u32>> = tips
+        .into_iter()
+        .map(|tip| tip.into_iter().filter(|&id| !dead[id as usize]).collect())
         .collect();
-    Ok(CheckPlan::Tree { survivors, tips })
+    Ok(CheckPlan::Tree(TreePlan::new(survivors, &tips, &arena)))
+}
+
+impl TreePlan {
+    /// Builds the plan from the surviving arena ids of each tip.
+    fn new(survivors: Vec<String>, tips: &[Vec<u32>], arena: &[String]) -> Self {
+        let mut label_of: HashMap<String, u32> = HashMap::new();
+        for value in &survivors {
+            let next = label_of.len() as u32;
+            label_of.entry(value.clone()).or_insert(next);
+        }
+        // A tip with one survivor has no order rule, so only longer tips are
+        // chains. The elements of the chains get compact ids.
+        let mut compact: HashMap<u32, u32> = HashMap::new();
+        let mut labels = Vec::new();
+        let mut owners: Vec<Vec<(usize, u32)>> = Vec::new();
+        let mut chains = Vec::new();
+        for tip in tips.iter().filter(|tip| tip.len() >= 2) {
+            let c = chains.len();
+            let chain: Vec<u32> = tip
+                .iter()
+                .enumerate()
+                .map(|(index, &arena_id)| {
+                    let id = *compact.entry(arena_id).or_insert_with(|| {
+                        labels.push(label_of[&arena[arena_id as usize]]);
+                        owners.push(Vec::new());
+                        labels.len() as u32 - 1
+                    });
+                    owners[id as usize].push((c, index as u32));
+                    id
+                })
+                .collect();
+            chains.push(chain);
+        }
+        // The survivors outside the chains have no order rule.
+        let mut in_chains = vec![0usize; label_of.len()];
+        for &label in &labels {
+            in_chains[label as usize] += 1;
+        }
+        let mut free = vec![false; label_of.len()];
+        let mut total = vec![0usize; label_of.len()];
+        for value in &survivors {
+            total[label_of[value] as usize] += 1;
+        }
+        for (label, (&all, &chained)) in total.iter().zip(&in_chains).enumerate() {
+            free[label] = all > chained;
+        }
+        let tips = tips
+            .iter()
+            .map(|tip| tip.iter().map(|&id| arena[id as usize].clone()).collect())
+            .collect();
+        Self {
+            survivors,
+            tips,
+            labels,
+            label_of,
+            free,
+            chains,
+            owners,
+        }
+    }
+
+    /// Returns an error if `merged` fails the check.
+    fn check(&self, merged: &[String]) -> Result<()> {
+        let mut sorted = merged.to_vec();
+        sorted.sort_unstable();
+        ensure!(
+            sorted == self.survivors,
+            "expected {} surviving elements, found {}. A merge lost or invented work.",
+            self.survivors.len(),
+            sorted.len()
+        );
+        for (i, tip) in self.tips.iter().enumerate() {
+            ensure!(
+                is_subsequence(tip, merged),
+                "the merged sequence does not keep the local order of branch {i}"
+            );
+        }
+        ensure!(
+            !self.is_joint() || self.interleaves(merged)?,
+            "the merged sequence is not an interleaving of the branches. Each branch \
+             keeps its order only if two branches use the same element."
+        );
+        Ok(())
+    }
+
+    /// Returns true if the check is joint. See [`CheckPlan::Tree`].
+    #[must_use]
+    pub fn is_joint(&self) -> bool {
+        self.chains.len() <= MAX_JOINT_CHAINS
+    }
+
+    /// Returns true if `merged` is an interleaving of the chains, with each
+    /// shared element used once. Call this only when `merged` holds exactly the
+    /// survivors.
+    ///
+    /// The search reads `merged` one element at a time. A state is the position
+    /// in each chain. An element can come next if it is the next element of
+    /// every chain that holds it. A survivor outside the chains can match any
+    /// position with its label. Because the counts are equal, the search does
+    /// not need to count these: at the end, the positions that no chain used
+    /// are exactly the free survivors.
+    fn interleaves(&self, merged: &[String]) -> Result<bool> {
+        let ends: Vec<u32> = self.chains.iter().map(|c| c.len() as u32).collect();
+        let mut frontier: HashSet<Vec<u32>> = HashSet::from([vec![0; self.chains.len()]]);
+        for value in merged {
+            let label = self.label_of[value];
+            let mut next = HashSet::new();
+            for state in &frontier {
+                if self.free[label as usize] {
+                    next.insert(state.clone());
+                }
+                for (c, chain) in self.chains.iter().enumerate() {
+                    let Some(&id) = chain.get(state[c] as usize) else {
+                        continue;
+                    };
+                    let owners = &self.owners[id as usize];
+                    if self.labels[id as usize] != label
+                        || owners.iter().any(|&(o, index)| state[o] != index)
+                    {
+                        continue;
+                    }
+                    let mut moved = state.clone();
+                    for &(o, _) in owners {
+                        moved[o] += 1;
+                    }
+                    next.insert(moved);
+                }
+            }
+            ensure!(
+                next.len() <= MAX_TREE_STATES,
+                "the joint branch check needs more than {MAX_TREE_STATES} states"
+            );
+            if next.is_empty() {
+                return Ok(false);
+            }
+            frontier = next;
+        }
+        Ok(frontier.contains(&ends))
+    }
 }
 
 /// Returns true if `needle` is a subsequence of `hay`.
@@ -256,23 +420,7 @@ impl CheckPlan {
                     );
                 }
             }
-            CheckPlan::Tree { survivors, tips } => {
-                let merged = elements(content)?;
-                let mut sorted = merged.clone();
-                sorted.sort_unstable();
-                ensure!(
-                    &sorted == survivors,
-                    "expected {} surviving elements, found {}. A merge lost or invented work.",
-                    survivors.len(),
-                    sorted.len()
-                );
-                for (i, tip) in tips.iter().enumerate() {
-                    ensure!(
-                        is_subsequence(tip, &merged),
-                        "the merged sequence does not keep the local order of branch {i}"
-                    );
-                }
-            }
+            CheckPlan::Tree(plan) => plan.check(&elements(content)?)?,
         }
         Ok(())
     }
@@ -320,6 +468,103 @@ mod tests {
         let plan = CheckPlan::new(&trace(FORK), 1).unwrap();
         let e = plan.check(&text("BACDase")).unwrap_err();
         assert!(e.to_string().contains("local order"), "{e}");
+    }
+
+    /// Two concurrent roots with repeated values. In `aabcaa`, each branch is a
+    /// subsequence on its own, but `c` needs two `a`s of its own branch before
+    /// it, and only the `a`s of the other branch are there.
+    #[test]
+    fn tree_check_rejects_two_branches_that_share_one_copy_of_a_value() {
+        let plan = CheckPlan::new(
+            &trace(
+                r#"{"kind":"concurrent","oracle":{"kind":"tree_invariants"},"numAgents":2,
+                "txns":[
+                {"agent":0,"parents":[],"patches":[[0,0,"aab"]]},
+                {"agent":1,"parents":[],"patches":[[0,0,"aac"]]}]}"#,
+            ),
+            1,
+        )
+        .unwrap();
+        for merged in ["aabaac", "aacaab", "aaabac", "aaaabc"] {
+            plan.check(&text(merged)).unwrap();
+        }
+        let e = plan.check(&text("aabcaa")).unwrap_err();
+        assert!(e.to_string().contains("not an interleaving"), "{e}");
+    }
+
+    /// A shared base element appears once, so both branches must agree on its
+    /// place. Branch 0 gives `bab` (b, base a, base b), and branch 1 gives
+    /// `aba` (base a, base b, a). In `abab`, each branch is a subsequence, but
+    /// no single place for the base `a` and `b` works for both branches.
+    #[test]
+    fn tree_check_uses_a_shared_element_once_for_both_branches() {
+        let plan = CheckPlan::new(
+            &trace(
+                r#"{"kind":"concurrent","oracle":{"kind":"tree_invariants"},"numAgents":2,
+                "txns":[
+                {"agent":0,"parents":[],"patches":[[0,0,"ab"]]},
+                {"agent":0,"parents":[0],"patches":[[0,0,"b"]]},
+                {"agent":1,"parents":[0],"patches":[[2,0,"a"]]}]}"#,
+            ),
+            1,
+        )
+        .unwrap();
+        plan.check(&text("baba")).unwrap();
+        let e = plan.check(&text("abab")).unwrap_err();
+        assert!(e.to_string().contains("not an interleaving"), "{e}");
+    }
+
+    /// A branch with one element has no order rule, and its value can match
+    /// any position with that value.
+    #[test]
+    fn tree_check_places_a_one_element_branch_anywhere() {
+        let plan = CheckPlan::new(
+            &trace(
+                r#"{"kind":"concurrent","oracle":{"kind":"tree_invariants"},"numAgents":2,
+                "txns":[
+                {"agent":0,"parents":[],"patches":[[0,0,"ab"]]},
+                {"agent":1,"parents":[],"patches":[[0,0,"a"]]}]}"#,
+            ),
+            1,
+        )
+        .unwrap();
+        for merged in ["aab", "aba"] {
+            plan.check(&text(merged)).unwrap();
+        }
+        assert!(plan.check(&text("baa")).is_err());
+    }
+
+    /// Many branches with two or more survivors: the check is per branch, and
+    /// it still refuses a broken local order.
+    #[test]
+    fn tree_check_with_many_branches_checks_each_branch() {
+        let txns: Vec<String> = (10..13)
+            .map(|i| {
+                format!(
+                    r#"{{"agent":{},"parents":[],"patches":[[0,0,"{i}"]]}}"#,
+                    i - 10
+                )
+            })
+            .collect();
+        let plan = CheckPlan::new(
+            &trace(&format!(
+                r#"{{"kind":"concurrent","oracle":{{"kind":"tree_invariants"}},"numAgents":3,"txns":[{}]}}"#,
+                txns.join(",")
+            )),
+            1,
+        )
+        .unwrap();
+        let CheckPlan::Tree(tree) = &plan else {
+            panic!("expected a tree plan");
+        };
+        assert!(!tree.is_joint());
+        plan.check(&text("121110")).unwrap();
+        assert!(
+            plan.check(&text("011112"))
+                .unwrap_err()
+                .to_string()
+                .contains("local order")
+        );
     }
 
     #[test]
