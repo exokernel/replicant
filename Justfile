@@ -184,6 +184,11 @@ k8s-down:
 tour mode='edit':
     {{ python }} -m marimo {{ mode }} analysis/tour.py
 
+# Open the divergence study notebook (archived data only): `edit` shows the code, `run` hides it
+[group('data')]
+divergence-notebook mode='edit':
+    {{ python }} -m marimo {{ mode }} analysis/divergence.py
+
 # Regenerate the divergence scenario grid in scenarios/
 [group('data')]
 gen-scenarios:
