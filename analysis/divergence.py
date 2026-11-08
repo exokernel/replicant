@@ -141,7 +141,9 @@ def _():
         .mark_bar()
         .encode(
             y=alt.Y("fault:N", title=None, sort=None),
-            x=alt.X("ms:Q", scale=alt.Scale(type="log"), title="heal time (ms), log scale"),
+            # A colored bar stacks by default, and a stack starts at 0, which a
+            # log scale cannot show. Then no bar draws.
+            x=alt.X("ms:Q", scale=alt.Scale(type="log"), stack=None, title="heal time (ms), log scale"),
             color=alt.Color("when:N", scale=alt.Scale(domain=["before_ms", "after_ms"], range=["#bab0ac", "#4c78a8"])),
             yOffset="when:N",
             tooltip=["fault", "when", "ms"],
@@ -194,7 +196,7 @@ def _(apply_cost, findings_folder, loro_peers, sync_state, yrs_insert):
     )
     _apply = (
         alt.Chart(apply_cost).mark_bar()
-        .encode(x=alt.X("position:O", title="position in the text"), y=alt.Y("mean_apply_ms:Q", scale=alt.Scale(type="log"), title="apply one change (ms)"),
+        .encode(x=alt.X("position:O", title="position in the text"), y=alt.Y("mean_apply_ms:Q", scale=alt.Scale(type="log"), stack=None, title="apply one change (ms)"),
                 color="document:N", xOffset="document:N")
         .properties(width=260, height=220, title="Automerge: apply cost and history")
     )
