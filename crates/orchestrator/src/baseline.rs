@@ -91,7 +91,7 @@ impl BaselineStore {
         let sha256 = baseline.sha256.to_ascii_lowercase();
         let bytes = read_verified(&path, Some(&sha256)).with_context(|| {
             format!(
-                "reading baseline {}. Make the traces with `just gen-traces`",
+                "reading baseline {}. Make the traces with `just gen-traces <crdt-benchmarks clone>`",
                 path.display()
             )
         })?;
