@@ -1,0 +1,5 @@
+row_type,scenario,trial,node_count,op_count,topology_kind,edge_count,diameter,convergence_ms,mean_ms,p50_ms,p95_ms,wiring_ms,mean_wiring_ms
+trial,divergence-n2-append-1e5,1,2,200000,partition_heal,1,1,115.485,,,,0.374,
+trial,divergence-n2-append-1e5,2,2,200000,partition_heal,1,1,116.307,,,,0.351,
+trial,divergence-n2-append-1e5,3,2,200000,partition_heal,1,1,113.266,,,,0.296,
+summary,divergence-n2-append-1e5,3,2,200000,partition_heal,1,1,,115.019,115.485,116.307,,0.340
