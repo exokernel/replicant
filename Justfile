@@ -111,6 +111,11 @@ calibrate clone trials='6' repeats='5':
     cargo run --release --bin replay -- --trials '{{ trials }}' --out results/calibration/replay.jsonl
     {{ python }} tools/crdt-benchmarks/compare.py results/calibration/js results/calibration/replay.jsonl
 
+# Run every library-findings probe; writes results/findings/<date>/ (see tools/findings/README.md)
+[group('data')]
+findings out='' trace='':
+    tools/findings/run.sh '{{ out }}' '{{ trace }}'
+
 # ── Container stacks ────────────────────────────────────────────────────────
 #
 # `crdt` is one of automerge, yrs, or loro. It is a deployment argument, not a
