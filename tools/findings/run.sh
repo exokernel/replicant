@@ -17,7 +17,7 @@ trace="${2:-traces/editing-traces/automerge-paper.json.gz}"
 mkdir -p "$out"
 # Remove the files of an earlier run first. If a probe fails, set -e stops the
 # script, and old provenance or old CSVs must not describe the new, partial run.
-rm -f "${out:?}/meta.json" "${out:?}"/{automerge-sync-state,automerge-apply-cost,yrs-random-insert,loro-peer-probe}.csv
+rm -f "${out:?}/meta.json" "${out:?}"/{automerge-sync-state,automerge-apply-cost,yrs-random-insert,loro-peer-probe,automerge-sibling-order}.csv
 
 # Build first, so that no compile runs while a probe measures time.
 cargo build --release --quiet --manifest-path tools/findings/Cargo.toml
@@ -29,6 +29,10 @@ for probe in automerge-sync-state automerge-apply-cost yrs-random-insert; do
 done
 echo ">>> findings: loro-peer-probe" >&2
 tools/loro-peer-probe/target/release/loro-peer-probe 10000 > "$out/loro-peer-probe.csv"
+# This probe does not measure time and does not read the trace. It fails if
+# the order of concurrent inserts is not the order that its README entry gives.
+echo ">>> findings: automerge-sibling-order" >&2
+tools/findings/target/release/automerge-sibling-order > "$out/automerge-sibling-order.csv"
 
 # The library versions are the exact pins in each probe's Cargo.toml.
 pin() { sed -n "s/^$1 *= *\"=\\([^\"]*\\)\".*/\\1/p" "$2"; }

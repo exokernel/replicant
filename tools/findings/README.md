@@ -100,6 +100,56 @@ empty. In the paper cells, that repetition also had a writer that continued the
 baseline author's history (a fault fixed later), so the archive cannot tell whether
 the document or the author matters. See `data/divergence-grid-2026-11-07/`.
 
+### `automerge-sibling-order`: concurrent inserts at one position go greatest op ID first
+
+Automerge 0.12.0. This finding does not change a result of the sweep. It checks a
+claim of the thesis proposal. The binary format spec does not give the rule. It
+refers to the reference implementation.
+
+Two or three replicas fork a base document with the text "The cat". Each inserts
+one character at index 4, so each insert has the space as its reference element.
+Each replica has an explicit actor ID, and puts values on a map key before its
+insert to set its counter. The probe merges in each order, gives the changes to an
+observer document in each order (one `apply_changes` call for each replica, and one
+call for all), and saves and loads the first merge. All texts in a case are equal:
+
+| Case | Inserts (counter@actor byte) | Merged text |
+|---|---|---|
+| 1 | A `q` 10@02, B `l` 9@01 | `The qlcat` |
+| 2 | A `q` 10@01, B `l` 9@02 | `The qlcat` |
+| 2b | A `q` 14@01, B `l` 9@02 | `The qlcat` |
+| 3 | A `q` 9@02, B `l` 10@01 | `The lqcat` |
+| 4 | A `q` 9@02, B `l` 9@01 | `The qlcat` |
+| 4b | A `q` 12@02, B `l` 12@01 | `The qlcat` |
+| 5 | A `q` 9@01, B `l` 9@02 | `The lqcat` |
+| 6 | A `q` 9@01, B `l` 10@02, C `x` 9@03 | `The lxqcat` |
+
+The rule: the sibling with the greatest op ID comes first, nearest the reference
+element. An op ID compares by counter first, then by actor ID bytes (cases 2 and 3:
+the counter wins against the actor). This is the Lamport-timestamp RGA of Kleppmann
+and Beresford's JSON CRDT paper.
+
+Why, from the source of 0.12.0 (crates.io, VCS commit `37545d0d`):
+
+- `src/op_set2/change/batch.rs`, `Untangler::untangle_inserts` (lines 152-169). A
+  remote apply walks the ops of the list in document order. It keeps the new
+  inserts that wait for a position on a stack, in ascending op ID order. At each
+  insert of the document, it first places every waiting insert with a greater op
+  ID. Thus a new insert skips the siblings with a greater op ID, and their
+  descendants, which also have greater op IDs.
+- `OpId` is `(counter, actor index)` and compares counter first (`src/types.rs`,
+  lines 430-444). The actor index is an index into the actor table of the
+  document. The table is a `Vec<ActorId>` that is kept sorted
+  (`Automerge::put_actor_ref`, `src/automerge.rs` line 1309). When a new actor goes
+  into the middle of the table, `OpSet::insert_actor` changes the index of each op
+  (`src/op_set2/op_set.rs` line 1385). `ActorId` derives `Ord` on its bytes. So the
+  index order is the byte order, and the order in which a document first sees the
+  actors does not matter. The observer rows of the probe check this.
+
+Not checked: inserts that make a subtree (a sibling with its own descendants),
+siblings that are deleted, and a loaded document with an actor table that is not
+sorted. The first two follow from the code above, but no probe runs them.
+
 ## Findings with no probe yet, seen in the grid
 
 - **Yrs: repetition 1 of one cell is about 2.5 times slower.** `random_position-1e5`
