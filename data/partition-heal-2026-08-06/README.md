@@ -32,7 +32,7 @@ the correction are archived here, because the pair is the evidence.
 
 (Means over both write patterns. Per-trial CV is 4-35%, so n=4 is within noise,
 n=6 is marginal, n=8 is solid — means separated by roughly 4-5 standard errors.
-No formal confidence intervals; see the statistical-rigor item in `TODO.md`.)
+No formal confidence intervals.)
 
 The bridge advantage **grows monotonically with cross-group edge count** while
 diameter moves the opposite way (bridge post-heal diameter 3, full-mesh 1). A
