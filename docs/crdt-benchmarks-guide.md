@@ -211,7 +211,7 @@ Run both sides of a comparison on one host, with no other heavy work.
 The traces are not in git. There are two ways to get them:
 
 - **Generate them.** `just gen-traces <clone>` needs a crdt-benchmarks clone at the pinned commit, npm, and access to GitHub. It gives byte-identical files.
-- **Unpack the archive.** `replicant-traces-v1.tar.gz` is 2.5 MB. Copy its `crdt-benchmarks/` and `editing-traces/` directories to `traces/`. It needs no generator tools. Its Zenodo DOI goes here when it is published.
+- **Download the archive.** `just fetch-traces` downloads `replicant-traces-v1.tar.gz` (2.5 MB) from the `traces-v1` release, and unpacks it to `traces/`. CI uses this. The Zenodo DOI goes here when it is published.
 
 Either way, each spec holds the SHA-256 of each trace, and a replay stops if a hash differs.
 
