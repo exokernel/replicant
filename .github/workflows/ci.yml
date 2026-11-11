@@ -63,7 +63,8 @@ jobs:
   # The real workloads, which the local gate leaves out, because their traces are
   # not in the repository. A library or driver change can break B3 or B4 and still
   # pass the tests. The replay checks the final content, so a wrong result fails
-  # this job. The times on a shared runner have no use.
+  # this job. The times on a shared runner have no use. It leaves out the heavy
+  # b4x100, which reached about 11.6 GB of memory (docs/replay.md).
   replay-suite:
     name: just replay-check
     runs-on: ubuntu-latest
@@ -81,7 +82,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - name: Download the archived traces
         run: just fetch-traces
-      - name: Run every workload once on every library
+      - name: Run each workload except b4x100 once on every library
         run: just replay-check
 
   # The deployment check that the local gate leaves out, because it needs a

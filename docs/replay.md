@@ -14,7 +14,8 @@ This file is the reference. For an explanation of the replay and its results, re
 # Make the trace files. They stay out of the repository, in traces/.
 just gen-traces ../crdt-benchmarks.git
 
-# Run all workloads on all libraries, in this process.
+# Run the crdt-benchmarks workloads on all libraries, in this process. This
+# leaves out the heavy b4x100. Add --include-heavy to run it.
 just replay --trials 6 --out results/replay/suite.jsonl
 
 # Run some workloads. A name that ends in a dot selects a group.
@@ -28,8 +29,12 @@ just replay --spec workloads/editing-traces.toml
 ```
 
 If you have no clone, `just fetch-traces` downloads the same files from the
-`traces-v1` release. `just replay-check` runs every workload once and checks its
+`traces-v1` release. `just replay-check` runs each workload once and checks its
 content. CI runs these two recipes, so a change that breaks a real workload fails CI.
+
+`replay-check` leaves out the one heavy workload, b4x100. It reached about 11.6 GB
+of memory, which is too much for a CI runner. To check it, run it locally:
+`just replay --only b4x100 --include-heavy --trials 1`.
 
 The clone must be at the commit that `tools/crdt-benchmarks/gen-traces.sh` names.
 The tools do not change the clone. They copy its commit to a gitignored directory

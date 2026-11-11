@@ -147,7 +147,7 @@ gen-traces clone:
 fetch-traces:
     scripts/fetch-traces.sh
 
-# Run all workloads once and check their content. The times have no use. Needs traces/.
+# Run each workload once, except the heavy b4x100, and check its content. The times have no use. Needs traces/.
 [group('data')]
 replay-check:
     cargo run --release --bin replay -- --trials 1 --no-memory --out /dev/null
